@@ -213,6 +213,13 @@ enum ChatGPTDOMProbe {
     static let startButtonClickFallbackScript = """
     (() => {
       \(coreScript)
+      const elements = VoiceKeyProbe.collectElements();
+      const snapshot = VoiceKeyProbe.snapshot(
+        elements,
+        window.location.href,
+        document.body ? document.body.innerText : ''
+      );
+      if (snapshot.state !== 'ready') return snapshot;
       const element = VoiceKeyProbe.findVoiceStartDOMElement();
       const point = VoiceKeyProbe.dispatchClick(element);
       return point ? { state: 'clicked', x: point.x, y: point.y, label: point.label } : { state: 'needsAttention', reason: 'Could not find a ChatGPT Voice DOM button to click.' };
@@ -224,7 +231,12 @@ enum ChatGPTDOMProbe {
       \(coreScript)
       const element = VoiceKeyProbe.findVoiceStopDOMElement();
       const point = VoiceKeyProbe.dispatchClick(element);
-      return point ? { state: 'clicked', x: point.x, y: point.y, label: point.label } : { state: 'needsAttention', reason: 'Could not find a ChatGPT Voice stop DOM button to click.' };
+      if (point) return { state: 'clicked', x: point.x, y: point.y, label: point.label };
+      return VoiceKeyProbe.snapshot(
+        VoiceKeyProbe.collectElements(),
+        window.location.href,
+        document.body ? document.body.innerText : ''
+      );
     })();
     """
 }

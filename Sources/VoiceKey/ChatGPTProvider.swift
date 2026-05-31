@@ -62,18 +62,7 @@ final class ChatGPTProvider: NSObject {
             let probe = ProbeResult(result)
             switch probe.state {
             case "clickable":
-                guard let x = probe.x, let y = probe.y else {
-                    self.updateStatus(.needsAttention("ChatGPT returned a stop control without a usable screen position."))
-                    self.windowController.show()
-                    return
-                }
-                self.log("Clicking ChatGPT stop control: \(probe.label ?? "unknown")")
-                guard self.windowController.nativeClickInWebView(x: x, y: y) else {
-                    self.updateStatus(.needsAttention("Could not send the stop click to ChatGPT Voice."))
-                    self.windowController.show()
-                    return
-                }
-                self.verifyVoiceStopped(remainingAttempts: 6)
+                self.clickStopButtonOnce()
             case "ready", "loginRequired", "needsAttention":
                 self.applySnapshot(probe, showAttention: true)
             default:
@@ -89,18 +78,7 @@ final class ChatGPTProvider: NSObject {
             let probe = ProbeResult(result)
             switch probe.state {
             case "clickable":
-                guard let x = probe.x, let y = probe.y else {
-                    self.updateStatus(.needsAttention("ChatGPT returned a voice control without a usable screen position."))
-                    self.windowController.show()
-                    return
-                }
-                self.log("Clicking ChatGPT Voice control: \(probe.label ?? "unknown")")
-                guard self.windowController.nativeClickInWebView(x: x, y: y) else {
-                    self.updateStatus(.needsAttention("Could not send the start click to ChatGPT Voice."))
-                    self.windowController.show()
-                    return
-                }
-                self.verifyVoiceStarted(remainingAttempts: 8)
+                self.clickStartButtonOnce()
             case "loginRequired":
                 self.updateStatus(.loginRequired)
                 self.windowController.show()
@@ -118,6 +96,48 @@ final class ChatGPTProvider: NSObject {
                     message: "ChatGPT did not return a usable voice-control probe result.",
                     retry: self.attemptStartVoice
                 )
+            }
+        }
+    }
+
+    private func clickStartButtonOnce() {
+        log("Sending one DOM click to ChatGPT Voice control.")
+        windowController.runJavaScript(ChatGPTDOMProbe.startButtonClickFallbackScript) { [weak self] result in
+            guard let self else { return }
+            let probe = ProbeResult(result)
+            switch probe.state {
+            case "clicked":
+                self.log("DOM-clicked ChatGPT Voice control: \(probe.label ?? "unknown")")
+                self.verifyVoiceStarted(remainingAttempts: 8)
+            case "loginRequired":
+                self.updateStatus(.loginRequired)
+                self.windowController.show()
+            case "voiceActive":
+                self.updateStatus(.voiceActive)
+            case "needsAttention":
+                self.updateStatus(.needsAttention(probe.reason ?? "Could not find ChatGPT Voice controls."))
+                self.windowController.show()
+            default:
+                self.updateStatus(.needsAttention("ChatGPT did not accept the Voice start click."))
+                self.windowController.show()
+            }
+        }
+    }
+
+    private func clickStopButtonOnce() {
+        log("Sending one DOM click to ChatGPT Voice stop control.")
+        windowController.runJavaScript(ChatGPTDOMProbe.stopButtonClickFallbackScript) { [weak self] result in
+            guard let self else { return }
+            let probe = ProbeResult(result)
+            switch probe.state {
+            case "clicked":
+                self.log("DOM-clicked ChatGPT Voice stop control: \(probe.label ?? "unknown")")
+                self.verifyVoiceStopped(remainingAttempts: 6)
+            case "ready", "loginRequired", "needsAttention", "voiceActive":
+                self.applySnapshot(probe, showAttention: true)
+            default:
+                self.updateStatus(.needsAttention("ChatGPT did not accept the Voice stop click."))
+                self.windowController.show()
             }
         }
     }
