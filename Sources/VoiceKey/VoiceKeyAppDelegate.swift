@@ -9,20 +9,15 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         provider.onStatusChange = { [weak self] status in
             self?.updateStatus(status)
         }
-        provider.onDebugChange = { [weak self] message in
-            self?.updateDebug(message)
-        }
         return provider
     }()
     private let statusMenuItem = NSMenuItem(title: "Status: Loading ChatGPT", action: nil, keyEquivalent: "")
-    private let debugMenuItem = NSMenuItem(title: "Debug: Idle | start clicks 0, stop clicks 0", action: nil, keyEquivalent: "")
     private let audioTipMenuItem = NSMenuItem(title: "Tip: Use headphones or non-speaker output to prevent voice loops", action: nil, keyEquivalent: "")
     private lazy var toggleMenuItem = NSMenuItem(
-        title: "Start ChatGPT Voice",
+        title: "Start/End ChatGPT Voice (F16)",
         action: #selector(toggleChatGPTVoice),
-        keyEquivalent: String(UnicodeScalar(NSF16FunctionKey)!)
+        keyEquivalent: ""
     )
-    private let endVoiceMenuItem = NSMenuItem(title: "End ChatGPT Voice", action: #selector(endChatGPTVoice), keyEquivalent: "")
     private let showMenuItem = NSMenuItem(title: "Show ChatGPT", action: #selector(showChatGPT), keyEquivalent: "")
     private let reloadMenuItem = NSMenuItem(title: "Reload ChatGPT", action: #selector(reloadChatGPT), keyEquivalent: "")
 
@@ -33,24 +28,45 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureMenuBar() {
-        statusItem.button?.title = ProviderStatus.loading.statusItemTitle
+        configureStatusItemIcon()
 
         let menu = NSMenu()
         statusMenuItem.isEnabled = false
-        debugMenuItem.isEnabled = false
         audioTipMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
-        menu.addItem(debugMenuItem)
         menu.addItem(audioTipMenuItem)
         menu.addItem(.separator())
-        toggleMenuItem.keyEquivalentModifierMask = []
         menu.addItem(toggleMenuItem)
-        menu.addItem(endVoiceMenuItem)
         menu.addItem(showMenuItem)
         menu.addItem(reloadMenuItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit VoiceKey", action: #selector(quit), keyEquivalent: "q"))
         statusItem.menu = menu
+    }
+
+    private func configureStatusItemIcon() {
+        statusItem.length = NSStatusItem.squareLength
+        guard let button = statusItem.button else { return }
+
+        if let image = loadMenuBarIcon() {
+            image.isTemplate = true
+            image.size = NSSize(width: 22, height: 18)
+            button.image = image
+            button.imagePosition = .imageOnly
+        } else {
+            button.title = ProviderStatus.loading.statusItemTitle
+        }
+        button.toolTip = "VoiceKey"
+    }
+
+    private func loadMenuBarIcon() -> NSImage? {
+        if let bundledURL = Bundle.main.url(forResource: "VoiceKeyMenuIcon", withExtension: "png") {
+            return NSImage(contentsOf: bundledURL)
+        }
+
+        let developmentURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Resources/VoiceKeyMenuIcon.png")
+        return NSImage(contentsOf: developmentURL)
     }
 
     private func registerDefaultHotKey() {
@@ -65,10 +81,6 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleChatGPTVoice() {
         chatGPT.toggleVoice()
-    }
-
-    @objc private func endChatGPTVoice() {
-        chatGPT.endVoice()
     }
 
     @objc private func showChatGPT() {
@@ -91,24 +103,12 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatus(_ status: ProviderStatus) {
-        statusItem.button?.title = status.statusItemTitle
+        statusItem.button?.toolTip = "VoiceKey - \(status.menuTitle)"
         statusMenuItem.title = "Status: \(status.menuTitle)"
-
-        switch status {
-        case .clickSent, .voiceActive, .stopping:
-            toggleMenuItem.title = "Stop ChatGPT Voice"
-        case .starting:
-            toggleMenuItem.title = "Starting ChatGPT Voice..."
-        default:
-            toggleMenuItem.title = "Start ChatGPT Voice"
-        }
+        toggleMenuItem.title = "Start/End ChatGPT Voice (F16)"
 
         if let detail = status.detail {
             statusMenuItem.title = "Status: \(status.menuTitle) - \(detail)"
         }
-    }
-
-    private func updateDebug(_ message: String) {
-        debugMenuItem.title = message
     }
 }

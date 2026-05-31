@@ -18,5 +18,8 @@ rm -rf "$APP"
 mkdir -p "$MACOS" "$RESOURCES"
 cp "$ROOT/.build/release/VoiceKey" "$MACOS/VoiceKey"
 cp "$ROOT/Info.plist" "$CONTENTS/Info.plist"
+if [[ -d "$ROOT/Resources" ]]; then
+  cp -R "$ROOT/Resources/." "$RESOURCES/"
+fi
 
 echo "$APP"

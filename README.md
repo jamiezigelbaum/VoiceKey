@@ -20,6 +20,7 @@ the next provider once the app shell and trusted-click bridge are solid.
 This is an early native Swift/AppKit app with:
 
 - menu bar controls
+- bundled menu bar and app icon
 - F16 global hotkey
 - persistent `WKWebView` session for `chatgpt.com`
 - WebKit microphone permission hook
@@ -54,8 +55,8 @@ open .build/VoiceKey.app
 4. Grant microphone permission when prompted.
 5. Press `F16` to toggle ChatGPT Voice.
 
-The menu shows the currently assigned voice hotkey next to the start/stop
-command. In this build the default is `F16`.
+The menu shows the currently assigned voice hotkey in the start/end command. In
+this build the default is `F16`.
 
 If ChatGPT appears to hear phrases you did not say, change macOS audio output to
 headphones or another output path that the microphone cannot hear. VoiceKey
