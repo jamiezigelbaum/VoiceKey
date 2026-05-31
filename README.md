@@ -21,8 +21,9 @@ This is an early native Swift/AppKit app with:
 
 - menu bar controls
 - bundled app icon
-- dynamic menu bar icon that reflects the configured hotkey
-- F16 global hotkey
+- dynamic menu bar icon that reflects the configured hotkey and provider state
+- configurable global hotkey, defaulting to F16
+- settings window for recording a new hotkey
 - persistent `WKWebView` session for `chatgpt.com`
 - WebKit microphone permission hook
 - DOM-to-native-click bridge for ChatGPT Voice controls
@@ -61,7 +62,9 @@ brings the window forward when sign-in is needed or when you choose
 `Show ChatGPT`.
 
 The menu shows the currently assigned voice hotkey in the native shortcut column.
-In this build the default is `F16`.
+The menu bar icon shows a compact version of the same hotkey, plus a simple
+shape state: ready, loading, attention, or voice active. Choose `Settings...` to
+record a different global hotkey.
 
 If ChatGPT appears to hear phrases you did not say, change macOS audio output to
 headphones or another output path that the microphone cannot hear. VoiceKey
