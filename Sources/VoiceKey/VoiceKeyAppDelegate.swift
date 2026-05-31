@@ -75,7 +75,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         statusMenuItem.title = "Status: \(status.menuTitle)"
 
         switch status {
-        case .voiceActive, .stopping:
+        case .clickSent, .voiceActive, .stopping:
             toggleMenuItem.title = "Stop ChatGPT Voice"
         case .starting:
             toggleMenuItem.title = "Starting ChatGPT Voice..."

@@ -5,6 +5,7 @@ enum ProviderStatus: Equatable {
     case loginRequired
     case ready
     case starting
+    case clickSent
     case voiceActive
     case stopping
     case needsAttention(String)
@@ -19,6 +20,8 @@ enum ProviderStatus: Equatable {
             return "Ready"
         case .starting:
             return "Starting voice"
+        case .clickSent:
+            return "Voice click sent"
         case .voiceActive:
             return "Voice active"
         case .stopping:
@@ -38,6 +41,8 @@ enum ProviderStatus: Equatable {
             return "VK Ready"
         case .starting:
             return "VK Starting"
+        case .clickSent:
+            return "VK Sent"
         case .voiceActive:
             return "VK Voice"
         case .stopping:
