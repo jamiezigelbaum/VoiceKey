@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import WebKit
 
 final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
@@ -69,7 +70,13 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
         }
     }
 
-    func nativeClickInWebView(x: Double, y: Double) {
+    @discardableResult
+    func nativeClickInWebView(x: Double, y: Double) -> Bool {
+        guard requestAccessibilityPermissionIfNeeded() else {
+            onDiagnostic?("Accessibility permission is required before VoiceKey can send a trusted click.")
+            return false
+        }
+
         show()
         let webPoint = Self.appKitPointForDOMPoint(
             x: x,
@@ -79,17 +86,28 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
         let windowPoint = webView.convert(webPoint, to: nil)
         guard let screenPoint = window.contentView?.convert(windowPoint, to: nil) else {
             onDiagnostic?("Could not convert DOM click point to a screen point.")
-            return
+            return false
         }
         let location = window.convertPoint(toScreen: screenPoint)
         onDiagnostic?(
             "Native click DOM=(\(Int(x)),\(Int(y))) view=(\(Int(webPoint.x)),\(Int(webPoint.y))) screen=(\(Int(location.x)),\(Int(location.y)))"
         )
         clickScreenPoint(location)
+        return true
     }
 
     static func appKitPointForDOMPoint(x: Double, y: Double, webViewHeight: CGFloat) -> NSPoint {
         NSPoint(x: x, y: Double(webViewHeight) - y)
+    }
+
+    func requestAccessibilityPermissionIfNeeded() -> Bool {
+        guard AXIsProcessTrusted() == false else { return true }
+
+        let options = [
+            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
+        ] as CFDictionary
+        AXIsProcessTrustedWithOptions(options)
+        return false
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

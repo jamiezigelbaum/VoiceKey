@@ -14,6 +14,7 @@ let package = Package(
         .executableTarget(
             name: "VoiceKey",
             linkerSettings: [
+                .linkedFramework("ApplicationServices"),
                 .linkedFramework("AppKit"),
                 .linkedFramework("Carbon"),
                 .linkedFramework("WebKit")

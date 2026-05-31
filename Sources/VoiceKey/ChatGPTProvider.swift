@@ -68,7 +68,11 @@ final class ChatGPTProvider: NSObject {
                     return
                 }
                 self.log("Clicking ChatGPT stop control: \(probe.label ?? "unknown")")
-                self.windowController.nativeClickInWebView(x: x, y: y)
+                guard self.windowController.nativeClickInWebView(x: x, y: y) else {
+                    self.updateStatus(.needsAttention(Self.accessibilityPermissionMessage))
+                    self.windowController.show()
+                    return
+                }
                 self.verifyVoiceStopped(remainingAttempts: 6)
             case "ready", "loginRequired", "needsAttention":
                 self.applySnapshot(probe, showAttention: true)
@@ -91,7 +95,11 @@ final class ChatGPTProvider: NSObject {
                     return
                 }
                 self.log("Clicking ChatGPT Voice control: \(probe.label ?? "unknown")")
-                self.windowController.nativeClickInWebView(x: x, y: y)
+                guard self.windowController.nativeClickInWebView(x: x, y: y) else {
+                    self.updateStatus(.needsAttention(Self.accessibilityPermissionMessage))
+                    self.windowController.show()
+                    return
+                }
                 self.verifyVoiceStarted(remainingAttempts: 8)
             case "loginRequired":
                 self.updateStatus(.loginRequired)
@@ -204,6 +212,8 @@ final class ChatGPTProvider: NSObject {
     private func log(_ message: String) {
         NSLog("[VoiceKey] ChatGPT: %@", message)
     }
+
+    private static let accessibilityPermissionMessage = "VoiceKey needs Accessibility permission to click ChatGPT Voice. Enable VoiceKey in System Settings > Privacy & Security > Accessibility, then press F16 again."
 }
 
 private struct ProbeResult {
