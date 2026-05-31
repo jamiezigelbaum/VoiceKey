@@ -6,7 +6,7 @@
   <key>CFBundleExecutable</key>
   <string>VoiceKey</string>
   <key>CFBundleIdentifier</key>
-  <string>com.voicekey.app</string>
+  <string>com.zigelbaum.VoiceKey</string>
   <key>CFBundleIconFile</key>
   <string>VoiceKey.icns</string>
   <key>CFBundleName</key>

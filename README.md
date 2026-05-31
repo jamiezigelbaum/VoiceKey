@@ -6,6 +6,28 @@ experiences without keeping a browser window open.
 The first provider is ChatGPT Voice on `chatgpt.com`. Claude Web is planned as
 the next provider once the app shell and trusted-click bridge are solid.
 
+## Install
+
+Download `VoiceKey-0.1.0-macOS.dmg` from the latest GitHub Release, open it,
+and drag `VoiceKey.app` into `/Applications`.
+
+On first launch:
+
+1. Choose `Show ChatGPT` from the menu bar item.
+2. Sign in to ChatGPT.
+3. Grant microphone and accessibility permissions if macOS asks.
+4. Press `F16` to toggle ChatGPT Voice.
+
+Homebrew Cask support is prepared for release builds:
+
+```zsh
+brew tap jamiezigelbaum/voicekey
+brew install --cask voicekey
+```
+
+The tap is published separately from this repository after a signed release DMG
+exists.
+
 ## Goals
 
 - Self-contained native macOS menu bar app.
@@ -36,7 +58,7 @@ The next milestone is live testing against ChatGPT's current web UI after
 sign-in, especially first-run voice selection, microphone prompts, and end-call
 behavior.
 
-## Build
+## Build From Source
 
 ```zsh
 swift build
@@ -57,13 +79,16 @@ python3 -m venv /tmp/voicekey-icon-venv
 /tmp/voicekey-icon-venv/bin/python ./scripts/generate_app_icon.py
 ```
 
-## Setup
+To package a local release:
 
-1. Launch VoiceKey.
-2. Choose `Show ChatGPT` from the menu bar item.
-3. Sign in to ChatGPT in the VoiceKey window.
-4. Grant microphone permission when prompted.
-5. Press `F16` to toggle ChatGPT Voice from the menu bar.
+```zsh
+./scripts/package-release.zsh
+```
+
+See [docs/RELEASE.md](docs/RELEASE.md) for signing, notarization, GitHub
+Release, and Homebrew cask steps.
+
+## Usage
 
 VoiceKey keeps the ChatGPT window hidden during normal hotkey use. It only
 brings the window forward when sign-in is needed or when you choose
@@ -78,6 +103,12 @@ If ChatGPT appears to hear phrases you did not say, change macOS audio output to
 headphones or another output path that the microphone cannot hear. VoiceKey
 sends one start click per F16 press; repeated phantom turns are usually speaker
 audio feeding back into the microphone.
+
+## Privacy
+
+VoiceKey does not handle OpenAI passwords, OAuth tokens, or session cookies
+directly. Authentication happens through the provider's normal web login inside
+the app's web view. The web session is persisted by WebKit on your Mac.
 
 ## Architecture
 
