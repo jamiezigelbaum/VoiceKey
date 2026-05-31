@@ -74,6 +74,8 @@ final class ChatGPTProvider: NSObject {
             switch probe.state {
             case "clickable":
                 self.clickStopButtonOnce()
+            case "ready" where self.status == .clickSent || self.status == .voiceActive:
+                self.clickVoiceToggleToStop()
             case "ready", "loginRequired", "needsAttention":
                 self.applySnapshot(probe, showAttention: true)
             default:
@@ -152,6 +154,27 @@ final class ChatGPTProvider: NSObject {
                 self.applySnapshot(probe, showAttention: true)
             default:
                 self.updateStatus(.needsAttention("ChatGPT did not accept the Voice stop click."))
+                self.windowController.show()
+            }
+        }
+    }
+
+    private func clickVoiceToggleToStop() {
+        stopClickCount += 1
+        updateDebug("Stop/toggle click #\(stopClickCount)")
+        log("No explicit stop control found; clicking the visible ChatGPT Voice toggle once.")
+        windowController.runJavaScript(ChatGPTDOMProbe.voiceToggleClickScript) { [weak self] result in
+            guard let self else { return }
+            let probe = ProbeResult(result)
+            switch probe.state {
+            case "clicked":
+                self.log("DOM-clicked ChatGPT Voice toggle: \(probe.label ?? "unknown")")
+                self.observeVoiceStoppedAfterSingleClick()
+            case "needsAttention":
+                self.updateStatus(.needsAttention(probe.reason ?? "Could not find ChatGPT Voice controls."))
+                self.windowController.show()
+            default:
+                self.updateStatus(.needsAttention("ChatGPT did not accept the Voice toggle click."))
                 self.windowController.show()
             }
         }

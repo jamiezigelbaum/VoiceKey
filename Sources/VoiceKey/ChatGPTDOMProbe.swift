@@ -240,6 +240,16 @@ enum ChatGPTDOMProbe {
     })();
     """
 
+    static let voiceToggleClickScript = """
+    (() => {
+      \(coreScript)
+      const stopElement = VoiceKeyProbe.findVoiceStopDOMElement();
+      const startElement = VoiceKeyProbe.findVoiceStartDOMElement();
+      const point = VoiceKeyProbe.dispatchClick(stopElement || startElement);
+      return point ? { state: 'clicked', x: point.x, y: point.y, label: point.label } : { state: 'needsAttention', reason: 'Could not find a ChatGPT Voice toggle button to click.' };
+    })();
+    """
+
     static let diagnosticScript = """
     (() => {
       \(coreScript)
