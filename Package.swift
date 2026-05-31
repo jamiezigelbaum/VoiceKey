@@ -18,6 +18,13 @@ let package = Package(
                 .linkedFramework("Carbon"),
                 .linkedFramework("WebKit")
             ]
+        ),
+        .testTarget(
+            name: "VoiceKeyTests",
+            dependencies: ["VoiceKey"],
+            linkerSettings: [
+                .linkedFramework("JavaScriptCore")
+            ]
         )
     ]
 )

@@ -5,6 +5,8 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
     let webView: WKWebView
     private let window: NSWindow
     private var readyCallbacks: [(WKWebView) -> Void] = []
+    var onNavigationFinished: (() -> Void)?
+    var onDiagnostic: ((String) -> Void)?
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -30,10 +32,11 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func load(_ url: URL) {
-        if webView.url?.host == url.host {
+        if webView.url?.absoluteString == url.absoluteString, webView.isLoading == false {
             flushReadyCallbacks()
             return
         }
+        onDiagnostic?("Loading \(url.absoluteString)")
         webView.load(URLRequest(url: url))
     }
 
@@ -59,6 +62,9 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func runJavaScript(_ source: String, completion: ((Any?) -> Void)? = nil) {
         webView.evaluateJavaScript(source) { result, error in
+            if let error {
+                self.onDiagnostic?("JavaScript probe failed: \(error.localizedDescription)")
+            }
             completion?(error == nil ? result : nil)
         }
     }
@@ -75,6 +81,7 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             self?.flushReadyCallbacks()
+            self?.onNavigationFinished?()
         }
     }
 
@@ -86,8 +93,10 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
         decisionHandler: @escaping (WKPermissionDecision) -> Void
     ) {
         if origin.host.contains("chatgpt.com") || origin.host.contains("openai.com") {
+            onDiagnostic?("Granting microphone capture permission for \(origin.host)")
             decisionHandler(.grant)
         } else {
+            onDiagnostic?("Prompting for microphone capture permission for \(origin.host)")
             decisionHandler(.prompt)
         }
     }

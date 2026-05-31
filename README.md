@@ -17,16 +17,21 @@ the next provider once the app shell and trusted-click bridge are solid.
 
 ## Current Status
 
-This is the first scaffold. It builds a native Swift/AppKit app with:
+This is an early native Swift/AppKit app with:
 
 - menu bar controls
 - F16 global hotkey
 - persistent `WKWebView` session for `chatgpt.com`
 - WebKit microphone permission hook
-- DOM-to-native-click bridge for the ChatGPT Voice button
+- DOM-to-native-click bridge for ChatGPT Voice controls
+- visible provider status for loading, sign-in required, ready, starting, active,
+  stopping, and needs-attention states
+- fixture-tested DOM probes that distinguish ChatGPT Voice Mode from text
+  dictation controls
 
-The next milestone is live testing against ChatGPT's current web UI and hardening
-selectors/retry behavior around login, first-run voice selection, and end-call.
+The next milestone is live testing against ChatGPT's current web UI after
+sign-in, especially first-run voice selection, microphone prompts, and end-call
+behavior.
 
 ## Build
 
@@ -56,7 +61,8 @@ VoiceKey is intentionally small:
 - `VoiceKeyAppDelegate`: menu bar and hotkey lifecycle.
 - `GlobalHotKey`: Carbon `RegisterEventHotKey` wrapper.
 - `WebWindowController`: persistent `WKWebView`, mic permission, native click bridge.
-- `ChatGPTProvider`: provider-specific DOM probes and start/stop behavior.
+- `ChatGPTProvider`: provider-specific status, retry, and start/stop behavior.
+- `ChatGPTDOMProbe`: ChatGPT DOM selectors shared by the app and fixture tests.
 
 Provider support should stay behind a simple shape:
 
