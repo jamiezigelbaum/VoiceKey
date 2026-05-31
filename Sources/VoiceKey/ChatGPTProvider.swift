@@ -35,7 +35,6 @@ final class ChatGPTProvider: NSObject {
     func reload() {
         updateStatus(.loading)
         windowController.webView.reload()
-        show()
     }
 
     func toggleVoice() {
@@ -56,7 +55,6 @@ final class ChatGPTProvider: NSObject {
     private func startVoice() {
         updateStatus(.starting)
         updateDebug("Start requested")
-        windowController.show()
         windowController.load(URL(string: "https://chatgpt.com/")!)
 
         windowController.runWhenReady { [weak self] _ in
@@ -67,7 +65,6 @@ final class ChatGPTProvider: NSObject {
     private func stopVoice() {
         updateStatus(.stopping)
         updateDebug("Stop requested")
-        windowController.show()
         windowController.runJavaScript(ChatGPTDOMProbe.stopButtonScript) { [weak self] result in
             guard let self else { return }
             let probe = ProbeResult(result)
@@ -80,7 +77,6 @@ final class ChatGPTProvider: NSObject {
                 self.applySnapshot(probe, showAttention: true)
             default:
                 self.updateStatus(.needsAttention("Could not find an active ChatGPT Voice session to stop."))
-                self.windowController.show()
             }
         }
     }
@@ -131,10 +127,8 @@ final class ChatGPTProvider: NSObject {
                 self.updateStatus(.voiceActive)
             case "needsAttention":
                 self.updateStatus(.needsAttention(probe.reason ?? "Could not find ChatGPT Voice controls."))
-                self.windowController.show()
             default:
                 self.updateStatus(.needsAttention("ChatGPT did not accept the Voice start click."))
-                self.windowController.show()
             }
         }
     }
@@ -154,7 +148,6 @@ final class ChatGPTProvider: NSObject {
                 self.applySnapshot(probe, showAttention: true)
             default:
                 self.updateStatus(.needsAttention("ChatGPT did not accept the Voice stop click."))
-                self.windowController.show()
             }
         }
     }
@@ -172,10 +165,8 @@ final class ChatGPTProvider: NSObject {
                 self.observeVoiceStoppedAfterSingleClick()
             case "needsAttention":
                 self.updateStatus(.needsAttention(probe.reason ?? "Could not find ChatGPT Voice controls."))
-                self.windowController.show()
             default:
                 self.updateStatus(.needsAttention("ChatGPT did not accept the Voice toggle click."))
-                self.windowController.show()
             }
         }
     }
@@ -218,7 +209,6 @@ final class ChatGPTProvider: NSObject {
             let probe = ProbeResult(result)
             if probe.state == "voiceActive" {
                 self.updateStatus(.needsAttention("ChatGPT Voice still appears active after one stop click."))
-                self.windowController.show()
                 return
             }
             self.applySnapshot(probe, showAttention: true)
@@ -247,10 +237,8 @@ final class ChatGPTProvider: NSObject {
             updateStatus(.ready)
         case "needsAttention":
             updateStatus(.needsAttention(probe.reason ?? "Could not find ChatGPT Voice controls."))
-            if showAttention { windowController.show() }
         default:
             updateStatus(.needsAttention("ChatGPT status probe did not return a recognized state."))
-            if showAttention { windowController.show() }
         }
     }
 
@@ -261,7 +249,6 @@ final class ChatGPTProvider: NSObject {
     ) {
         guard remainingAttempts > 0 else {
             updateStatus(.needsAttention(message))
-            windowController.show()
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
