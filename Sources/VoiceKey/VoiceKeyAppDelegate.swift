@@ -9,10 +9,15 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         provider.onStatusChange = { [weak self] status in
             self?.updateStatus(status)
         }
+        provider.onDebugChange = { [weak self] message in
+            self?.updateDebug(message)
+        }
         return provider
     }()
     private let statusMenuItem = NSMenuItem(title: "Status: Loading ChatGPT", action: nil, keyEquivalent: "")
+    private let debugMenuItem = NSMenuItem(title: "Debug: Idle | start clicks 0, stop clicks 0", action: nil, keyEquivalent: "")
     private let toggleMenuItem = NSMenuItem(title: "Start ChatGPT Voice", action: #selector(toggleChatGPTVoice), keyEquivalent: "")
+    private let endVoiceMenuItem = NSMenuItem(title: "End ChatGPT Voice", action: #selector(endChatGPTVoice), keyEquivalent: "")
     private let showMenuItem = NSMenuItem(title: "Show ChatGPT", action: #selector(showChatGPT), keyEquivalent: "")
     private let reloadMenuItem = NSMenuItem(title: "Reload ChatGPT", action: #selector(reloadChatGPT), keyEquivalent: "")
 
@@ -27,9 +32,12 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         statusMenuItem.isEnabled = false
+        debugMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
+        menu.addItem(debugMenuItem)
         menu.addItem(.separator())
         menu.addItem(toggleMenuItem)
+        menu.addItem(endVoiceMenuItem)
         menu.addItem(showMenuItem)
         menu.addItem(reloadMenuItem)
         menu.addItem(.separator())
@@ -49,6 +57,10 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleChatGPTVoice() {
         chatGPT.toggleVoice()
+    }
+
+    @objc private func endChatGPTVoice() {
+        chatGPT.endVoice()
     }
 
     @objc private func showChatGPT() {
@@ -86,5 +98,9 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         if let detail = status.detail {
             statusMenuItem.title = "Status: \(status.menuTitle) - \(detail)"
         }
+    }
+
+    private func updateDebug(_ message: String) {
+        debugMenuItem.title = message
     }
 }

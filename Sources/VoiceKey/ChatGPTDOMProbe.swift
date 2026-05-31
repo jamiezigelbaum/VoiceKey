@@ -239,4 +239,26 @@ enum ChatGPTDOMProbe {
       );
     })();
     """
+
+    static let diagnosticScript = """
+    (() => {
+      \(coreScript)
+      const elements = VoiceKeyProbe.collectElements();
+      const snapshot = VoiceKeyProbe.snapshot(
+        elements,
+        window.location.href,
+        document.body ? document.body.innerText : ''
+      );
+      const start = VoiceKeyProbe.pointFor(VoiceKeyProbe.findVoiceStartElement(elements));
+      const stop = VoiceKeyProbe.pointFor(VoiceKeyProbe.findVoiceStopElement(elements));
+      return {
+        state: snapshot.state,
+        reason: snapshot.reason || null,
+        startLabel: start ? start.label : null,
+        stopLabel: stop ? stop.label : null,
+        title: document.title,
+        url: window.location.href
+      };
+    })();
+    """
 }
