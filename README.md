@@ -20,7 +20,8 @@ the next provider once the app shell and trusted-click bridge are solid.
 This is an early native Swift/AppKit app with:
 
 - menu bar controls
-- bundled menu bar and app icon
+- bundled app icon
+- dynamic menu bar icon that reflects the configured hotkey
 - F16 global hotkey
 - persistent `WKWebView` session for `chatgpt.com`
 - WebKit microphone permission hook

@@ -50,25 +50,9 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         statusItem.length = NSStatusItem.squareLength
         guard let button = statusItem.button else { return }
 
-        if let image = loadMenuBarIcon() {
-            image.isTemplate = true
-            image.size = NSSize(width: 22, height: 18)
-            button.image = image
-            button.imagePosition = .imageOnly
-        } else {
-            button.title = ProviderStatus.loading.statusItemTitle
-        }
+        button.image = MenuBarIconRenderer.image(for: voiceHotKey)
+        button.imagePosition = .imageOnly
         button.toolTip = "VoiceKey"
-    }
-
-    private func loadMenuBarIcon() -> NSImage? {
-        if let bundledURL = Bundle.main.url(forResource: "VoiceKeyMenuIcon", withExtension: "png") {
-            return NSImage(contentsOf: bundledURL)
-        }
-
-        let developmentURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("Resources/VoiceKeyMenuIcon.png")
-        return NSImage(contentsOf: developmentURL)
     }
 
     private func registerDefaultHotKey() {
