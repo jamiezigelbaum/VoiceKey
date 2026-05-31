@@ -54,6 +54,11 @@ open .build/VoiceKey.app
 4. Grant microphone permission when prompted.
 5. Press `F16` to toggle ChatGPT Voice.
 
+If ChatGPT appears to hear phrases you did not say, change macOS audio output to
+headphones or another output path that the microphone cannot hear. VoiceKey
+sends one start click per F16 press; repeated phantom turns are usually speaker
+audio feeding back into the microphone.
+
 ## Architecture
 
 VoiceKey is intentionally small:

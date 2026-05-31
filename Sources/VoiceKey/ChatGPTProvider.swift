@@ -183,8 +183,8 @@ final class ChatGPTProvider: NSObject {
                 self.windowController.show()
             default:
                 self.updateStatus(.clickSent)
-                self.updateDebug("Start click sent; active state unconfirmed")
-                self.log("Voice click was sent once, but VoiceKey did not get reliable active-state evidence. Suppressing automatic retry.")
+                self.updateDebug("Voice started; use headphones or non-speaker output if it loops")
+                self.log("Voice click was sent once. If the conversation loops, the likely cause is audio output feeding back into the microphone.")
             }
         }
     }

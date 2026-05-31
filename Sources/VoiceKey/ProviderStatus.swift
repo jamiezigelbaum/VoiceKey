@@ -21,7 +21,7 @@ enum ProviderStatus: Equatable {
         case .starting:
             return "Starting voice"
         case .clickSent:
-            return "Voice click sent"
+            return "Voice started"
         case .voiceActive:
             return "Voice active"
         case .stopping:
@@ -42,7 +42,7 @@ enum ProviderStatus: Equatable {
         case .starting:
             return "VK Starting"
         case .clickSent:
-            return "VK Sent"
+            return "VK Voice"
         case .voiceActive:
             return "VK Voice"
         case .stopping:

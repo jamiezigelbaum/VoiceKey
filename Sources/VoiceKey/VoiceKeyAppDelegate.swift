@@ -16,6 +16,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }()
     private let statusMenuItem = NSMenuItem(title: "Status: Loading ChatGPT", action: nil, keyEquivalent: "")
     private let debugMenuItem = NSMenuItem(title: "Debug: Idle | start clicks 0, stop clicks 0", action: nil, keyEquivalent: "")
+    private let audioTipMenuItem = NSMenuItem(title: "Tip: Use headphones or non-speaker output to prevent voice loops", action: nil, keyEquivalent: "")
     private let toggleMenuItem = NSMenuItem(title: "Start ChatGPT Voice", action: #selector(toggleChatGPTVoice), keyEquivalent: "")
     private let endVoiceMenuItem = NSMenuItem(title: "End ChatGPT Voice", action: #selector(endChatGPTVoice), keyEquivalent: "")
     private let showMenuItem = NSMenuItem(title: "Show ChatGPT", action: #selector(showChatGPT), keyEquivalent: "")
@@ -33,8 +34,10 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         statusMenuItem.isEnabled = false
         debugMenuItem.isEnabled = false
+        audioTipMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
         menu.addItem(debugMenuItem)
+        menu.addItem(audioTipMenuItem)
         menu.addItem(.separator())
         menu.addItem(toggleMenuItem)
         menu.addItem(endVoiceMenuItem)
