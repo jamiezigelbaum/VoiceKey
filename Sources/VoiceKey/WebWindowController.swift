@@ -5,6 +5,7 @@ import WebKit
 final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
     let webView: WKWebView
     private let window: NSWindow
+    private let visibleFrame: NSRect
     private var readyCallbacks: [(WKWebView) -> Void] = []
     var onNavigationFinished: (() -> Void)?
     var onDiagnostic: ((String) -> Void)?
@@ -16,12 +17,15 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
         configuration.mediaTypesRequiringUserActionForPlayback = []
 
         webView = WKWebView(frame: .zero, configuration: configuration)
-        window = NSWindow(
+        let initialWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1100, height: 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
+        initialWindow.center()
+        window = initialWindow
+        visibleFrame = initialWindow.frame
 
         super.init()
 
@@ -29,7 +33,6 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
         webView.uiDelegate = self
         window.title = "VoiceKey"
         window.contentView = webView
-        window.center()
     }
 
     func load(_ url: URL) {
@@ -43,7 +46,18 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func show() {
         NSApplication.shared.activate(ignoringOtherApps: true)
+        window.alphaValue = 1
+        window.setFrame(visibleFrame, display: false)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    func prepareForHiddenInteraction() {
+        guard window.isVisible == false || window.alphaValue < 1 else { return }
+
+        let hiddenFrame = hiddenInteractionFrame()
+        window.setFrame(hiddenFrame, display: false)
+        window.alphaValue = 0.01
+        window.orderFrontRegardless()
     }
 
     func ensureVisibleForSetupIfNeeded() {
@@ -128,6 +142,16 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
         let callbacks = readyCallbacks
         readyCallbacks.removeAll()
         callbacks.forEach { $0(webView) }
+    }
+
+    private func hiddenInteractionFrame() -> NSRect {
+        let referenceFrame = NSScreen.main?.frame ?? visibleFrame
+        return NSRect(
+            x: referenceFrame.maxX + 200,
+            y: referenceFrame.maxY + 200,
+            width: visibleFrame.width,
+            height: visibleFrame.height
+        )
     }
 
     private func clickScreenPoint(_ point: NSPoint) {

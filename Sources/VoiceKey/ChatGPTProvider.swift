@@ -55,6 +55,7 @@ final class ChatGPTProvider: NSObject {
     private func startVoice() {
         updateStatus(.starting)
         updateDebug("Start requested")
+        windowController.prepareForHiddenInteraction()
         windowController.load(URL(string: "https://chatgpt.com/")!)
 
         windowController.runWhenReady { [weak self] _ in
@@ -65,6 +66,7 @@ final class ChatGPTProvider: NSObject {
     private func stopVoice() {
         updateStatus(.stopping)
         updateDebug("Stop requested")
+        windowController.prepareForHiddenInteraction()
         windowController.runJavaScript(ChatGPTDOMProbe.stopButtonScript) { [weak self] result in
             guard let self else { return }
             let probe = ProbeResult(result)

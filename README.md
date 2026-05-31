@@ -59,8 +59,8 @@ VoiceKey keeps the ChatGPT window hidden during normal hotkey use. It only
 brings the window forward when sign-in is needed or when you choose
 `Show ChatGPT`.
 
-The menu shows the currently assigned voice hotkey in the start/end command. In
-this build the default is `F16`.
+The menu shows the currently assigned voice hotkey in the native shortcut column.
+In this build the default is `F16`.
 
 If ChatGPT appears to hear phrases you did not say, change macOS audio output to
 headphones or another output path that the microphone cannot hear. VoiceKey

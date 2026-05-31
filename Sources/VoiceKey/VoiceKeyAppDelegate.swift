@@ -2,6 +2,7 @@ import AppKit
 import Carbon
 
 final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
+    private let voiceHotKey = HotKeyConfiguration.voiceToggle
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var hotKey: GlobalHotKey?
     private lazy var chatGPT: ChatGPTProvider = {
@@ -14,9 +15,9 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private let statusMenuItem = NSMenuItem(title: "Status: Loading ChatGPT", action: nil, keyEquivalent: "")
     private let audioTipMenuItem = NSMenuItem(title: "Tip: Use headphones or non-speaker output to prevent voice loops", action: nil, keyEquivalent: "")
     private lazy var toggleMenuItem = NSMenuItem(
-        title: "Start/End ChatGPT Voice (F16)",
+        title: "Start/End ChatGPT Voice",
         action: #selector(toggleChatGPTVoice),
-        keyEquivalent: ""
+        keyEquivalent: voiceHotKey.menuKeyEquivalent
     )
     private let showMenuItem = NSMenuItem(title: "Show ChatGPT", action: #selector(showChatGPT), keyEquivalent: "")
     private let reloadMenuItem = NSMenuItem(title: "Reload ChatGPT", action: #selector(reloadChatGPT), keyEquivalent: "")
@@ -36,6 +37,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(statusMenuItem)
         menu.addItem(audioTipMenuItem)
         menu.addItem(.separator())
+        configureVoiceHotKeyMenuItem()
         menu.addItem(toggleMenuItem)
         menu.addItem(showMenuItem)
         menu.addItem(reloadMenuItem)
@@ -71,12 +73,18 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
     private func registerDefaultHotKey() {
         do {
-            hotKey = try GlobalHotKey(keyCode: UInt32(kVK_F16), modifiers: 0) { [weak self] in
+            hotKey = try GlobalHotKey(keyCode: voiceHotKey.keyCode, modifiers: voiceHotKey.carbonModifiers) { [weak self] in
                 self?.toggleChatGPTVoice()
             }
         } catch {
             presentError("Could not register F16 hotkey: \(error.localizedDescription)")
         }
+    }
+
+    private func configureVoiceHotKeyMenuItem() {
+        toggleMenuItem.title = "Start/End ChatGPT Voice"
+        toggleMenuItem.keyEquivalent = voiceHotKey.menuKeyEquivalent
+        toggleMenuItem.keyEquivalentModifierMask = voiceHotKey.menuModifierMask
     }
 
     @objc private func toggleChatGPTVoice() {
@@ -105,7 +113,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private func updateStatus(_ status: ProviderStatus) {
         statusItem.button?.toolTip = "VoiceKey - \(status.menuTitle)"
         statusMenuItem.title = "Status: \(status.menuTitle)"
-        toggleMenuItem.title = "Start/End ChatGPT Voice (F16)"
+        configureVoiceHotKeyMenuItem()
 
         if let detail = status.detail {
             statusMenuItem.title = "Status: \(status.menuTitle) - \(detail)"
