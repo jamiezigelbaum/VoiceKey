@@ -2,7 +2,6 @@ import AppKit
 import Carbon
 
 final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
-    private let voiceHotKeyTitle = "F16"
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var hotKey: GlobalHotKey?
     private lazy var chatGPT: ChatGPTProvider = {
@@ -16,10 +15,13 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         return provider
     }()
     private let statusMenuItem = NSMenuItem(title: "Status: Loading ChatGPT", action: nil, keyEquivalent: "")
-    private lazy var hotKeyMenuItem = NSMenuItem(title: "Hotkey: \(voiceHotKeyTitle) toggles ChatGPT Voice", action: nil, keyEquivalent: "")
     private let debugMenuItem = NSMenuItem(title: "Debug: Idle | start clicks 0, stop clicks 0", action: nil, keyEquivalent: "")
     private let audioTipMenuItem = NSMenuItem(title: "Tip: Use headphones or non-speaker output to prevent voice loops", action: nil, keyEquivalent: "")
-    private lazy var toggleMenuItem = NSMenuItem(title: "Start ChatGPT Voice (\(voiceHotKeyTitle))", action: #selector(toggleChatGPTVoice), keyEquivalent: "")
+    private lazy var toggleMenuItem = NSMenuItem(
+        title: "Start ChatGPT Voice",
+        action: #selector(toggleChatGPTVoice),
+        keyEquivalent: String(UnicodeScalar(NSF16FunctionKey)!)
+    )
     private let endVoiceMenuItem = NSMenuItem(title: "End ChatGPT Voice", action: #selector(endChatGPTVoice), keyEquivalent: "")
     private let showMenuItem = NSMenuItem(title: "Show ChatGPT", action: #selector(showChatGPT), keyEquivalent: "")
     private let reloadMenuItem = NSMenuItem(title: "Reload ChatGPT", action: #selector(reloadChatGPT), keyEquivalent: "")
@@ -35,14 +37,13 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         statusMenuItem.isEnabled = false
-        hotKeyMenuItem.isEnabled = false
         debugMenuItem.isEnabled = false
         audioTipMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
-        menu.addItem(hotKeyMenuItem)
         menu.addItem(debugMenuItem)
         menu.addItem(audioTipMenuItem)
         menu.addItem(.separator())
+        toggleMenuItem.keyEquivalentModifierMask = []
         menu.addItem(toggleMenuItem)
         menu.addItem(endVoiceMenuItem)
         menu.addItem(showMenuItem)
@@ -95,11 +96,11 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
         switch status {
         case .clickSent, .voiceActive, .stopping:
-            toggleMenuItem.title = "Stop ChatGPT Voice (\(voiceHotKeyTitle))"
+            toggleMenuItem.title = "Stop ChatGPT Voice"
         case .starting:
             toggleMenuItem.title = "Starting ChatGPT Voice..."
         default:
-            toggleMenuItem.title = "Start ChatGPT Voice (\(voiceHotKeyTitle))"
+            toggleMenuItem.title = "Start ChatGPT Voice"
         }
 
         if let detail = status.detail {
