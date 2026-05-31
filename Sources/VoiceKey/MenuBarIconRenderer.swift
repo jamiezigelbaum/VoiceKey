@@ -26,7 +26,7 @@ enum MenuBarIconRenderer {
     }
 
     static func image(text: String, state: MenuBarIconState = .ready) -> NSImage {
-        let size = NSSize(width: 72, height: 48)
+        let size = NSSize(width: 144, height: 88)
         let image = NSImage(size: size)
 
         image.lockFocus()
@@ -35,72 +35,112 @@ enum MenuBarIconRenderer {
         NSColor.clear.setFill()
         NSRect(origin: .zero, size: size).fill()
 
-        let bubblePath = NSBezierPath(roundedRect: NSRect(x: 5, y: 12, width: 56, height: 29), xRadius: 14, yRadius: 14)
+        let isTemplate = state != .problem
+        let bubblePath = NSBezierPath(roundedRect: NSRect(x: 48, y: 27, width: 66, height: 42), xRadius: 17, yRadius: 17)
         bubblePath.appendTail()
-        NSColor.black.setFill()
-        bubblePath.fill()
 
-        drawState(state)
+        if isTemplate {
+            NSColor.black.setFill()
+            bubblePath.fill()
+        } else {
+            NSGraphicsContext.saveGraphicsState()
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.22)
+            shadow.shadowBlurRadius = 8
+            shadow.shadowOffset = NSSize(width: 0, height: -2)
+            shadow.set()
+            NSColor.white.setFill()
+            bubblePath.fill()
+            NSGraphicsContext.restoreGraphicsState()
+        }
+
+        drawState(state, isTemplate: isTemplate)
         let label = abbreviatedText(text)
         let attributes = textAttributes(for: label)
         let textSize = label.size(withAttributes: attributes)
         let textRect = NSRect(
-            x: 6 + (54 - textSize.width) / 2,
-            y: 19 + (13 - textSize.height) / 2,
+            x: 48 + (66 - textSize.width) / 2,
+            y: 39 + (16 - textSize.height) / 2,
             width: textSize.width,
             height: textSize.height
         )
 
-        NSGraphicsContext.current?.cgContext.setBlendMode(.clear)
-        label.draw(in: textRect, withAttributes: attributes)
-        NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+        if isTemplate {
+            NSGraphicsContext.current?.cgContext.setBlendMode(.clear)
+            label.draw(in: textRect, withAttributes: attributes)
+            NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+        } else {
+            label.draw(in: textRect, withAttributes: attributes)
+        }
 
-        image.isTemplate = true
-        image.size = NSSize(width: 24, height: 18)
+        image.isTemplate = isTemplate
+        image.size = NSSize(width: 36, height: 22)
         return image
     }
 
-    private static func drawState(_ state: MenuBarIconState) {
+    private static func drawState(_ state: MenuBarIconState, isTemplate: Bool) {
         switch state {
         case .ready:
             break
         case .loading:
-            drawLoadingDots()
+            drawLoadingArc()
         case .problem:
-            drawProblemBadge()
+            drawProblemBadge(isTemplate: isTemplate)
         case .active:
             drawActiveBars()
         }
     }
 
-    private static func drawLoadingDots() {
-        for x in [55, 62, 68] {
-            let dot = NSBezierPath(ovalIn: NSRect(x: CGFloat(x) - 3, y: 7, width: 5, height: 5))
-            dot.fill()
-        }
+    private static func drawLoadingArc() {
+        let path = NSBezierPath()
+        path.appendArc(
+            withCenter: NSPoint(x: 75, y: 48),
+            radius: 46,
+            startAngle: 105,
+            endAngle: 250,
+            clockwise: false
+        )
+        path.lineWidth = 6
+        path.lineCapStyle = .round
+        path.stroke()
     }
 
-    private static func drawProblemBadge() {
-        let badge = NSBezierPath(ovalIn: NSRect(x: 52, y: 29, width: 17, height: 17))
+    private static func drawProblemBadge(isTemplate: Bool) {
+        if isTemplate {
+            NSColor.black.setFill()
+        } else {
+            NSColor.systemRed.setFill()
+        }
+
+        let badge = NSBezierPath(ovalIn: NSRect(x: 106, y: 56, width: 28, height: 28))
         badge.fill()
 
-        NSGraphicsContext.current?.cgContext.setBlendMode(.clear)
-        let stem = NSBezierPath(roundedRect: NSRect(x: 59.25, y: 35, width: 2.5, height: 7), xRadius: 1.2, yRadius: 1.2)
+        if isTemplate {
+            NSGraphicsContext.current?.cgContext.setBlendMode(.clear)
+        } else {
+            NSColor.white.setFill()
+        }
+
+        let stem = NSBezierPath(roundedRect: NSRect(x: 118, y: 66, width: 4, height: 10), xRadius: 2, yRadius: 2)
         stem.fill()
-        let dot = NSBezierPath(ovalIn: NSRect(x: 59.1, y: 32, width: 2.8, height: 2.8))
+        let dot = NSBezierPath(ovalIn: NSRect(x: 117.5, y: 61.5, width: 5, height: 5))
         dot.fill()
-        NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+
+        if isTemplate {
+            NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+        }
     }
 
     private static func drawActiveBars() {
         let barRects = [
-            NSRect(x: 63, y: 17, width: 3, height: 13),
-            NSRect(x: 57, y: 21, width: 3, height: 8),
-            NSRect(x: 68, y: 20, width: 3, height: 9)
+            NSRect(x: 29, y: 38, width: 5, height: 20),
+            NSRect(x: 39, y: 31, width: 5, height: 34),
+            NSRect(x: 124, y: 31, width: 5, height: 34),
+            NSRect(x: 134, y: 38, width: 5, height: 20)
         ]
 
         for rect in barRects {
-            let bar = NSBezierPath(roundedRect: rect, xRadius: 1.5, yRadius: 1.5)
+            let bar = NSBezierPath(roundedRect: rect, xRadius: 2.5, yRadius: 2.5)
             bar.fill()
         }
     }
@@ -121,7 +161,14 @@ enum MenuBarIconRenderer {
     }
 
     private static func textAttributes(for text: String) -> [NSAttributedString.Key: Any] {
-        let fontSize: CGFloat = text.count > 4 ? 12 : 15
+        let fontSize: CGFloat
+        if text.count > 6 {
+            fontSize = 22
+        } else if text.count > 4 {
+            fontSize = 25
+        } else {
+            fontSize = 31
+        }
         let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .bold)
         return [
             .font: font,
@@ -132,9 +179,9 @@ enum MenuBarIconRenderer {
 
 private extension NSBezierPath {
     func appendTail() {
-        move(to: NSPoint(x: 23, y: 13))
-        line(to: NSPoint(x: 24, y: 4))
-        line(to: NSPoint(x: 33, y: 13))
+        move(to: NSPoint(x: 65, y: 29))
+        line(to: NSPoint(x: 71, y: 12))
+        line(to: NSPoint(x: 84, y: 29))
         close()
     }
 }

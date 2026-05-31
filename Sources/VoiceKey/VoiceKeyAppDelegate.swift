@@ -52,7 +52,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureStatusItemIcon() {
-        statusItem.length = NSStatusItem.squareLength
+        statusItem.length = 38
         guard let button = statusItem.button else { return }
 
         button.image = MenuBarIconRenderer.image(for: voiceHotKey, status: currentStatus)

@@ -49,6 +49,14 @@ To build an app bundle:
 open .build/VoiceKey.app
 ```
 
+To regenerate the production app icon from the design master:
+
+```zsh
+python3 -m venv /tmp/voicekey-icon-venv
+/tmp/voicekey-icon-venv/bin/python -m pip install pillow
+/tmp/voicekey-icon-venv/bin/python ./scripts/generate_app_icon.py
+```
+
 ## Setup
 
 1. Launch VoiceKey.
