@@ -40,22 +40,28 @@ enum ChatGPTDOMProbe {
       ]);
       const loginIntent = (text) => hasAny(text, ['log in', 'login', 'sign in', 'continue with google', 'continue with microsoft', 'continue with apple']);
 
+      function describeDOMElement(element) {
+        const rect = element.getBoundingClientRect();
+        return {
+          ariaLabel: element.getAttribute('aria-label'),
+          dataTestId: element.getAttribute('data-testid'),
+          title: element.getAttribute('title'),
+          text: element.textContent,
+          role: element.getAttribute('role') || element.tagName,
+          visible: !!(rect.width && rect.height),
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          width: rect.width,
+          height: rect.height
+        };
+      }
+
+      function collectDOMElements() {
+        return [...document.querySelectorAll('button,[role="button"],a,[aria-label],[data-testid]')];
+      }
+
       function collectElements() {
-        return [...document.querySelectorAll('button,[role="button"],a,[aria-label],[data-testid]')].map((element) => {
-          const rect = element.getBoundingClientRect();
-          return {
-            ariaLabel: element.getAttribute('aria-label'),
-            dataTestId: element.getAttribute('data-testid'),
-            title: element.getAttribute('title'),
-            text: element.textContent,
-            role: element.getAttribute('role') || element.tagName,
-            visible: !!(rect.width && rect.height),
-            x: rect.left + rect.width / 2,
-            y: rect.top + rect.height / 2,
-            width: rect.width,
-            height: rect.height
-          };
-        });
+        return collectDOMElements().map(describeDOMElement);
       }
 
       function findVoiceStartElement(elements) {
@@ -68,11 +74,57 @@ enum ChatGPTDOMProbe {
         }) || null;
       }
 
+      function findVoiceStartDOMElement() {
+        return collectDOMElements().find((element) => {
+          const description = describeDOMElement(element);
+          if (!visible(description)) return false;
+          const text = textFor(description);
+          if (!hasVoice(text)) return false;
+          if (dictationOnly(text) || stopIntent(text)) return false;
+          return hasStartIntent(text);
+        }) || null;
+      }
+
       function findVoiceStopElement(elements) {
         return elements.find((element) => {
           if (!visible(element)) return false;
           return stopIntent(textFor(element));
         }) || null;
+      }
+
+      function findVoiceStopDOMElement() {
+        return collectDOMElements().find((element) => {
+          const description = describeDOMElement(element);
+          if (!visible(description)) return false;
+          return stopIntent(textFor(description));
+        }) || null;
+      }
+
+      function elementAtPoint(x, y) {
+        const element = document.elementFromPoint(x, y);
+        if (!element) return null;
+        const clickable = element.closest('button,[role="button"],a,[aria-label],[data-testid]') || element;
+        return pointFor(describeDOMElement(clickable));
+      }
+
+      function dispatchClick(element) {
+        if (!element) return null;
+        const description = describeDOMElement(element);
+        const eventInit = {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          clientX: description.x,
+          clientY: description.y,
+          button: 0,
+          buttons: 1
+        };
+        element.dispatchEvent(new PointerEvent('pointerdown', eventInit));
+        element.dispatchEvent(new MouseEvent('mousedown', eventInit));
+        element.dispatchEvent(new PointerEvent('pointerup', { ...eventInit, buttons: 0 }));
+        element.dispatchEvent(new MouseEvent('mouseup', { ...eventInit, buttons: 0 }));
+        element.click();
+        return pointFor(description);
       }
 
       function isLoginRequired(elements, href, bodyText) {
@@ -105,11 +157,15 @@ enum ChatGPTDOMProbe {
       return {
         collectElements,
         findVoiceStartElement,
+        findVoiceStartDOMElement,
         findVoiceStopElement,
+        findVoiceStopDOMElement,
         isLoginRequired,
         isVoiceActive,
         snapshot,
-        pointFor
+        pointFor,
+        elementAtPoint,
+        dispatchClick
       };
     })();
     """
@@ -151,6 +207,24 @@ enum ChatGPTDOMProbe {
         window.location.href,
         document.body ? document.body.innerText : ''
       );
+    })();
+    """
+
+    static let startButtonClickFallbackScript = """
+    (() => {
+      \(coreScript)
+      const element = VoiceKeyProbe.findVoiceStartDOMElement();
+      const point = VoiceKeyProbe.dispatchClick(element);
+      return point ? { state: 'clicked', x: point.x, y: point.y, label: point.label } : { state: 'needsAttention', reason: 'Could not find a ChatGPT Voice DOM button to click.' };
+    })();
+    """
+
+    static let stopButtonClickFallbackScript = """
+    (() => {
+      \(coreScript)
+      const element = VoiceKeyProbe.findVoiceStopDOMElement();
+      const point = VoiceKeyProbe.dispatchClick(element);
+      return point ? { state: 'clicked', x: point.x, y: point.y, label: point.label } : { state: 'needsAttention', reason: 'Could not find a ChatGPT Voice stop DOM button to click.' };
     })();
     """
 }

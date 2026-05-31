@@ -73,7 +73,7 @@ final class ChatGPTProvider: NSObject {
                     self.windowController.show()
                     return
                 }
-                self.verifyVoiceStopped(remainingAttempts: 6)
+                self.verifyVoiceStopped(remainingAttempts: 6, fallbackAllowed: true)
             case "ready", "loginRequired", "needsAttention":
                 self.applySnapshot(probe, showAttention: true)
             default:
@@ -100,7 +100,7 @@ final class ChatGPTProvider: NSObject {
                     self.windowController.show()
                     return
                 }
-                self.verifyVoiceStarted(remainingAttempts: 8)
+                self.verifyVoiceStarted(remainingAttempts: 8, fallbackAllowed: true)
             case "loginRequired":
                 self.updateStatus(.loginRequired)
                 self.windowController.show()
@@ -122,7 +122,7 @@ final class ChatGPTProvider: NSObject {
         }
     }
 
-    private func verifyVoiceStarted(remainingAttempts: Int) {
+    private func verifyVoiceStarted(remainingAttempts: Int, fallbackAllowed: Bool) {
         windowController.runJavaScript(ChatGPTDOMProbe.snapshotScript) { [weak self] result in
             guard let self else { return }
             let probe = ProbeResult(result)
@@ -133,28 +133,66 @@ final class ChatGPTProvider: NSObject {
                 self.updateStatus(.loginRequired)
                 self.windowController.show()
             default:
+                if fallbackAllowed {
+                    self.clickStartButtonWithJavaScriptFallback()
+                    return
+                }
                 self.retryOrNeedAttention(
                     remainingAttempts: remainingAttempts,
                     message: "Clicked ChatGPT Voice, but the page did not show that voice became active.",
-                    retry: self.verifyVoiceStarted
+                    retry: { self.verifyVoiceStarted(remainingAttempts: $0, fallbackAllowed: false) }
                 )
             }
         }
     }
 
-    private func verifyVoiceStopped(remainingAttempts: Int) {
+    private func verifyVoiceStopped(remainingAttempts: Int, fallbackAllowed: Bool) {
         windowController.runJavaScript(ChatGPTDOMProbe.snapshotScript) { [weak self] result in
             guard let self else { return }
             let probe = ProbeResult(result)
             if probe.state == "voiceActive" {
+                if fallbackAllowed {
+                    self.clickStopButtonWithJavaScriptFallback()
+                    return
+                }
                 self.retryOrNeedAttention(
                     remainingAttempts: remainingAttempts,
                     message: "ChatGPT Voice still appears active after the stop click.",
-                    retry: self.verifyVoiceStopped
+                    retry: { self.verifyVoiceStopped(remainingAttempts: $0, fallbackAllowed: false) }
                 )
                 return
             }
             self.applySnapshot(probe, showAttention: true)
+        }
+    }
+
+    private func clickStartButtonWithJavaScriptFallback() {
+        log("Native click did not activate Voice; trying DOM click fallback.")
+        windowController.runJavaScript(ChatGPTDOMProbe.startButtonClickFallbackScript) { [weak self] result in
+            guard let self else { return }
+            let probe = ProbeResult(result)
+            if probe.state == "clicked" {
+                self.log("DOM-clicked ChatGPT Voice control: \(probe.label ?? "unknown")")
+                self.verifyVoiceStarted(remainingAttempts: 4, fallbackAllowed: false)
+            } else {
+                self.updateStatus(.needsAttention(probe.reason ?? "Native and DOM click attempts did not start ChatGPT Voice."))
+                self.windowController.show()
+            }
+        }
+    }
+
+    private func clickStopButtonWithJavaScriptFallback() {
+        log("Native click did not stop Voice; trying DOM click fallback.")
+        windowController.runJavaScript(ChatGPTDOMProbe.stopButtonClickFallbackScript) { [weak self] result in
+            guard let self else { return }
+            let probe = ProbeResult(result)
+            if probe.state == "clicked" {
+                self.log("DOM-clicked ChatGPT Voice stop control: \(probe.label ?? "unknown")")
+                self.verifyVoiceStopped(remainingAttempts: 4, fallbackAllowed: false)
+            } else {
+                self.updateStatus(.needsAttention(probe.reason ?? "Native and DOM click attempts did not stop ChatGPT Voice."))
+                self.windowController.show()
+            }
         }
     }
 
