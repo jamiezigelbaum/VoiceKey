@@ -71,11 +71,25 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func nativeClickInWebView(x: Double, y: Double) {
         show()
-        let webPoint = NSPoint(x: x, y: y)
+        let webPoint = Self.appKitPointForDOMPoint(
+            x: x,
+            y: y,
+            webViewHeight: webView.bounds.height
+        )
         let windowPoint = webView.convert(webPoint, to: nil)
-        guard let screenPoint = window.contentView?.convert(windowPoint, to: nil) else { return }
+        guard let screenPoint = window.contentView?.convert(windowPoint, to: nil) else {
+            onDiagnostic?("Could not convert DOM click point to a screen point.")
+            return
+        }
         let location = window.convertPoint(toScreen: screenPoint)
+        onDiagnostic?(
+            "Native click DOM=(\(Int(x)),\(Int(y))) view=(\(Int(webPoint.x)),\(Int(webPoint.y))) screen=(\(Int(location.x)),\(Int(location.y)))"
+        )
         clickScreenPoint(location)
+    }
+
+    static func appKitPointForDOMPoint(x: Double, y: Double, webViewHeight: CGFloat) -> NSPoint {
+        NSPoint(x: x, y: Double(webViewHeight) - y)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
