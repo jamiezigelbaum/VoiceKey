@@ -72,11 +72,6 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     @discardableResult
     func nativeClickInWebView(x: Double, y: Double) -> Bool {
-        guard requestAccessibilityPermissionIfNeeded() else {
-            onDiagnostic?("Accessibility permission is required before VoiceKey can send a trusted click.")
-            return false
-        }
-
         show()
         let webPoint = Self.appKitPointForDOMPoint(
             x: x,
@@ -92,22 +87,18 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
         onDiagnostic?(
             "Native click DOM=(\(Int(x)),\(Int(y))) view=(\(Int(webPoint.x)),\(Int(webPoint.y))) screen=(\(Int(location.x)),\(Int(location.y)))"
         )
-        clickScreenPoint(location)
+
+        if AXIsProcessTrusted() {
+            clickScreenPoint(location)
+        } else {
+            onDiagnostic?("Accessibility trust is not reported; using in-window WebKit click fallback.")
+            clickWebViewPoint(webPoint)
+        }
         return true
     }
 
     static func appKitPointForDOMPoint(x: Double, y: Double, webViewHeight: CGFloat) -> NSPoint {
         NSPoint(x: x, y: Double(webViewHeight) - y)
-    }
-
-    func requestAccessibilityPermissionIfNeeded() -> Bool {
-        guard AXIsProcessTrusted() == false else { return true }
-
-        let options = [
-            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
-        ] as CFDictionary
-        AXIsProcessTrustedWithOptions(options)
-        return false
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -155,5 +146,29 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
         mouseDown.post(tap: .cghidEventTap)
         mouseUp.post(tap: .cghidEventTap)
+    }
+
+    private func clickWebViewPoint(_ point: NSPoint) {
+        let windowPoint = webView.convert(point, to: nil)
+        let timestamp = ProcessInfo.processInfo.systemUptime
+        let common: (NSEvent.EventType) -> NSEvent? = { type in
+            NSEvent.mouseEvent(
+                with: type,
+                location: windowPoint,
+                modifierFlags: [],
+                timestamp: timestamp,
+                windowNumber: self.window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: 1
+            )
+        }
+
+        guard let mouseDown = common(.leftMouseDown),
+              let mouseUp = common(.leftMouseUp) else { return }
+
+        webView.mouseDown(with: mouseDown)
+        webView.mouseUp(with: mouseUp)
     }
 }

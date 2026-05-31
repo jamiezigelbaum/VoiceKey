@@ -69,7 +69,7 @@ final class ChatGPTProvider: NSObject {
                 }
                 self.log("Clicking ChatGPT stop control: \(probe.label ?? "unknown")")
                 guard self.windowController.nativeClickInWebView(x: x, y: y) else {
-                    self.updateStatus(.needsAttention(Self.accessibilityPermissionMessage))
+                    self.updateStatus(.needsAttention("Could not send the stop click to ChatGPT Voice."))
                     self.windowController.show()
                     return
                 }
@@ -96,7 +96,7 @@ final class ChatGPTProvider: NSObject {
                 }
                 self.log("Clicking ChatGPT Voice control: \(probe.label ?? "unknown")")
                 guard self.windowController.nativeClickInWebView(x: x, y: y) else {
-                    self.updateStatus(.needsAttention(Self.accessibilityPermissionMessage))
+                    self.updateStatus(.needsAttention("Could not send the start click to ChatGPT Voice."))
                     self.windowController.show()
                     return
                 }
@@ -213,7 +213,6 @@ final class ChatGPTProvider: NSObject {
         NSLog("[VoiceKey] ChatGPT: %@", message)
     }
 
-    private static let accessibilityPermissionMessage = "VoiceKey needs Accessibility permission to click ChatGPT Voice. Enable VoiceKey in System Settings > Privacy & Security > Accessibility, then press F16 again."
 }
 
 private struct ProbeResult {
