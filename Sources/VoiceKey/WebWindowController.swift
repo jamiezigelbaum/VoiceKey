@@ -2,10 +2,10 @@ import AppKit
 import ApplicationServices
 import WebKit
 
-final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
+final class WebWindowController: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate {
     let webView: WKWebView
     private let window: NSWindow
-    private let visibleFrame: NSRect
+    private var visibleFrame: NSRect
     private var readyCallbacks: [(WKWebView) -> Void] = []
     var onNavigationFinished: (() -> Void)?
     var onDiagnostic: ((String) -> Void)?
@@ -31,6 +31,7 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        window.delegate = self
         window.title = "VoiceKey"
         window.contentView = webView
     }
@@ -138,10 +139,32 @@ final class WebWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
         }
     }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender.alphaValue >= 1 {
+            visibleFrame = sender.frame
+        }
+        sender.alphaValue = 1
+        sender.orderOut(nil)
+        return false
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        rememberVisibleFrameIfNeeded()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        rememberVisibleFrameIfNeeded()
+    }
+
     private func flushReadyCallbacks() {
         let callbacks = readyCallbacks
         readyCallbacks.removeAll()
         callbacks.forEach { $0(webView) }
+    }
+
+    private func rememberVisibleFrameIfNeeded() {
+        guard window.isVisible, window.alphaValue >= 1 else { return }
+        visibleFrame = window.frame
     }
 
     private func hiddenInteractionFrame() -> NSRect {
