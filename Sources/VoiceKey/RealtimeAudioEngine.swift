@@ -18,7 +18,15 @@ enum RealtimeAudioEngineError: LocalizedError {
     }
 }
 
-final class RealtimeAudioEngine {
+protocol RealtimeAudioEngineProtocol: AnyObject {
+    func requestMicrophoneAccess(_ completion: @escaping (Bool) -> Void)
+    func start(inputHandler: @escaping (Data) -> Void) throws
+    func stop()
+    func stopPlayback()
+    func playPCM16(_ data: Data)
+}
+
+final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     private let inputEngine = AVAudioEngine()
     private let outputEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()

@@ -18,7 +18,9 @@ final class GlobalHotKey {
         let handler: EventHandlerUPP = { _, event, userData in
             guard let userData else { return noErr }
             let hotKey = Unmanaged<GlobalHotKey>.fromOpaque(userData).takeUnretainedValue()
-            hotKey.callback()
+            DispatchQueue.main.async {
+                hotKey.callback()
+            }
             return noErr
         }
 
