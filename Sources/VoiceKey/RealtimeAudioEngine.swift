@@ -20,10 +20,18 @@ enum RealtimeAudioEngineError: LocalizedError {
 
 protocol RealtimeAudioEngineProtocol: AnyObject {
     func requestMicrophoneAccess(_ completion: @escaping (Bool) -> Void)
-    func start(inputHandler: @escaping (Data) -> Void) throws
+    func start(
+        inputHandler: @escaping (Data) -> Void,
+        activityHandler: @escaping (RealtimeAudioInputActivity) -> Void
+    ) throws
     func stop()
     func stopPlayback()
     func playPCM16(_ data: Data)
+}
+
+struct RealtimeAudioInputActivity: Equatable {
+    var rms: Float
+    var peak: Float
 }
 
 final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
@@ -31,8 +39,10 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     private let outputEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
     private let queue = DispatchQueue(label: "VoiceKey.RealtimeAudioEngine")
+    private let stateLock = NSLock()
     private var inputConverter: AVAudioConverter?
     private var inputConverterSourceFormat: AVAudioFormat?
+    private var isInputStreaming = false
 
     private let realtimeFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
@@ -44,6 +54,7 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     init() {
         outputEngine.attach(playerNode)
         outputEngine.connect(playerNode, to: outputEngine.mainMixerNode, format: realtimeFormat)
+        enableVoiceProcessingIfAvailable()
     }
 
     func requestMicrophoneAccess(_ completion: @escaping (Bool) -> Void) {
@@ -59,7 +70,36 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
         }
     }
 
-    func start(inputHandler: @escaping (Data) -> Void) throws {
+    func start(
+        inputHandler: @escaping (Data) -> Void,
+        activityHandler: @escaping (RealtimeAudioInputActivity) -> Void
+    ) throws {
+        stateLock.lock()
+        guard isInputStreaming == false else {
+            stateLock.unlock()
+            return
+        }
+        isInputStreaming = true
+        stateLock.unlock()
+
+        do {
+            try startInput(
+                inputHandler: inputHandler,
+                activityHandler: activityHandler
+            )
+        } catch {
+            stateLock.lock()
+            isInputStreaming = false
+            stateLock.unlock()
+            throw error
+        }
+    }
+
+    private func startInput(
+        inputHandler: @escaping (Data) -> Void,
+        activityHandler: @escaping (RealtimeAudioInputActivity) -> Void
+    ) throws {
+        enableVoiceProcessingIfAvailable()
         try startOutputIfNeeded()
 
         let inputNode = inputEngine.inputNode
@@ -73,9 +113,10 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
             guard let self else { return }
             self.queue.async {
                 do {
-                    let pcm = try self.convertInputBufferToPCM16(buffer, sourceFormat: inputFormat)
-                    if pcm.isEmpty == false {
-                        inputHandler(pcm)
+                    let result = try self.convertInputBuffer(buffer, sourceFormat: inputFormat)
+                    if result.pcm.isEmpty == false {
+                        activityHandler(result.activity)
+                        inputHandler(result.pcm)
                     }
                 } catch {
                     // Audio taps cannot surface errors synchronously; provider-level
@@ -89,6 +130,10 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     }
 
     func stop() {
+        stateLock.lock()
+        isInputStreaming = false
+        stateLock.unlock()
+
         inputEngine.inputNode.removeTap(onBus: 0)
         inputEngine.stop()
         stopPlayback()
@@ -119,6 +164,7 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     }
 
     private func startOutputIfNeeded() throws {
+        enableVoiceProcessingIfAvailable()
         if outputEngine.isRunning == false {
             outputEngine.prepare()
             try outputEngine.start()
@@ -128,14 +174,42 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
         }
     }
 
-    private func convertInputBufferToPCM16(_ buffer: AVAudioPCMBuffer, sourceFormat: AVAudioFormat) throws -> Data {
+    private func enableVoiceProcessingIfAvailable() {
+        try? inputEngine.inputNode.setVoiceProcessingEnabled(true)
+        try? outputEngine.outputNode.setVoiceProcessingEnabled(true)
+    }
+
+    private func convertInputBuffer(
+        _ buffer: AVAudioPCMBuffer,
+        sourceFormat: AVAudioFormat
+    ) throws -> InputConversionResult {
         let converted = try convertInputBufferToRealtimeFloat(buffer, sourceFormat: sourceFormat)
         guard let channel = converted.floatChannelData?[0] else {
             throw RealtimeAudioEngineError.conversionFailed
         }
 
-        return RealtimePCM16Codec.encode(
-            samples: UnsafeBufferPointer(start: channel, count: Int(converted.frameLength))
+        let samples = UnsafeBufferPointer(start: channel, count: Int(converted.frameLength))
+        return InputConversionResult(
+            pcm: RealtimePCM16Codec.encode(samples: samples),
+            activity: inputActivity(samples: samples)
+        )
+    }
+
+    private func inputActivity(samples: UnsafeBufferPointer<Float>) -> RealtimeAudioInputActivity {
+        guard samples.isEmpty == false else {
+            return RealtimeAudioInputActivity(rms: 0, peak: 0)
+        }
+
+        var sum: Float = 0
+        var peak: Float = 0
+        for sample in samples {
+            let value = abs(sample)
+            sum += value * value
+            peak = max(peak, value)
+        }
+        return RealtimeAudioInputActivity(
+            rms: sqrt(sum / Float(samples.count)),
+            peak: peak
         )
     }
 
@@ -198,4 +272,9 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
         buffer.frameLength = AVAudioFrameCount(frameCount)
         return buffer
     }
+}
+
+private struct InputConversionResult {
+    var pcm: Data
+    var activity: RealtimeAudioInputActivity
 }

@@ -26,6 +26,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     private var isConnected = false
     private var isAudioStreaming = false
     private var isStopping = false
+    private var hasReportedMicrophoneAudio = false
+    private var hasReportedMicrophoneSignal = false
 
     init(
         configuration: VoiceSessionConfiguration,
@@ -80,6 +82,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         isConnected = false
         isAudioStreaming = false
         isStopping = false
+        hasReportedMicrophoneAudio = false
+        hasReportedMicrophoneSignal = false
         emit(.status(.ready))
     }
 
@@ -92,6 +96,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         startGeneration += 1
         let generation = startGeneration
         isStarting = true
+        hasReportedMicrophoneAudio = false
+        hasReportedMicrophoneSignal = false
         emit(.status(.starting))
         audioEngine.requestMicrophoneAccess { [weak self] granted in
             guard let self else { return }
@@ -131,11 +137,16 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
 
     private func startAudioStreaming() {
         guard isAudioStreaming == false else { return }
+        isAudioStreaming = true
         do {
-            try audioEngine.start { [weak self] audio in
-                self?.sendAudio(audio)
-            }
-            isAudioStreaming = true
+            try audioEngine.start(
+                inputHandler: { [weak self] audio in
+                    self?.sendAudio(audio)
+                },
+                activityHandler: { [weak self] activity in
+                    self?.handleInputActivity(activity)
+                }
+            )
             emit(.status(.listening))
         } catch {
             audioEngine.stop()
@@ -145,6 +156,18 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             isConnected = false
             isAudioStreaming = false
             emit(.status(.needsAttention(error.localizedDescription)))
+        }
+    }
+
+    private func handleInputActivity(_ activity: RealtimeAudioInputActivity) {
+        if hasReportedMicrophoneAudio == false {
+            hasReportedMicrophoneAudio = true
+            emit(.diagnostic("Microphone audio streaming."))
+        }
+
+        if hasReportedMicrophoneSignal == false, activity.peak >= 0.02 {
+            hasReportedMicrophoneSignal = true
+            emit(.diagnostic(String(format: "Microphone input detected (peak %.3f).", activity.peak)))
         }
     }
 

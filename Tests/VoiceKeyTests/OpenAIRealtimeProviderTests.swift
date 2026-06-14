@@ -36,7 +36,10 @@ private final class FakeRealtimeAudioEngine: RealtimeAudioEngineProtocol {
         microphoneAccessRequestCount += 1
     }
 
-    func start(inputHandler: @escaping (Data) -> Void) throws {}
+    func start(
+        inputHandler: @escaping (Data) -> Void,
+        activityHandler: @escaping (RealtimeAudioInputActivity) -> Void
+    ) throws {}
 
     func stop() {
         stopCount += 1
