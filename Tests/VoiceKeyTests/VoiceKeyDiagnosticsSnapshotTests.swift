@@ -17,6 +17,7 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
             currentStatus: .listening,
             hasAPIKey: true,
             supportsProviderInterface: false,
+            supportsConnectionCheck: true,
             hasSessionLog: true
         )
 
@@ -34,6 +35,7 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
             Hotkey: F16
             Status: Listening
             Provider window: no
+            Connection check: yes
             Session log has entries: yes
             """
         )
@@ -50,6 +52,7 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
             currentStatus: .needsAttention("OpenAI API key required."),
             hasAPIKey: false,
             supportsProviderInterface: false,
+            supportsConnectionCheck: true,
             hasSessionLog: false
         )
 
@@ -67,6 +70,7 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
             currentStatus: .ready,
             hasAPIKey: false,
             supportsProviderInterface: true,
+            supportsConnectionCheck: false,
             hasSessionLog: false
         )
 
@@ -74,5 +78,6 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
         XCTAssertTrue(snapshot.displayText.contains("Readiness: Sign-in - Uses provider sign-in."))
         XCTAssertTrue(snapshot.displayText.contains("API key: not required"))
         XCTAssertTrue(snapshot.displayText.contains("Provider window: yes"))
+        XCTAssertTrue(snapshot.displayText.contains("Connection check: no"))
     }
 }

@@ -8,7 +8,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         supportsInterruptions: true,
         supportsFunctionCalling: true,
         supportsVisionInput: true,
-        supportsProviderInterface: false
+        supportsProviderInterface: false,
+        supportsConnectionCheck: true
     )
 
     var onEvent: ((VoiceProviderEvent) -> Void)?
@@ -18,6 +19,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     private let audioEngine: RealtimeAudioEngine
     private lazy var urlSession = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
     private var webSocketTask: URLSessionWebSocketTask?
+    private var connectionCheck: OpenAIRealtimeConnectionCheck?
     private var isConnecting = false
     private var isConnected = false
     private var isStopping = false
@@ -192,6 +194,32 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     private func emit(_ event: VoiceProviderEvent) {
         DispatchQueue.main.async { [weak self] in
             self?.onEvent?(event)
+        }
+    }
+}
+
+extension OpenAIRealtimeProvider: VoiceProviderConnectionChecking {
+    func checkConnection() {
+        guard let apiKey = apiKeyProvider(), apiKey.isEmpty == false else {
+            emit(.status(.needsAttention("Add an OpenAI API key in Settings.")))
+            return
+        }
+
+        emit(.status(.checking))
+        emit(.diagnostic("Checking OpenAI Realtime API connection."))
+
+        let check = OpenAIRealtimeConnectionCheck(apiKey: apiKey, configuration: configuration)
+        connectionCheck = check
+        check.start { [weak self, weak check] result in
+            guard let self, self.connectionCheck === check else { return }
+            self.connectionCheck = nil
+            switch result {
+            case let .success(eventTypes):
+                self.emit(.diagnostic("OpenAI Realtime API check succeeded: \(eventTypes.joined(separator: ", "))."))
+                self.emit(.status(.ready))
+            case let .failure(message):
+                self.emit(.status(.needsAttention(message)))
+            }
         }
     }
 }

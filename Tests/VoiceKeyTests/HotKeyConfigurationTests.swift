@@ -97,6 +97,7 @@ final class HotKeyConfigurationTests: XCTestCase {
 final class MenuBarIconStateTests: XCTestCase {
     func testLoadingStatusesUseLoadingIcon() {
         XCTAssertEqual(MenuBarIconState(status: .loading), .loading)
+        XCTAssertEqual(MenuBarIconState(status: .checking), .loading)
         XCTAssertEqual(MenuBarIconState(status: .starting), .loading)
         XCTAssertEqual(MenuBarIconState(status: .stopping), .loading)
     }
@@ -202,6 +203,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
             provider: .openAIRealtime,
             readiness: .ready,
             supportsProviderInterface: false,
+            supportsConnectionCheck: true,
             hasSessionLog: true
         )
 
@@ -213,6 +215,8 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertTrue(state.isSetupEnabled)
         XCTAssertEqual(state.showProviderTitle, "Show Provider (API provider)")
         XCTAssertFalse(state.isProviderInterfaceEnabled)
+        XCTAssertEqual(state.checkConnectionTitle, "Check API Connection")
+        XCTAssertTrue(state.isCheckConnectionEnabled)
         XCTAssertTrue(state.isClearSessionLogEnabled)
     }
 
@@ -221,6 +225,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
             provider: .openAIRealtime,
             readiness: .needsAPIKey("OpenAI API key required."),
             supportsProviderInterface: false,
+            supportsConnectionCheck: true,
             hasSessionLog: false
         )
 
@@ -230,6 +235,8 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertEqual(state.setupTitle, "Add API Key...")
         XCTAssertEqual(state.setupAction, .openSettings)
         XCTAssertTrue(state.isSetupEnabled)
+        XCTAssertEqual(state.checkConnectionTitle, "Check API Connection")
+        XCTAssertFalse(state.isCheckConnectionEnabled)
         XCTAssertFalse(state.isClearSessionLogEnabled)
     }
 
@@ -238,6 +245,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
             provider: .chatGPTWeb,
             readiness: .providerSignIn("Uses provider sign-in."),
             supportsProviderInterface: true,
+            supportsConnectionCheck: false,
             hasSessionLog: false
         )
 
@@ -250,6 +258,8 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertEqual(state.showProviderTitle, "Show Provider")
         XCTAssertEqual(state.reloadProviderTitle, "Reload Provider")
         XCTAssertTrue(state.isProviderInterfaceEnabled)
+        XCTAssertEqual(state.checkConnectionTitle, "Check Provider Connection")
+        XCTAssertFalse(state.isCheckConnectionEnabled)
     }
 
     func testProviderMenuStateForComingSoonProvider() {
@@ -257,6 +267,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
             provider: .geminiLive,
             readiness: .unavailable("Gemini Live is coming soon."),
             supportsProviderInterface: false,
+            supportsConnectionCheck: false,
             hasSessionLog: false
         )
 
@@ -269,6 +280,8 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertEqual(state.showProviderTitle, "Show Provider (coming soon)")
         XCTAssertEqual(state.reloadProviderTitle, "Reload Provider (coming soon)")
         XCTAssertFalse(state.isProviderInterfaceEnabled)
+        XCTAssertEqual(state.checkConnectionTitle, "Check API Connection")
+        XCTAssertFalse(state.isCheckConnectionEnabled)
     }
 
     func testGeminiLiveProviderCapabilitiesMatchRealtimeVoiceAndVisionSlot() {
@@ -280,6 +293,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertTrue(provider.capabilities.supportsInterruptions)
         XCTAssertTrue(provider.capabilities.supportsFunctionCalling)
         XCTAssertTrue(provider.capabilities.supportsVisionInput)
+        XCTAssertFalse(provider.capabilities.supportsConnectionCheck)
     }
 
     func testDeepgramVoiceAgentProviderCapabilitiesMatchVoiceAgentSlot() {
@@ -291,6 +305,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertTrue(provider.capabilities.supportsInterruptions)
         XCTAssertTrue(provider.capabilities.supportsFunctionCalling)
         XCTAssertFalse(provider.capabilities.supportsVisionInput)
+        XCTAssertFalse(provider.capabilities.supportsConnectionCheck)
     }
 
     func testFactoryCreatesPlannedProviderAdapters() {

@@ -22,6 +22,11 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private let showProviderMenuItem = NSMenuItem(title: "Show Provider", action: #selector(showProvider), keyEquivalent: "")
     private let reloadProviderMenuItem = NSMenuItem(title: "Reload Provider", action: #selector(reloadProvider), keyEquivalent: "")
     private let setupProviderMenuItem = NSMenuItem(title: "Provider Settings...", action: #selector(setupProvider), keyEquivalent: "")
+    private let checkProviderConnectionMenuItem = NSMenuItem(
+        title: "Check API Connection",
+        action: #selector(checkProviderConnection),
+        keyEquivalent: ""
+    )
     private let showSessionLogMenuItem = NSMenuItem(title: "Show Session Log", action: #selector(showSessionLog), keyEquivalent: "")
     private let clearSessionLogMenuItem = NSMenuItem(title: "Clear Session Log", action: #selector(clearSessionLog), keyEquivalent: "")
     private let copyDiagnosticsMenuItem = NSMenuItem(title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: "")
@@ -77,6 +82,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         configureVoiceHotKeyMenuItem()
         menu.addItem(toggleMenuItem)
         menu.addItem(setupProviderMenuItem)
+        menu.addItem(checkProviderConnectionMenuItem)
         menu.addItem(showProviderMenuItem)
         menu.addItem(reloadProviderMenuItem)
         menu.addItem(showSessionLogMenuItem)
@@ -171,6 +177,22 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func checkProviderConnection() {
+        let provider = providerConfiguration.providerID
+        let readiness = provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider))
+        guard readiness == .ready else {
+            updateStatus(.needsAttention(readiness.settingsMessage))
+            return
+        }
+
+        guard let connectionCheckingProvider = voiceProvider as? VoiceProviderConnectionChecking else {
+            updateStatus(.needsAttention("Connection check is not available for \(provider.displayName)."))
+            return
+        }
+
+        connectionCheckingProvider.checkConnection()
+    }
+
     @objc private func showSessionLog() {
         let controller = sessionLogWindowController ?? SessionLogWindowController(text: sessionLog.displayText)
         sessionLogWindowController = controller
@@ -247,6 +269,8 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         toggleMenuItem.isEnabled = state.isToggleEnabled
         setupProviderMenuItem.title = state.setupTitle
         setupProviderMenuItem.isEnabled = state.isSetupEnabled
+        checkProviderConnectionMenuItem.title = state.checkConnectionTitle
+        checkProviderConnectionMenuItem.isEnabled = state.isCheckConnectionEnabled
     }
 
     private func providerMenuState() -> VoiceProviderMenuState {
@@ -255,6 +279,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             provider: provider,
             readiness: provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)),
             supportsProviderInterface: voiceProvider?.capabilities.supportsProviderInterface == true,
+            supportsConnectionCheck: voiceProvider?.capabilities.supportsConnectionCheck == true,
             hasSessionLog: sessionLog.isEmpty == false
         )
     }
@@ -269,6 +294,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             currentStatus: currentStatus,
             hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider),
             supportsProviderInterface: voiceProvider?.capabilities.supportsProviderInterface == true,
+            supportsConnectionCheck: voiceProvider?.capabilities.supportsConnectionCheck == true,
             hasSessionLog: sessionLog.isEmpty == false
         )
     }

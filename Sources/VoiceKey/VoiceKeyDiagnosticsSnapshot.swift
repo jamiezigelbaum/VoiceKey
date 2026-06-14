@@ -8,6 +8,7 @@ struct VoiceKeyDiagnosticsSnapshot {
     var currentStatus: ProviderStatus
     var hasAPIKey: Bool
     var supportsProviderInterface: Bool
+    var supportsConnectionCheck: Bool
     var hasSessionLog: Bool
 
     var displayText: String {
@@ -23,6 +24,7 @@ struct VoiceKeyDiagnosticsSnapshot {
             "Hotkey: \(hotKey.displayName)",
             "Status: \(statusTitle)",
             "Provider window: \(yesNo(supportsProviderInterface))",
+            "Connection check: \(yesNo(supportsConnectionCheck))",
             "Session log has entries: \(yesNo(hasSessionLog))"
         ].joined(separator: "\n")
     }

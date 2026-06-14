@@ -8,7 +8,7 @@ enum MenuBarIconState: Equatable {
 
     init(status: ProviderStatus) {
         switch status {
-        case .loading, .starting, .stopping:
+        case .loading, .checking, .starting, .stopping:
             self = .loading
         case .loginRequired, .needsAttention:
             self = .problem

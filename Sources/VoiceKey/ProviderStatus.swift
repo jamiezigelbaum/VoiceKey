@@ -2,6 +2,7 @@ import Foundation
 
 enum ProviderStatus: Equatable {
     case loading
+    case checking
     case loginRequired
     case ready
     case starting
@@ -17,6 +18,8 @@ enum ProviderStatus: Equatable {
         switch self {
         case .loading:
             return "Loading provider"
+        case .checking:
+            return "Checking provider"
         case .loginRequired:
             return "Sign in required"
         case .ready:
@@ -44,6 +47,8 @@ enum ProviderStatus: Equatable {
         switch self {
         case .loading:
             return "VK Loading"
+        case .checking:
+            return "VK Checking"
         case .loginRequired:
             return "VK Sign In"
         case .ready:

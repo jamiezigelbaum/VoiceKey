@@ -168,6 +168,7 @@ struct VoiceProviderCapabilities: Equatable {
     var supportsFunctionCalling: Bool
     var supportsVisionInput: Bool
     var supportsProviderInterface: Bool
+    var supportsConnectionCheck: Bool
 }
 
 struct VoiceProviderCredentialViewState: Equatable {
@@ -198,12 +199,15 @@ struct VoiceProviderMenuState: Equatable {
     var showProviderTitle: String
     var reloadProviderTitle: String
     var isProviderInterfaceEnabled: Bool
+    var checkConnectionTitle: String
+    var isCheckConnectionEnabled: Bool
     var isClearSessionLogEnabled: Bool
 
     init(
         provider: VoiceProviderID,
         readiness: VoiceProviderReadiness,
         supportsProviderInterface: Bool,
+        supportsConnectionCheck: Bool,
         hasSessionLog: Bool
     ) {
         providerTitle = "Provider: \(provider.displayName)"
@@ -250,6 +254,8 @@ struct VoiceProviderMenuState: Equatable {
             reloadProviderTitle = "Reload Provider (coming soon)"
         }
 
+        checkConnectionTitle = provider.requiresAPIKey ? "Check API Connection" : "Check Provider Connection"
+        isCheckConnectionEnabled = readiness == .ready && supportsConnectionCheck
         isClearSessionLogEnabled = hasSessionLog
     }
 }
@@ -284,6 +290,10 @@ protocol RealtimeVoiceProvider: AnyObject {
     func stopVoice()
     func showProviderInterface()
     func reloadProviderInterface()
+}
+
+protocol VoiceProviderConnectionChecking: AnyObject {
+    func checkConnection()
 }
 
 extension RealtimeVoiceProvider {

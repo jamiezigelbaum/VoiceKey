@@ -8,7 +8,8 @@ final class ChatGPTWebProvider: RealtimeVoiceProvider {
         supportsInterruptions: true,
         supportsFunctionCalling: false,
         supportsVisionInput: false,
-        supportsProviderInterface: true
+        supportsProviderInterface: true,
+        supportsConnectionCheck: false
     )
 
     var onEvent: ((VoiceProviderEvent) -> Void)?

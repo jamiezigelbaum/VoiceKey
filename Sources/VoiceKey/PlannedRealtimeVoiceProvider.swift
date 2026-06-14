@@ -41,7 +41,8 @@ final class GeminiLiveProvider: PlannedRealtimeVoiceProvider {
                 supportsInterruptions: true,
                 supportsFunctionCalling: true,
                 supportsVisionInput: true,
-                supportsProviderInterface: false
+                supportsProviderInterface: false,
+                supportsConnectionCheck: false
             )
         )
     }
@@ -57,7 +58,8 @@ final class DeepgramVoiceAgentProvider: PlannedRealtimeVoiceProvider {
                 supportsInterruptions: true,
                 supportsFunctionCalling: true,
                 supportsVisionInput: false,
-                supportsProviderInterface: false
+                supportsProviderInterface: false,
+                supportsConnectionCheck: false
             )
         )
     }

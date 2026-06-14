@@ -54,6 +54,7 @@ This is an early native Swift/AppKit app with:
 - OpenAI Realtime API provider over WebSocket as the default path, with live
   WebSocket/session-update smoke coverage
 - ChatGPT Web provider as a sign-in/OAuth fallback path
+- menu action for checking an API provider connection without starting the microphone
 - Keychain-backed provider API key storage
 - native microphone capture and streamed audio playback
 - persistent `WKWebView` session for `chatgpt.com`
@@ -106,6 +107,9 @@ VoiceKey runs from the menu bar. Open `Settings...` to choose a realtime
 provider, model, voice, instructions, and credentials. API keys are stored in
 the macOS Keychain and can be replaced or removed from Settings. ChatGPT Web
 uses its normal sign-in flow in VoiceKey's provider window instead of an API key.
+
+Choose `Check API Connection` to verify an API provider key, model, WebSocket
+connection, and session-update contract before starting a microphone session.
 
 The menu shows the currently assigned voice hotkey in the native shortcut column.
 The menu bar icon shows a compact version of the same hotkey, plus a simple
