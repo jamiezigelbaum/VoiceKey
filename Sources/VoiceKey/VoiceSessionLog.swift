@@ -2,20 +2,30 @@ import Foundation
 
 struct VoiceSessionLog: Equatable {
     private enum Entry: Equatable {
-        case status(provider: VoiceProviderID, title: String)
-        case transcript(provider: VoiceProviderID, text: String)
-        case diagnostic(provider: VoiceProviderID, text: String)
+        case status(timestamp: Date, provider: VoiceProviderID, title: String)
+        case transcript(timestamp: Date, provider: VoiceProviderID, text: String)
+        case diagnostic(timestamp: Date, provider: VoiceProviderID, text: String)
 
         var line: String {
             switch self {
-            case let .status(provider, title):
-                return "\(provider.displayName) status: \(title)"
-            case let .transcript(provider, text):
-                return "\(provider.displayName) transcript: \(text)"
-            case let .diagnostic(provider, text):
-                return "\(provider.displayName) diagnostic: \(text)"
+            case let .status(timestamp, provider, title):
+                return "\(prefix(timestamp: timestamp, provider: provider)) status: \(title)"
+            case let .transcript(timestamp, provider, text):
+                return "\(prefix(timestamp: timestamp, provider: provider)) transcript: \(text)"
+            case let .diagnostic(timestamp, provider, text):
+                return "\(prefix(timestamp: timestamp, provider: provider)) diagnostic: \(text)"
             }
         }
+
+        private func prefix(timestamp: Date, provider: VoiceProviderID) -> String {
+            "[\(Self.timestampFormatter.string(from: timestamp))] \(provider.displayName)"
+        }
+
+        private static let timestampFormatter: ISO8601DateFormatter = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            return formatter
+        }()
     }
 
     private var entries: [Entry] = []
@@ -31,14 +41,14 @@ struct VoiceSessionLog: Equatable {
         return entries.map(\.line).joined(separator: "\n")
     }
 
-    mutating func append(_ event: VoiceProviderEvent, provider: VoiceProviderID) {
+    mutating func append(_ event: VoiceProviderEvent, provider: VoiceProviderID, timestamp: Date = Date()) {
         switch event {
         case let .status(status):
-            appendStatus(status, provider: provider)
+            appendStatus(status, provider: provider, timestamp: timestamp)
         case let .transcript(delta):
-            appendTranscriptDelta(delta, provider: provider)
+            appendTranscriptDelta(delta, provider: provider, timestamp: timestamp)
         case let .diagnostic(message):
-            appendDiagnostic(message, provider: provider)
+            appendDiagnostic(message, provider: provider, timestamp: timestamp)
         }
     }
 
@@ -46,29 +56,29 @@ struct VoiceSessionLog: Equatable {
         entries.removeAll()
     }
 
-    private mutating func appendStatus(_ status: ProviderStatus, provider: VoiceProviderID) {
+    private mutating func appendStatus(_ status: ProviderStatus, provider: VoiceProviderID, timestamp: Date) {
         if case .ready = status, entries.isEmpty {
             return
         }
-        entries.append(.status(provider: provider, title: statusLogTitle(status)))
+        entries.append(.status(timestamp: timestamp, provider: provider, title: statusLogTitle(status)))
     }
 
-    private mutating func appendTranscriptDelta(_ delta: String, provider: VoiceProviderID) {
+    private mutating func appendTranscriptDelta(_ delta: String, provider: VoiceProviderID, timestamp: Date) {
         guard delta.isEmpty == false else { return }
 
         if let last = entries.last,
-           case let .transcript(lastProvider, text) = last,
+           case let .transcript(lastTimestamp, lastProvider, text) = last,
            lastProvider == provider {
-            entries[entries.count - 1] = .transcript(provider: provider, text: text + delta)
+            entries[entries.count - 1] = .transcript(timestamp: lastTimestamp, provider: provider, text: text + delta)
             return
         }
 
-        entries.append(.transcript(provider: provider, text: delta))
+        entries.append(.transcript(timestamp: timestamp, provider: provider, text: delta))
     }
 
-    private mutating func appendDiagnostic(_ message: String, provider: VoiceProviderID) {
+    private mutating func appendDiagnostic(_ message: String, provider: VoiceProviderID, timestamp: Date) {
         guard message.isEmpty == false else { return }
-        entries.append(.diagnostic(provider: provider, text: message))
+        entries.append(.diagnostic(timestamp: timestamp, provider: provider, text: message))
     }
 
     private func statusLogTitle(_ status: ProviderStatus) -> String {

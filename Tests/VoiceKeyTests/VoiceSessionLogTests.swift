@@ -2,6 +2,8 @@
 import XCTest
 
 final class VoiceSessionLogTests: XCTestCase {
+    private let timestamp = Date(timeIntervalSince1970: 1_781_438_400)
+
     func testEmptyLogShowsPlaceholder() {
         let log = VoiceSessionLog()
 
@@ -12,23 +14,23 @@ final class VoiceSessionLogTests: XCTestCase {
     func testTranscriptDeltasCoalesceForSameProvider() {
         var log = VoiceSessionLog()
 
-        log.append(.transcript("hel"), provider: .openAIRealtime)
-        log.append(.transcript("lo"), provider: .openAIRealtime)
+        log.append(.transcript("hel"), provider: .openAIRealtime, timestamp: timestamp)
+        log.append(.transcript("lo"), provider: .openAIRealtime, timestamp: timestamp.addingTimeInterval(1))
 
-        XCTAssertEqual(log.displayText, "OpenAI Realtime API transcript: hello")
+        XCTAssertEqual(log.displayText, "[2026-06-14T12:00:00Z] OpenAI Realtime API transcript: hello")
     }
 
     func testTranscriptDeltasDoNotCoalesceAcrossProviders() {
         var log = VoiceSessionLog()
 
-        log.append(.transcript("hello"), provider: .openAIRealtime)
-        log.append(.transcript("hi"), provider: .chatGPTWeb)
+        log.append(.transcript("hello"), provider: .openAIRealtime, timestamp: timestamp)
+        log.append(.transcript("hi"), provider: .chatGPTWeb, timestamp: timestamp.addingTimeInterval(1))
 
         XCTAssertEqual(
             log.displayText,
             """
-            OpenAI Realtime API transcript: hello
-            ChatGPT Web (OAuth) transcript: hi
+            [2026-06-14T12:00:00Z] OpenAI Realtime API transcript: hello
+            [2026-06-14T12:00:01Z] ChatGPT Web (OAuth) transcript: hi
             """
         )
     }
@@ -36,14 +38,14 @@ final class VoiceSessionLogTests: XCTestCase {
     func testStatusAndDiagnosticsAreLogged() {
         var log = VoiceSessionLog()
 
-        log.append(.status(.listening), provider: .openAIRealtime)
-        log.append(.diagnostic("rate_limits.updated"), provider: .openAIRealtime)
+        log.append(.status(.listening), provider: .openAIRealtime, timestamp: timestamp)
+        log.append(.diagnostic("rate_limits.updated"), provider: .openAIRealtime, timestamp: timestamp.addingTimeInterval(1))
 
         XCTAssertEqual(
             log.displayText,
             """
-            OpenAI Realtime API status: Listening
-            OpenAI Realtime API diagnostic: rate_limits.updated
+            [2026-06-14T12:00:00Z] OpenAI Realtime API status: Listening
+            [2026-06-14T12:00:01Z] OpenAI Realtime API diagnostic: rate_limits.updated
             """
         )
     }
@@ -51,7 +53,7 @@ final class VoiceSessionLogTests: XCTestCase {
     func testInitialReadyStatusIsIgnored() {
         var log = VoiceSessionLog()
 
-        log.append(.status(.ready), provider: .openAIRealtime)
+        log.append(.status(.ready), provider: .openAIRealtime, timestamp: timestamp)
 
         XCTAssertTrue(log.isEmpty)
         XCTAssertEqual(log.displayText, "No voice session activity yet.")
@@ -59,7 +61,7 @@ final class VoiceSessionLogTests: XCTestCase {
 
     func testClearRemovesEntries() {
         var log = VoiceSessionLog()
-        log.append(.diagnostic("connected"), provider: .openAIRealtime)
+        log.append(.diagnostic("connected"), provider: .openAIRealtime, timestamp: timestamp)
 
         log.clear()
 

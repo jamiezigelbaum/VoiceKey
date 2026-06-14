@@ -116,9 +116,9 @@ The menu bar icon shows a compact version of the same hotkey, plus a simple
 shape state: ready, loading, attention, or voice active. Choose `Settings...` to
 record a different global hotkey.
 
-Choose `Show Session Log` to inspect provider status changes, diagnostics, and
-streamed transcript text during live testing. Choose `Copy Session Log` to share
-the same live-test evidence without taking screenshots.
+Choose `Show Session Log` to inspect timestamped provider status changes,
+diagnostics, and streamed transcript text during live testing. Choose `Copy
+Session Log` to share the same live-test evidence without taking screenshots.
 
 If the voice provider appears to hear phrases you did not say, change macOS audio output to
 headphones or another output path that the microphone cannot hear. VoiceKey
