@@ -5,6 +5,7 @@ struct VoiceKeyDiagnosticsSnapshot {
     var configuration: VoiceSessionConfiguration
     var readiness: VoiceProviderReadiness
     var hotKey: HotKeyConfiguration
+    var hotKeyRegistrationStatus: String
     var currentStatus: ProviderStatus
     var hasAPIKey: Bool
     var supportsProviderInterface: Bool
@@ -22,6 +23,7 @@ struct VoiceKeyDiagnosticsSnapshot {
             "Model: \(configuration.model)",
             "Voice: \(configuration.voice)",
             "Hotkey: \(hotKey.displayName)",
+            "Hotkey registration: \(hotKeyRegistrationStatus)",
             "Status: \(statusTitle)",
             "Provider window: \(yesNo(supportsProviderInterface))",
             "Connection check: \(yesNo(supportsConnectionCheck))",

@@ -14,6 +14,7 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
             configuration: configuration,
             readiness: .ready,
             hotKey: .defaultVoiceToggle,
+            hotKeyRegistrationStatus: "Carbon registered; event monitor fallback active",
             currentStatus: .listening,
             hasAPIKey: true,
             supportsProviderInterface: false,
@@ -33,6 +34,7 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
             Model: gpt-realtime-2
             Voice: marin
             Hotkey: F16
+            Hotkey registration: Carbon registered; event monitor fallback active
             Status: Listening
             Provider window: no
             Connection check: yes
@@ -49,6 +51,7 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
             configuration: VoiceProviderID.openAIRealtime.defaultConfiguration,
             readiness: .needsAPIKey("OpenAI API key required."),
             hotKey: .defaultVoiceToggle,
+            hotKeyRegistrationStatus: "Carbon registered; event monitor fallback active",
             currentStatus: .needsAttention("OpenAI API key required."),
             hasAPIKey: false,
             supportsProviderInterface: false,
@@ -67,6 +70,7 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
             configuration: VoiceProviderID.chatGPTWeb.defaultConfiguration,
             readiness: .providerSignIn("Uses provider sign-in."),
             hotKey: .defaultVoiceToggle,
+            hotKeyRegistrationStatus: "Carbon registered; event monitor fallback active",
             currentStatus: .ready,
             hasAPIKey: false,
             supportsProviderInterface: true,

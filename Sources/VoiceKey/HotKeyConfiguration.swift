@@ -73,6 +73,11 @@ struct HotKeyConfiguration {
         defaults.set(mainKeyDisplayName, forKey: DefaultsKeys.mainKeyDisplayName)
     }
 
+    func matches(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> Bool {
+        guard UInt32(keyCode) == self.keyCode else { return false }
+        return modifierFlags.intersection(Self.shortcutModifierFlags) == menuModifierMask
+    }
+
     init?(
         keyCode: UInt32,
         charactersIgnoringModifiers: String?,
@@ -80,7 +85,7 @@ struct HotKeyConfiguration {
     ) {
         guard !Self.modifierOnlyKeyCodes.contains(keyCode) else { return nil }
 
-        let menuModifierMask = modifierFlags.intersection([.command, .option, .shift, .control])
+        let menuModifierMask = modifierFlags.intersection(Self.shortcutModifierFlags)
         let carbonModifiers = Self.carbonModifiers(from: menuModifierMask)
         let modifierDisplayName = Self.modifierDisplayName(from: menuModifierMask)
 
@@ -244,6 +249,8 @@ struct HotKeyConfiguration {
         }
         return displayName
     }
+
+    private static let shortcutModifierFlags: NSEvent.ModifierFlags = [.command, .option, .shift, .control]
 }
 
 private enum DefaultsKeys {

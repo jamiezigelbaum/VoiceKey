@@ -92,6 +92,28 @@ final class HotKeyConfigurationTests: XCTestCase {
         XCTAssertEqual(HotKeyConfiguration.loadVoiceToggle(defaults: defaults).displayName, "⌘V")
         XCTAssertEqual(HotKeyConfiguration.loadVoiceToggle(defaults: defaults).menuKeyEquivalent, "v")
     }
+
+    func testHotKeyMatchingIgnoresFunctionFlag() {
+        XCTAssertTrue(HotKeyConfiguration.defaultVoiceToggle.matches(
+            keyCode: UInt16(kVK_F16),
+            modifierFlags: [.function]
+        ))
+    }
+
+    func testHotKeyMatchingRequiresConfiguredShortcutModifiers() {
+        let hotKey = HotKeyConfiguration(
+            keyCode: UInt32(kVK_ANSI_V),
+            carbonModifiers: UInt32(cmdKey),
+            menuKeyEquivalent: "v",
+            menuModifierMask: [.command],
+            displayName: "⌘V",
+            mainKeyDisplayName: "V"
+        )
+
+        XCTAssertTrue(hotKey.matches(keyCode: UInt16(kVK_ANSI_V), modifierFlags: [.command]))
+        XCTAssertFalse(hotKey.matches(keyCode: UInt16(kVK_ANSI_V), modifierFlags: []))
+        XCTAssertFalse(hotKey.matches(keyCode: UInt16(kVK_ANSI_B), modifierFlags: [.command]))
+    }
 }
 
 final class MenuBarIconStateTests: XCTestCase {

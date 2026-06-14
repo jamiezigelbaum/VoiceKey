@@ -11,8 +11,13 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private var sessionLogWindowController: SessionLogWindowController?
     private var voiceProvider: RealtimeVoiceProvider?
     private var sessionLog = VoiceSessionLog()
+    private var localHotKeyMonitor: Any?
+    private var globalHotKeyMonitor: Any?
+    private var lastHotKeyTriggerTime: TimeInterval = 0
+    private var hotKeyRegistrationStatus = "Carbon not registered"
     private let statusMenuItem = NSMenuItem(title: "Status: Loading", action: nil, keyEquivalent: "")
     private let providerMenuItem = NSMenuItem(title: "Provider: OpenAI Realtime API", action: nil, keyEquivalent: "")
+    private let hotKeyStatusMenuItem = NSMenuItem(title: "Hotkey: F16", action: nil, keyEquivalent: "")
     private let audioTipMenuItem = NSMenuItem(title: "Tip: Use headphones or non-speaker output to prevent voice loops", action: nil, keyEquivalent: "")
     private lazy var toggleMenuItem = NSMenuItem(
         title: "Start VoiceKey Voice",
@@ -75,9 +80,11 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         statusMenuItem.isEnabled = false
         providerMenuItem.isEnabled = false
+        hotKeyStatusMenuItem.isEnabled = false
         audioTipMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
         menu.addItem(providerMenuItem)
+        menu.addItem(hotKeyStatusMenuItem)
         menu.addItem(audioTipMenuItem)
         menu.addItem(.separator())
         configureVoiceHotKeyMenuItem()
@@ -109,13 +116,20 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     @discardableResult
     private func registerHotKey(_ configuration: HotKeyConfiguration, previousHotKeyName: String?) -> Bool {
         hotKey = nil
+        removeHotKeyMonitors()
 
         do {
             hotKey = try GlobalHotKey(keyCode: configuration.keyCode, modifiers: configuration.carbonModifiers) { [weak self] in
-                self?.toggleVoice()
+                self?.triggerVoiceHotKey()
             }
+            hotKeyRegistrationStatus = "Carbon registered; event monitor fallback active"
+            installHotKeyMonitors(for: configuration)
+            updateHotKeyStatusMenuItem()
             return true
         } catch {
+            hotKeyRegistrationStatus = "Carbon registration failed: \(error.localizedDescription); event monitor fallback active"
+            installHotKeyMonitors(for: configuration)
+            updateHotKeyStatusMenuItem()
             let fallback = previousHotKeyName.map { " VoiceKey restored \($0)." } ?? ""
             presentError("Could not register \(configuration.displayName): \(error.localizedDescription).\(fallback)")
             return false
@@ -126,6 +140,46 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         toggleMenuItem.title = currentStatus.voiceToggleTitle
         toggleMenuItem.keyEquivalent = voiceHotKey.menuKeyEquivalent
         toggleMenuItem.keyEquivalentModifierMask = voiceHotKey.menuModifierMask
+        updateHotKeyStatusMenuItem()
+    }
+
+    private func updateHotKeyStatusMenuItem() {
+        hotKeyStatusMenuItem.title = "Hotkey: \(voiceHotKey.displayName) - \(hotKeyRegistrationStatus)"
+    }
+
+    private func installHotKeyMonitors(for configuration: HotKeyConfiguration) {
+        localHotKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard configuration.matches(keyCode: event.keyCode, modifierFlags: event.modifierFlags) else {
+                return event
+            }
+            self?.triggerVoiceHotKey()
+            return nil
+        }
+
+        globalHotKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard configuration.matches(keyCode: event.keyCode, modifierFlags: event.modifierFlags) else { return }
+            self?.triggerVoiceHotKey()
+        }
+    }
+
+    private func removeHotKeyMonitors() {
+        if let localHotKeyMonitor {
+            NSEvent.removeMonitor(localHotKeyMonitor)
+            self.localHotKeyMonitor = nil
+        }
+        if let globalHotKeyMonitor {
+            NSEvent.removeMonitor(globalHotKeyMonitor)
+            self.globalHotKeyMonitor = nil
+        }
+    }
+
+    private func triggerVoiceHotKey() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastHotKeyTriggerTime > 0.25 else { return }
+        lastHotKeyTriggerTime = now
+        DispatchQueue.main.async { [weak self] in
+            self?.toggleVoice()
+        }
     }
 
     private func configureProvider() {
@@ -301,6 +355,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             configuration: providerConfiguration,
             readiness: provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)),
             hotKey: voiceHotKey,
+            hotKeyRegistrationStatus: hotKeyRegistrationStatus,
             currentStatus: currentStatus,
             hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider),
             supportsProviderInterface: voiceProvider?.capabilities.supportsProviderInterface == true,
