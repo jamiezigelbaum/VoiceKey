@@ -182,10 +182,19 @@ struct VoiceProviderCredentialViewState: Equatable {
     }
 }
 
+enum VoiceProviderSetupAction: Equatable {
+    case none
+    case openSettings
+    case showProviderInterface
+}
+
 struct VoiceProviderMenuState: Equatable {
     var providerTitle: String
     var toggleTitle: String
     var isToggleEnabled: Bool
+    var setupTitle: String
+    var setupAction: VoiceProviderSetupAction
+    var isSetupEnabled: Bool
     var showProviderTitle: String
     var reloadProviderTitle: String
     var isProviderInterfaceEnabled: Bool
@@ -203,15 +212,30 @@ struct VoiceProviderMenuState: Equatable {
         }
 
         switch readiness {
-        case .ready, .providerSignIn:
+        case .ready:
             toggleTitle = "Start/End VoiceKey Voice"
             isToggleEnabled = true
+            setupTitle = "Provider Settings..."
+            setupAction = .openSettings
+            isSetupEnabled = true
+        case .providerSignIn:
+            toggleTitle = "Start/End VoiceKey Voice"
+            isToggleEnabled = true
+            setupTitle = "Sign In with Provider..."
+            setupAction = supportsProviderInterface ? .showProviderInterface : .openSettings
+            isSetupEnabled = true
         case .needsAPIKey:
             toggleTitle = "Add API Key in Settings"
             isToggleEnabled = false
+            setupTitle = "Add API Key..."
+            setupAction = .openSettings
+            isSetupEnabled = true
         case .unavailable:
             toggleTitle = "\(provider.displayName) Coming Soon"
             isToggleEnabled = false
+            setupTitle = "\(provider.displayName) Coming Soon"
+            setupAction = .none
+            isSetupEnabled = false
         }
 
         isProviderInterfaceEnabled = supportsProviderInterface

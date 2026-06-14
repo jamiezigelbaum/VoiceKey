@@ -21,6 +21,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     )
     private let showProviderMenuItem = NSMenuItem(title: "Show Provider", action: #selector(showProvider), keyEquivalent: "")
     private let reloadProviderMenuItem = NSMenuItem(title: "Reload Provider", action: #selector(reloadProvider), keyEquivalent: "")
+    private let setupProviderMenuItem = NSMenuItem(title: "Provider Settings...", action: #selector(setupProvider), keyEquivalent: "")
     private let showSessionLogMenuItem = NSMenuItem(title: "Show Session Log", action: #selector(showSessionLog), keyEquivalent: "")
     private let clearSessionLogMenuItem = NSMenuItem(title: "Clear Session Log", action: #selector(clearSessionLog), keyEquivalent: "")
     private let settingsMenuItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
@@ -74,6 +75,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         configureVoiceHotKeyMenuItem()
         menu.addItem(toggleMenuItem)
+        menu.addItem(setupProviderMenuItem)
         menu.addItem(showProviderMenuItem)
         menu.addItem(reloadProviderMenuItem)
         menu.addItem(showSessionLogMenuItem)
@@ -154,6 +156,19 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         voiceProvider?.reloadProviderInterface()
     }
 
+    @objc private func setupProvider() {
+        switch providerMenuState().setupAction {
+        case .openSettings:
+            showSettings()
+        case .showProviderInterface:
+            voiceProvider?.showProviderInterface()
+        case .none:
+            updateStatus(.needsAttention(providerConfiguration.providerID.readiness(
+                hasAPIKey: APIKeyStore.shared.hasAPIKey(for: providerConfiguration.providerID)
+            ).settingsMessage))
+        }
+    }
+
     @objc private func showSessionLog() {
         let controller = sessionLogWindowController ?? SessionLogWindowController(text: sessionLog.displayText)
         sessionLogWindowController = controller
@@ -222,6 +237,8 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         clearSessionLogMenuItem.isEnabled = state.isClearSessionLogEnabled
         toggleMenuItem.title = state.toggleTitle
         toggleMenuItem.isEnabled = state.isToggleEnabled
+        setupProviderMenuItem.title = state.setupTitle
+        setupProviderMenuItem.isEnabled = state.isSetupEnabled
     }
 
     private func providerMenuState() -> VoiceProviderMenuState {
