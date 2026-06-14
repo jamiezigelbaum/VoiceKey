@@ -217,6 +217,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertFalse(state.isProviderInterfaceEnabled)
         XCTAssertEqual(state.checkConnectionTitle, "Check API Connection")
         XCTAssertTrue(state.isCheckConnectionEnabled)
+        XCTAssertTrue(state.isCopySessionLogEnabled)
         XCTAssertTrue(state.isClearSessionLogEnabled)
     }
 
@@ -237,6 +238,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertTrue(state.isSetupEnabled)
         XCTAssertEqual(state.checkConnectionTitle, "Check API Connection")
         XCTAssertFalse(state.isCheckConnectionEnabled)
+        XCTAssertFalse(state.isCopySessionLogEnabled)
         XCTAssertFalse(state.isClearSessionLogEnabled)
     }
 
@@ -260,6 +262,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertTrue(state.isProviderInterfaceEnabled)
         XCTAssertEqual(state.checkConnectionTitle, "Check Provider Connection")
         XCTAssertFalse(state.isCheckConnectionEnabled)
+        XCTAssertFalse(state.isCopySessionLogEnabled)
     }
 
     func testProviderMenuStateForComingSoonProvider() {
@@ -282,6 +285,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertFalse(state.isProviderInterfaceEnabled)
         XCTAssertEqual(state.checkConnectionTitle, "Check API Connection")
         XCTAssertFalse(state.isCheckConnectionEnabled)
+        XCTAssertFalse(state.isCopySessionLogEnabled)
     }
 
     func testGeminiLiveProviderCapabilitiesMatchRealtimeVoiceAndVisionSlot() {

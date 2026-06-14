@@ -201,6 +201,7 @@ struct VoiceProviderMenuState: Equatable {
     var isProviderInterfaceEnabled: Bool
     var checkConnectionTitle: String
     var isCheckConnectionEnabled: Bool
+    var isCopySessionLogEnabled: Bool
     var isClearSessionLogEnabled: Bool
 
     init(
@@ -256,6 +257,7 @@ struct VoiceProviderMenuState: Equatable {
 
         checkConnectionTitle = provider.requiresAPIKey ? "Check API Connection" : "Check Provider Connection"
         isCheckConnectionEnabled = readiness == .ready && supportsConnectionCheck
+        isCopySessionLogEnabled = hasSessionLog
         isClearSessionLogEnabled = hasSessionLog
     }
 }

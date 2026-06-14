@@ -28,6 +28,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         keyEquivalent: ""
     )
     private let showSessionLogMenuItem = NSMenuItem(title: "Show Session Log", action: #selector(showSessionLog), keyEquivalent: "")
+    private let copySessionLogMenuItem = NSMenuItem(title: "Copy Session Log", action: #selector(copySessionLog), keyEquivalent: "")
     private let clearSessionLogMenuItem = NSMenuItem(title: "Clear Session Log", action: #selector(clearSessionLog), keyEquivalent: "")
     private let copyDiagnosticsMenuItem = NSMenuItem(title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: "")
     private let settingsMenuItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
@@ -86,6 +87,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(showProviderMenuItem)
         menu.addItem(reloadProviderMenuItem)
         menu.addItem(showSessionLogMenuItem)
+        menu.addItem(copySessionLogMenuItem)
         menu.addItem(clearSessionLogMenuItem)
         menu.addItem(copyDiagnosticsMenuItem)
         settingsMenuItem.keyEquivalentModifierMask = [.command]
@@ -200,6 +202,12 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         controller.showAndFocus()
     }
 
+    @objc private func copySessionLog() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(sessionLog.displayText, forType: .string)
+        updateStatus(.needsAttention("Session log copied to clipboard."))
+    }
+
     @objc private func clearSessionLog() {
         sessionLog.clear()
         sessionLogWindowController?.update(text: sessionLog.displayText)
@@ -264,6 +272,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         reloadProviderMenuItem.isEnabled = state.isProviderInterfaceEnabled
         showProviderMenuItem.title = state.showProviderTitle
         reloadProviderMenuItem.title = state.reloadProviderTitle
+        copySessionLogMenuItem.isEnabled = state.isCopySessionLogEnabled
         clearSessionLogMenuItem.isEnabled = state.isClearSessionLogEnabled
         toggleMenuItem.title = state.toggleTitle
         toggleMenuItem.isEnabled = state.isToggleEnabled
