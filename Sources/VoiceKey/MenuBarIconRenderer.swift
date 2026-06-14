@@ -12,7 +12,7 @@ enum MenuBarIconState: Equatable {
             self = .loading
         case .loginRequired, .needsAttention:
             self = .problem
-        case .clickSent, .voiceActive:
+        case .listening, .thinking, .speaking, .clickSent, .voiceActive:
             self = .active
         case .ready:
             self = .ready

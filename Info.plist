@@ -22,6 +22,6 @@
   <key>LSUIElement</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>
-  <string>VoiceKey needs microphone access so ChatGPT Voice can hear you.</string>
+  <string>VoiceKey needs microphone access to stream your speech to your selected realtime voice provider.</string>
 </dict>
 </plist>

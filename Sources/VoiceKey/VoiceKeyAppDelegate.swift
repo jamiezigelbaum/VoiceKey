@@ -3,33 +3,28 @@ import Carbon
 
 final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private var voiceHotKey = HotKeyConfiguration.voiceToggle
+    private var providerConfiguration = VoiceProviderSettingsStore.load()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var hotKey: GlobalHotKey?
     private var currentStatus: ProviderStatus = .loading
     private var settingsWindowController: SettingsWindowController?
-    private lazy var chatGPT: ChatGPTProvider = {
-        let provider = ChatGPTProvider()
-        provider.onStatusChange = { [weak self] status in
-            self?.updateStatus(status)
-        }
-        return provider
-    }()
-    private let statusMenuItem = NSMenuItem(title: "Status: Loading ChatGPT", action: nil, keyEquivalent: "")
+    private var voiceProvider: RealtimeVoiceProvider?
+    private let statusMenuItem = NSMenuItem(title: "Status: Loading", action: nil, keyEquivalent: "")
+    private let providerMenuItem = NSMenuItem(title: "Provider: OpenAI Realtime", action: nil, keyEquivalent: "")
     private let audioTipMenuItem = NSMenuItem(title: "Tip: Use headphones or non-speaker output to prevent voice loops", action: nil, keyEquivalent: "")
     private lazy var toggleMenuItem = NSMenuItem(
-        title: "Start/End ChatGPT Voice",
-        action: #selector(toggleChatGPTVoice),
+        title: "Start/End VoiceKey Voice",
+        action: #selector(toggleVoice),
         keyEquivalent: voiceHotKey.menuKeyEquivalent
     )
-    private let showMenuItem = NSMenuItem(title: "Show ChatGPT", action: #selector(showChatGPT), keyEquivalent: "")
-    private let reloadMenuItem = NSMenuItem(title: "Reload ChatGPT", action: #selector(reloadChatGPT), keyEquivalent: "")
     private let settingsMenuItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configureApplicationMenu()
         configureMenuBar()
         registerHotKey(voiceHotKey, previousHotKeyName: nil)
-        chatGPT.prepare()
+        configureProvider()
+        voiceProvider?.prepare()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -65,14 +60,14 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         statusMenuItem.isEnabled = false
+        providerMenuItem.isEnabled = false
         audioTipMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
+        menu.addItem(providerMenuItem)
         menu.addItem(audioTipMenuItem)
         menu.addItem(.separator())
         configureVoiceHotKeyMenuItem()
         menu.addItem(toggleMenuItem)
-        menu.addItem(showMenuItem)
-        menu.addItem(reloadMenuItem)
         settingsMenuItem.keyEquivalentModifierMask = [.command]
         menu.addItem(settingsMenuItem)
         menu.addItem(.separator())
@@ -95,7 +90,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             hotKey = try GlobalHotKey(keyCode: configuration.keyCode, modifiers: configuration.carbonModifiers) { [weak self] in
-                self?.toggleChatGPTVoice()
+                self?.toggleVoice()
             }
             return true
         } catch {
@@ -106,27 +101,50 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureVoiceHotKeyMenuItem() {
-        toggleMenuItem.title = "Start/End ChatGPT Voice"
+        toggleMenuItem.title = "Start/End VoiceKey Voice"
         toggleMenuItem.keyEquivalent = voiceHotKey.menuKeyEquivalent
         toggleMenuItem.keyEquivalentModifierMask = voiceHotKey.menuModifierMask
     }
 
-    @objc private func toggleChatGPTVoice() {
-        chatGPT.toggleVoice()
+    private func configureProvider() {
+        let provider: RealtimeVoiceProvider
+        switch providerConfiguration.providerID {
+        case .openAIRealtime:
+            provider = OpenAIRealtimeProvider(
+                configuration: providerConfiguration,
+                apiKeyProvider: { APIKeyStore.shared.apiKey(for: .openAIRealtime) }
+            )
+        case .geminiLive, .deepgramVoiceAgent:
+            provider = UnavailableVoiceProvider(id: providerConfiguration.providerID)
+        }
+
+        provider.onEvent = { [weak self] event in
+            switch event {
+            case let .status(status):
+                self?.updateStatus(status)
+            case let .diagnostic(message):
+                self?.statusMenuItem.toolTip = message
+            case .transcript:
+                break
+            }
+        }
+
+        voiceProvider = provider
+        providerMenuItem.title = "Provider: \(providerConfiguration.providerID.displayName)"
     }
 
-    @objc private func showChatGPT() {
-        chatGPT.show()
-    }
-
-    @objc private func reloadChatGPT() {
-        chatGPT.reload()
+    @objc private func toggleVoice() {
+        voiceProvider?.toggleVoice()
     }
 
     @objc private func showSettings() {
-        let controller = settingsWindowController ?? SettingsWindowController(hotKey: voiceHotKey)
+        let controller = settingsWindowController ?? SettingsWindowController(
+            hotKey: voiceHotKey,
+            configuration: providerConfiguration
+        )
         controller.delegate = self
         controller.hotKey = voiceHotKey
+        controller.configuration = providerConfiguration
         settingsWindowController = controller
         controller.showAndFocus()
     }
@@ -146,6 +164,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         currentStatus = status
         statusItem.button?.toolTip = "VoiceKey - \(status.menuTitle)"
         statusMenuItem.title = "Status: \(status.menuTitle)"
+        providerMenuItem.title = "Provider: \(providerConfiguration.providerID.displayName)"
         updateHotKeyPresentation()
 
         if let detail = status.detail {
@@ -157,6 +176,20 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         configureVoiceHotKeyMenuItem()
         settingsWindowController?.hotKey = voiceHotKey
         statusItem.button?.image = MenuBarIconRenderer.image(for: voiceHotKey, status: currentStatus)
+    }
+
+    private func updateProviderConfiguration(_ configuration: VoiceSessionConfiguration) {
+        providerConfiguration = configuration
+        VoiceProviderSettingsStore.save(configuration)
+
+        if voiceProvider?.id == configuration.providerID {
+            voiceProvider?.update(configuration: configuration)
+        } else {
+            voiceProvider?.stopVoice()
+            configureProvider()
+            voiceProvider?.prepare()
+        }
+        updateHotKeyPresentation()
     }
 }
 
@@ -177,5 +210,16 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
 
         hotKey.saveAsVoiceToggle()
         updateHotKeyPresentation()
+    }
+
+    func settingsWindowController(
+        _ controller: SettingsWindowController,
+        didUpdate configuration: VoiceSessionConfiguration
+    ) {
+        updateProviderConfiguration(configuration)
+    }
+
+    func settingsWindowControllerDidUpdateAPIKey(_ controller: SettingsWindowController) {
+        voiceProvider?.prepare()
     }
 }

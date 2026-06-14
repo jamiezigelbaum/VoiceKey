@@ -1,10 +1,11 @@
 # VoiceKey
 
-VoiceKey is a tiny macOS menu bar app for one-key access to web-based AI voice
-experiences without keeping a browser window open.
+VoiceKey is a tiny macOS menu bar app for one-key access to realtime AI voice
+providers.
 
-The first provider is ChatGPT Voice on `chatgpt.com`. Claude Web is planned as
-the next provider once the app shell and trusted-click bridge are solid.
+The first native provider is OpenAI Realtime. The app is being shaped around a
+provider-neutral voice session layer so users can choose the realtime voice API
+they want to use as additional adapters land.
 
 ## Install
 
@@ -13,10 +14,10 @@ and drag `VoiceKey.app` into `/Applications`.
 
 On first launch:
 
-1. Choose `Show ChatGPT` from the menu bar item.
-2. Sign in to ChatGPT.
-3. Grant microphone and accessibility permissions if macOS asks.
-4. Press `F16` to toggle ChatGPT Voice.
+1. Open `Settings...` from the menu bar item.
+2. Choose a provider and save the provider's API key.
+3. Grant microphone permission if macOS asks.
+4. Press `F16` to toggle VoiceKey voice.
 
 Homebrew Cask is available for the unsigned prerelease:
 
@@ -33,7 +34,7 @@ Settings > Privacy & Security.
 
 - Self-contained native macOS menu bar app.
 - No Hammerspoon, browser extension, Electron, or third-party package manager.
-- App-owned login/session through an embedded web view.
+- App-owned provider selection and voice session lifecycle.
 - App-owned global hotkey.
 - App-owned microphone permission.
 - Browser-free day-to-day workflow after first setup.
@@ -46,7 +47,11 @@ This is an early native Swift/AppKit app with:
 - bundled app icon
 - dynamic menu bar icon that reflects the configured hotkey and provider state
 - configurable global hotkey, defaulting to F16
-- settings window for recording a new hotkey
+- settings window for recording a new hotkey and configuring the selected voice provider
+- provider-neutral realtime voice session contract
+- OpenAI Realtime provider over WebSocket
+- Keychain-backed provider API key storage
+- native microphone capture and streamed audio playback
 - persistent `WKWebView` session for `chatgpt.com`
 - WebKit microphone permission hook
 - DOM-to-native-click bridge for ChatGPT Voice controls
@@ -55,9 +60,9 @@ This is an early native Swift/AppKit app with:
 - fixture-tested DOM probes that distinguish ChatGPT Voice Mode from text
   dictation controls
 
-The next milestone is live testing against ChatGPT's current web UI after
-sign-in, especially first-run voice selection, microphone prompts, and end-call
-behavior.
+The next milestone is live end-to-end testing of the OpenAI Realtime path,
+followed by additional provider adapters for Gemini Live and Deepgram Voice
+Agent.
 
 ## Build From Source
 
@@ -91,25 +96,24 @@ Release, and Homebrew cask steps.
 
 ## Usage
 
-VoiceKey keeps the ChatGPT window hidden during normal hotkey use. It only
-brings the window forward when sign-in is needed or when you choose
-`Show ChatGPT`.
+VoiceKey runs from the menu bar. Open `Settings...` to choose a realtime
+provider, model, voice, instructions, and API key. API keys are stored in the
+macOS Keychain.
 
 The menu shows the currently assigned voice hotkey in the native shortcut column.
 The menu bar icon shows a compact version of the same hotkey, plus a simple
 shape state: ready, loading, attention, or voice active. Choose `Settings...` to
 record a different global hotkey.
 
-If ChatGPT appears to hear phrases you did not say, change macOS audio output to
+If the voice provider appears to hear phrases you did not say, change macOS audio output to
 headphones or another output path that the microphone cannot hear. VoiceKey
 sends one start click per F16 press; repeated phantom turns are usually speaker
 audio feeding back into the microphone.
 
 ## Privacy
 
-VoiceKey does not handle OpenAI passwords, OAuth tokens, or session cookies
-directly. Authentication happens through the provider's normal web login inside
-the app's web view. The web session is persisted by WebKit on your Mac.
+VoiceKey stores provider API keys in the macOS Keychain. Realtime audio is sent
+to the provider selected in Settings.
 
 ## Architecture
 
@@ -117,25 +121,26 @@ VoiceKey is intentionally small:
 
 - `VoiceKeyAppDelegate`: menu bar and hotkey lifecycle.
 - `GlobalHotKey`: Carbon `RegisterEventHotKey` wrapper.
+- `VoiceProvider`: provider-neutral realtime voice session contract and settings.
+- `OpenAIRealtimeProvider`: OpenAI Realtime WebSocket session and event mapping.
+- `RealtimeAudioEngine`: native microphone capture, audio conversion, and playback.
+- `APIKeyStore`: Keychain-backed provider credential storage.
 - `WebWindowController`: persistent `WKWebView`, mic permission, native click bridge.
 - `ChatGPTProvider`: provider-specific status, retry, and start/stop behavior.
 - `ChatGPTDOMProbe`: ChatGPT DOM selectors shared by the app and fixture tests.
 
-Provider support should stay behind a simple shape:
+Realtime provider support should stay behind a simple shape:
 
 ```text
 prepare()
-show()
+update(configuration:)
 toggleVoice()
-startVoice()
 stopVoice()
+events: status, transcript, diagnostic
 ```
 
 ## Notes
 
-VoiceKey does not handle OpenAI passwords, OAuth tokens, or session cookies
-directly. Authentication happens through the provider's normal web login inside
-the app's web view. The web session is persisted by WebKit.
-
-VoiceKey automates a human-facing web UI. It should not bypass provider limits,
-spoof private APIs, or run unattended conversations.
+The older ChatGPT web wrapper is still present in the source tree while the
+native realtime path is brought up, but the active app shell now points at the
+provider-neutral realtime layer.

@@ -107,11 +107,45 @@ final class MenuBarIconStateTests: XCTestCase {
     }
 
     func testActiveStatusesUseActiveIcon() {
+        XCTAssertEqual(MenuBarIconState(status: .listening), .active)
+        XCTAssertEqual(MenuBarIconState(status: .thinking), .active)
+        XCTAssertEqual(MenuBarIconState(status: .speaking), .active)
         XCTAssertEqual(MenuBarIconState(status: .clickSent), .active)
         XCTAssertEqual(MenuBarIconState(status: .voiceActive), .active)
     }
 
     func testReadyStatusUsesReadyIcon() {
         XCTAssertEqual(MenuBarIconState(status: .ready), .ready)
+    }
+}
+
+final class VoiceProviderSettingsStoreTests: XCTestCase {
+    func testLoadsDefaultsWhenNoProviderSettingsAreSaved() throws {
+        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        XCTAssertEqual(VoiceProviderSettingsStore.load(defaults: defaults), .default)
+    }
+
+    func testSavesAndLoadsProviderSettings() throws {
+        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let configuration = VoiceSessionConfiguration(
+            providerID: .geminiLive,
+            model: "gemini-live-2.5-flash-preview",
+            voice: "Puck",
+            instructions: "Be brief."
+        )
+
+        VoiceProviderSettingsStore.save(configuration, defaults: defaults)
+
+        XCTAssertEqual(VoiceProviderSettingsStore.load(defaults: defaults), configuration)
     }
 }
