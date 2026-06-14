@@ -120,14 +120,9 @@ final class RealtimeAudioEngine {
             throw RealtimeAudioEngineError.conversionFailed
         }
 
-        var output = Data(capacity: Int(converted.frameLength) * 2)
-        for index in 0..<Int(converted.frameLength) {
-            let sample = max(-1, min(1, channel[index]))
-            let intSample = Int16(sample < 0 ? sample * 32768 : sample * 32767)
-            var littleEndian = intSample.littleEndian
-            output.append(Data(bytes: &littleEndian, count: MemoryLayout<Int16>.size))
-        }
-        return output
+        return RealtimePCM16Codec.encode(
+            samples: UnsafeBufferPointer(start: channel, count: Int(converted.frameLength))
+        )
     }
 
     private func convertInputBufferToRealtimeFloat(
@@ -182,11 +177,9 @@ final class RealtimeAudioEngine {
             return nil
         }
 
-        data.withUnsafeBytes { rawBuffer in
-            let samples = rawBuffer.bindMemory(to: Int16.self)
-            for index in 0..<frameCount {
-                channel[index] = Float(Int16(littleEndian: samples[index])) / 32768.0
-            }
+        let samples = RealtimePCM16Codec.decode(data)
+        for index in 0..<frameCount {
+            channel[index] = samples[index]
         }
         buffer.frameLength = AVAudioFrameCount(frameCount)
         return buffer
