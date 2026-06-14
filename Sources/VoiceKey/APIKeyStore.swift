@@ -18,7 +18,7 @@ final class APIKeyStore {
     private let service = "com.zigelbaum.VoiceKey"
 
     func apiKey(for provider: VoiceProviderID) -> String? {
-        guard provider == .openAIRealtime else { return nil }
+        guard provider.requiresAPIKey else { return nil }
 
         var query = baseQuery(for: provider)
         query[kSecReturnData as String] = true

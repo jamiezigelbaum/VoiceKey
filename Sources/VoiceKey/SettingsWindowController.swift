@@ -34,6 +34,7 @@ final class SettingsWindowController: NSWindowController {
     private let providerPopup = NSPopUpButton()
     private let modelField = NSTextField()
     private let voicePopup = NSPopUpButton()
+    private let apiCredentialLabel = NSTextField(labelWithString: "")
     private let apiKeyField = NSSecureTextField()
     private let instructionsField = NSTextField()
 
@@ -87,7 +88,8 @@ final class SettingsWindowController: NSWindowController {
         let providerLabel = formLabel("Provider")
         let modelLabel = formLabel("Model")
         let voiceLabel = formLabel("Voice")
-        let apiKeyLabel = formLabel("OpenAI API key")
+        apiCredentialLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        apiCredentialLabel.translatesAutoresizingMaskIntoConstraints = false
         let instructionsLabel = formLabel("Instructions")
         let hotKeyLabel = NSTextField(labelWithString: "Hotkey")
         hotKeyLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
@@ -119,7 +121,7 @@ final class SettingsWindowController: NSWindowController {
         contentView.addSubview(modelField)
         contentView.addSubview(voiceLabel)
         contentView.addSubview(voicePopup)
-        contentView.addSubview(apiKeyLabel)
+        contentView.addSubview(apiCredentialLabel)
         contentView.addSubview(apiKeyField)
         contentView.addSubview(instructionsLabel)
         contentView.addSubview(instructionsField)
@@ -157,15 +159,15 @@ final class SettingsWindowController: NSWindowController {
             voicePopup.trailingAnchor.constraint(equalTo: providerPopup.trailingAnchor),
             voicePopup.centerYAnchor.constraint(equalTo: voiceLabel.centerYAnchor),
 
-            apiKeyLabel.leadingAnchor.constraint(equalTo: providerLabel.leadingAnchor),
-            apiKeyLabel.topAnchor.constraint(equalTo: voiceLabel.bottomAnchor, constant: 18),
-            apiKeyLabel.widthAnchor.constraint(equalTo: providerLabel.widthAnchor),
+            apiCredentialLabel.leadingAnchor.constraint(equalTo: providerLabel.leadingAnchor),
+            apiCredentialLabel.topAnchor.constraint(equalTo: voiceLabel.bottomAnchor, constant: 18),
+            apiCredentialLabel.widthAnchor.constraint(equalTo: providerLabel.widthAnchor),
             apiKeyField.leadingAnchor.constraint(equalTo: providerPopup.leadingAnchor),
             apiKeyField.trailingAnchor.constraint(equalTo: providerPopup.trailingAnchor),
-            apiKeyField.centerYAnchor.constraint(equalTo: apiKeyLabel.centerYAnchor),
+            apiKeyField.centerYAnchor.constraint(equalTo: apiCredentialLabel.centerYAnchor),
 
             instructionsLabel.leadingAnchor.constraint(equalTo: providerLabel.leadingAnchor),
-            instructionsLabel.topAnchor.constraint(equalTo: apiKeyLabel.bottomAnchor, constant: 18),
+            instructionsLabel.topAnchor.constraint(equalTo: apiCredentialLabel.bottomAnchor, constant: 18),
             instructionsLabel.widthAnchor.constraint(equalTo: providerLabel.widthAnchor),
             instructionsField.leadingAnchor.constraint(equalTo: providerPopup.leadingAnchor),
             instructionsField.trailingAnchor.constraint(equalTo: providerPopup.trailingAnchor),
@@ -211,13 +213,6 @@ final class SettingsWindowController: NSWindowController {
         providerPopup.target = self
         providerPopup.action = #selector(providerChanged)
 
-        voicePopup.removeAllItems()
-        ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"].forEach {
-            voicePopup.addItem(withTitle: $0)
-        }
-
-        modelField.placeholderString = VoiceSessionConfiguration.default.model
-        apiKeyField.placeholderString = "Stored in macOS Keychain"
         instructionsField.placeholderString = VoiceSessionConfiguration.defaultInstructions
 
         syncProviderControls()
@@ -229,32 +224,60 @@ final class SettingsWindowController: NSWindowController {
         }) {
             providerPopup.selectItem(at: index)
         }
-        modelField.stringValue = configuration.model
+
+        let provider = configuration.providerID
+        modelField.isEnabled = provider.supportsModelSetting
+        modelField.placeholderString = provider.defaultModel
+        modelField.stringValue = provider.supportsModelSetting ? configuration.model : provider.defaultModel
+
+        voicePopup.isEnabled = provider.supportsVoiceSetting
+        voicePopup.removeAllItems()
+        provider.voiceOptions.forEach { voicePopup.addItem(withTitle: $0) }
         voicePopup.selectItem(withTitle: configuration.voice)
+        if voicePopup.selectedItem == nil {
+            voicePopup.selectItem(withTitle: provider.defaultVoice)
+        }
+
+        apiCredentialLabel.stringValue = provider.credentialLabel
+        apiKeyField.isEnabled = provider.requiresAPIKey
+        apiKeyField.placeholderString = provider.credentialPlaceholder
+        if provider.requiresAPIKey == false {
+            apiKeyField.stringValue = ""
+        }
+
+        instructionsField.isEnabled = provider != .chatGPTWeb
         instructionsField.stringValue = configuration.instructions
     }
 
     @objc private func providerChanged() {
         guard let raw = providerPopup.selectedItem?.representedObject as? String,
               let provider = VoiceProviderID(rawValue: raw) else { return }
-        configuration.providerID = provider
+
+        var nextConfiguration = provider.defaultConfiguration
+        let instructions = instructionsField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if instructions.isEmpty == false, provider != .chatGPTWeb {
+            nextConfiguration.instructions = instructions
+        }
+        configuration = nextConfiguration
     }
 
     @objc private func saveVoiceSettings() {
         guard let raw = providerPopup.selectedItem?.representedObject as? String,
               let provider = VoiceProviderID(rawValue: raw) else { return }
 
+        let model = modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let instructions = instructionsField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let nextConfiguration = VoiceSessionConfiguration(
             providerID: provider,
-            model: modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-            voice: voicePopup.selectedItem?.title ?? configuration.voice,
-            instructions: instructionsField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            model: provider.supportsModelSetting && model.isEmpty == false ? model : provider.defaultModel,
+            voice: provider.supportsVoiceSetting ? (voicePopup.selectedItem?.title ?? provider.defaultVoice) : provider.defaultVoice,
+            instructions: provider != .chatGPTWeb && instructions.isEmpty == false ? instructions : VoiceSessionConfiguration.defaultInstructions
         )
         configuration = nextConfiguration
         VoiceProviderSettingsStore.save(nextConfiguration)
 
         let apiKey = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if apiKey.isEmpty == false {
+        if provider.requiresAPIKey, apiKey.isEmpty == false {
             do {
                 try APIKeyStore.shared.setAPIKey(apiKey, for: provider)
                 apiKeyField.stringValue = ""

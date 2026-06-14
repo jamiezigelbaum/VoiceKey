@@ -17,6 +17,8 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         action: #selector(toggleVoice),
         keyEquivalent: voiceHotKey.menuKeyEquivalent
     )
+    private let showProviderMenuItem = NSMenuItem(title: "Show Provider", action: #selector(showProvider), keyEquivalent: "")
+    private let reloadProviderMenuItem = NSMenuItem(title: "Reload Provider", action: #selector(reloadProvider), keyEquivalent: "")
     private let settingsMenuItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -68,6 +70,8 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         configureVoiceHotKeyMenuItem()
         menu.addItem(toggleMenuItem)
+        menu.addItem(showProviderMenuItem)
+        menu.addItem(reloadProviderMenuItem)
         settingsMenuItem.keyEquivalentModifierMask = [.command]
         menu.addItem(settingsMenuItem)
         menu.addItem(.separator())
@@ -114,6 +118,8 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
                 configuration: providerConfiguration,
                 apiKeyProvider: { APIKeyStore.shared.apiKey(for: .openAIRealtime) }
             )
+        case .chatGPTWeb:
+            provider = ChatGPTWebProvider()
         case .geminiLive, .deepgramVoiceAgent:
             provider = UnavailableVoiceProvider(id: providerConfiguration.providerID)
         }
@@ -131,10 +137,19 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
         voiceProvider = provider
         providerMenuItem.title = "Provider: \(providerConfiguration.providerID.displayName)"
+        updateProviderMenuActions()
     }
 
     @objc private func toggleVoice() {
         voiceProvider?.toggleVoice()
+    }
+
+    @objc private func showProvider() {
+        voiceProvider?.showProviderInterface()
+    }
+
+    @objc private func reloadProvider() {
+        voiceProvider?.reloadProviderInterface()
     }
 
     @objc private func showSettings() {
@@ -174,8 +189,17 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateHotKeyPresentation() {
         configureVoiceHotKeyMenuItem()
+        updateProviderMenuActions()
         settingsWindowController?.hotKey = voiceHotKey
         statusItem.button?.image = MenuBarIconRenderer.image(for: voiceHotKey, status: currentStatus)
+    }
+
+    private func updateProviderMenuActions() {
+        let isAvailable = voiceProvider?.capabilities.supportsProviderInterface == true
+        showProviderMenuItem.isEnabled = isAvailable
+        reloadProviderMenuItem.isEnabled = isAvailable
+        showProviderMenuItem.title = isAvailable ? "Show Provider" : "Show Provider (API provider)"
+        reloadProviderMenuItem.title = isAvailable ? "Reload Provider" : "Reload Provider (API provider)"
     }
 
     private func updateProviderConfiguration(_ configuration: VoiceSessionConfiguration) {

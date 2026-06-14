@@ -7,7 +7,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         supportsTextInput: true,
         supportsInterruptions: true,
         supportsFunctionCalling: true,
-        supportsVisionInput: true
+        supportsVisionInput: true,
+        supportsProviderInterface: false
     )
 
     var onEvent: ((VoiceProviderEvent) -> Void)?

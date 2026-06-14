@@ -2,6 +2,7 @@ import Foundation
 
 enum VoiceProviderID: String, CaseIterable, Equatable {
     case openAIRealtime = "openai-realtime"
+    case chatGPTWeb = "chatgpt-web"
     case geminiLive = "gemini-live"
     case deepgramVoiceAgent = "deepgram-voice-agent"
 
@@ -9,6 +10,8 @@ enum VoiceProviderID: String, CaseIterable, Equatable {
         switch self {
         case .openAIRealtime:
             return "OpenAI Realtime"
+        case .chatGPTWeb:
+            return "ChatGPT Web (OAuth)"
         case .geminiLive:
             return "Gemini Live"
         case .deepgramVoiceAgent:
@@ -17,7 +20,94 @@ enum VoiceProviderID: String, CaseIterable, Equatable {
     }
 
     var isImplemented: Bool {
-        self == .openAIRealtime
+        switch self {
+        case .openAIRealtime, .chatGPTWeb:
+            return true
+        case .geminiLive, .deepgramVoiceAgent:
+            return false
+        }
+    }
+
+    var requiresAPIKey: Bool {
+        switch self {
+        case .openAIRealtime, .geminiLive, .deepgramVoiceAgent:
+            return true
+        case .chatGPTWeb:
+            return false
+        }
+    }
+
+    var credentialLabel: String {
+        switch self {
+        case .openAIRealtime:
+            return "OpenAI API key"
+        case .chatGPTWeb:
+            return "ChatGPT sign-in"
+        case .geminiLive:
+            return "Gemini API key"
+        case .deepgramVoiceAgent:
+            return "Deepgram API key"
+        }
+    }
+
+    var credentialPlaceholder: String {
+        requiresAPIKey ? "Stored in macOS Keychain" : "Use Show Provider to sign in"
+    }
+
+    var supportsModelSetting: Bool {
+        self != .chatGPTWeb
+    }
+
+    var supportsVoiceSetting: Bool {
+        self != .chatGPTWeb
+    }
+
+    var defaultModel: String {
+        switch self {
+        case .openAIRealtime:
+            return "gpt-realtime-2"
+        case .chatGPTWeb:
+            return "chatgpt.com"
+        case .geminiLive:
+            return "gemini-live-2.5-flash-preview"
+        case .deepgramVoiceAgent:
+            return "deepgram-voice-agent"
+        }
+    }
+
+    var defaultVoice: String {
+        switch self {
+        case .openAIRealtime:
+            return "marin"
+        case .chatGPTWeb:
+            return "Configured in ChatGPT"
+        case .geminiLive:
+            return "Puck"
+        case .deepgramVoiceAgent:
+            return "aura-2-thalia-en"
+        }
+    }
+
+    var voiceOptions: [String] {
+        switch self {
+        case .openAIRealtime:
+            return ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"]
+        case .chatGPTWeb:
+            return [defaultVoice]
+        case .geminiLive:
+            return ["Puck"]
+        case .deepgramVoiceAgent:
+            return ["aura-2-thalia-en"]
+        }
+    }
+
+    var defaultConfiguration: VoiceSessionConfiguration {
+        VoiceSessionConfiguration(
+            providerID: self,
+            model: defaultModel,
+            voice: defaultVoice,
+            instructions: VoiceSessionConfiguration.defaultInstructions
+        )
     }
 }
 
@@ -27,6 +117,7 @@ struct VoiceProviderCapabilities: Equatable {
     var supportsInterruptions: Bool
     var supportsFunctionCalling: Bool
     var supportsVisionInput: Bool
+    var supportsProviderInterface: Bool
 }
 
 struct VoiceSessionConfiguration: Equatable {
@@ -38,12 +129,7 @@ struct VoiceSessionConfiguration: Equatable {
     static let defaultInstructions = "You are VoiceKey, a concise and helpful voice assistant. Speak naturally and keep answers brief unless the user asks for detail."
 
     static var `default`: VoiceSessionConfiguration {
-        VoiceSessionConfiguration(
-            providerID: .openAIRealtime,
-            model: "gpt-realtime-2",
-            voice: "marin",
-            instructions: defaultInstructions
-        )
+        VoiceProviderID.openAIRealtime.defaultConfiguration
     }
 }
 
@@ -62,6 +148,13 @@ protocol RealtimeVoiceProvider: AnyObject {
     func update(configuration: VoiceSessionConfiguration)
     func toggleVoice()
     func stopVoice()
+    func showProviderInterface()
+    func reloadProviderInterface()
+}
+
+extension RealtimeVoiceProvider {
+    func showProviderInterface() {}
+    func reloadProviderInterface() {}
 }
 
 enum VoiceProviderSettingsStore {

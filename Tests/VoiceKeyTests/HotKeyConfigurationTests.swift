@@ -120,6 +120,20 @@ final class MenuBarIconStateTests: XCTestCase {
 }
 
 final class VoiceProviderSettingsStoreTests: XCTestCase {
+    func testOpenAIRealtimeIsTheDefaultProvider() {
+        XCTAssertEqual(VoiceSessionConfiguration.default.providerID, .openAIRealtime)
+        XCTAssertEqual(VoiceSessionConfiguration.default.model, "gpt-realtime-2")
+        XCTAssertTrue(VoiceProviderID.openAIRealtime.requiresAPIKey)
+    }
+
+    func testChatGPTWebProviderUsesOAuthInsteadOfAPIKey() {
+        XCTAssertTrue(VoiceProviderID.chatGPTWeb.isImplemented)
+        XCTAssertFalse(VoiceProviderID.chatGPTWeb.requiresAPIKey)
+        XCTAssertEqual(VoiceProviderID.chatGPTWeb.credentialLabel, "ChatGPT sign-in")
+        XCTAssertFalse(VoiceProviderID.chatGPTWeb.supportsModelSetting)
+        XCTAssertFalse(VoiceProviderID.chatGPTWeb.supportsVoiceSetting)
+    }
+
     func testLoadsDefaultsWhenNoProviderSettingsAreSaved() throws {
         let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

@@ -7,7 +7,8 @@ final class UnavailableVoiceProvider: RealtimeVoiceProvider {
         supportsTextInput: false,
         supportsInterruptions: false,
         supportsFunctionCalling: false,
-        supportsVisionInput: false
+        supportsVisionInput: false,
+        supportsProviderInterface: false
     )
 
     var onEvent: ((VoiceProviderEvent) -> Void)?
