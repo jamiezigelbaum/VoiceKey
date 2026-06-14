@@ -156,6 +156,41 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertEqual(readiness.menuSuffix, "Coming soon")
     }
 
+    func testGeminiLiveProviderCapabilitiesMatchRealtimeVoiceAndVisionSlot() {
+        let provider = GeminiLiveProvider()
+
+        XCTAssertEqual(provider.id, .geminiLive)
+        XCTAssertTrue(provider.capabilities.supportsSpeechToSpeech)
+        XCTAssertTrue(provider.capabilities.supportsTextInput)
+        XCTAssertTrue(provider.capabilities.supportsInterruptions)
+        XCTAssertTrue(provider.capabilities.supportsFunctionCalling)
+        XCTAssertTrue(provider.capabilities.supportsVisionInput)
+    }
+
+    func testDeepgramVoiceAgentProviderCapabilitiesMatchVoiceAgentSlot() {
+        let provider = DeepgramVoiceAgentProvider()
+
+        XCTAssertEqual(provider.id, .deepgramVoiceAgent)
+        XCTAssertTrue(provider.capabilities.supportsSpeechToSpeech)
+        XCTAssertTrue(provider.capabilities.supportsTextInput)
+        XCTAssertTrue(provider.capabilities.supportsInterruptions)
+        XCTAssertTrue(provider.capabilities.supportsFunctionCalling)
+        XCTAssertFalse(provider.capabilities.supportsVisionInput)
+    }
+
+    func testFactoryCreatesPlannedProviderAdapters() {
+        XCTAssertTrue(
+            VoiceProviderFactory.makeProvider(
+                for: VoiceProviderID.geminiLive.defaultConfiguration
+            ) is GeminiLiveProvider
+        )
+        XCTAssertTrue(
+            VoiceProviderFactory.makeProvider(
+                for: VoiceProviderID.deepgramVoiceAgent.defaultConfiguration
+            ) is DeepgramVoiceAgentProvider
+        )
+    }
+
     func testLoadsDefaultsWhenNoProviderSettingsAreSaved() throws {
         let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

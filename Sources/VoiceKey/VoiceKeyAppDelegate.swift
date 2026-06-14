@@ -111,19 +111,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureProvider() {
-        let provider: RealtimeVoiceProvider
-        switch providerConfiguration.providerID {
-        case .openAIRealtime:
-            provider = OpenAIRealtimeProvider(
-                configuration: providerConfiguration,
-                apiKeyProvider: { APIKeyStore.shared.apiKey(for: .openAIRealtime) }
-            )
-        case .chatGPTWeb:
-            provider = ChatGPTWebProvider()
-        case .geminiLive, .deepgramVoiceAgent:
-            provider = UnavailableVoiceProvider(id: providerConfiguration.providerID)
-        }
-
+        let provider = VoiceProviderFactory.makeProvider(for: providerConfiguration)
         provider.onEvent = { [weak self] event in
             switch event {
             case let .status(status):

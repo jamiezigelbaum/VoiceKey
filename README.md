@@ -127,9 +127,12 @@ VoiceKey is intentionally small:
 - `VoiceKeyAppDelegate`: menu bar and hotkey lifecycle.
 - `GlobalHotKey`: Carbon `RegisterEventHotKey` wrapper.
 - `VoiceProvider`: provider-neutral realtime voice session contract and settings.
+- `VoiceProviderFactory`: selected-provider adapter construction.
 - `OpenAIRealtimeProvider`: OpenAI Realtime WebSocket session and event mapping.
 - `ChatGPTWebProvider`: adapter that keeps the web sign-in/OAuth path behind the
   same provider contract.
+- `GeminiLiveProvider` and `DeepgramVoiceAgentProvider`: planned realtime
+  provider adapter slots with provider-specific capabilities.
 - `RealtimeAudioEngine`: native microphone capture, audio conversion, and playback.
 - `APIKeyStore`: Keychain-backed provider credential storage.
 - `WebWindowController`: persistent `WKWebView`, mic permission, native click bridge.
