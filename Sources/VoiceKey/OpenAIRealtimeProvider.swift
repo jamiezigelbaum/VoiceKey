@@ -189,37 +189,13 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     }
 
     private func handleEventText(_ text: String) {
-        guard let data = text.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let type = object["type"] as? String else {
-            return
-        }
-
-        switch type {
-        case "session.created", "session.updated":
-            emit(.diagnostic(type))
-        case "input_audio_buffer.speech_started":
-            emit(.status(.listening))
-        case "input_audio_buffer.speech_stopped", "input_audio_buffer.committed", "response.created":
-            emit(.status(.thinking))
-        case "response.output_audio.delta", "response.audio.delta":
-            if let delta = object["delta"] as? String,
-               let audio = Data(base64Encoded: delta) {
+        for action in OpenAIRealtimeEventMapper.actions(from: text) {
+            switch action {
+            case let .audio(audio):
                 audioEngine.playPCM16(audio)
-                emit(.status(.speaking))
+            case let .providerEvent(event):
+                emit(event)
             }
-        case "response.output_audio_transcript.delta", "response.audio_transcript.delta", "response.output_text.delta":
-            if let delta = object["delta"] as? String {
-                emit(.transcript(delta))
-            }
-        case "response.output_audio.done", "response.audio.done", "response.done":
-            emit(.status(.listening))
-        case "error":
-            let message = ((object["error"] as? [String: Any])?["message"] as? String)
-                ?? "OpenAI Realtime returned an error."
-            emit(.status(.needsAttention(message)))
-        default:
-            emit(.diagnostic(type))
         }
     }
 
