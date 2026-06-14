@@ -225,6 +225,6 @@ extension OpenAIRealtimeProvider: URLSessionWebSocketDelegate {
         isConnecting = false
         isConnected = false
         audioEngine.stop()
-        emit(.status(.ready))
+        emit(.status(OpenAIRealtimeConnectionDiagnostics.closeStatus(code: closeCode, reason: reason)))
     }
 }
