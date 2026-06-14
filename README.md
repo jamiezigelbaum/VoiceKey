@@ -51,7 +51,8 @@ This is an early native Swift/AppKit app with:
 - configurable global hotkey, defaulting to F16
 - settings window for recording a new hotkey and configuring the selected voice provider
 - provider-neutral realtime voice session contract
-- OpenAI Realtime provider over WebSocket as the default path
+- OpenAI Realtime API provider over WebSocket as the default path, with live
+  WebSocket/session-update smoke coverage
 - ChatGPT Web provider as a sign-in/OAuth fallback path
 - Keychain-backed provider API key storage
 - native microphone capture and streamed audio playback
@@ -60,12 +61,14 @@ This is an early native Swift/AppKit app with:
 - DOM-to-native-click bridge for ChatGPT Voice controls
 - visible provider status for loading, sign-in required, ready, starting, active,
   stopping, and needs-attention states
+- secret-safe `Copy Diagnostics` menu output for provider readiness and live
+  session debugging
 - fixture-tested DOM probes that distinguish ChatGPT Voice Mode from text
   dictation controls
 
-The next milestone is live end-to-end testing of the OpenAI Realtime path,
-followed by additional provider adapters for Gemini Live and Deepgram Voice
-Agent.
+The next milestone is human mic/speaker end-to-end testing of the OpenAI
+Realtime API path, followed by additional provider adapters for Gemini Live and
+Deepgram Voice Agent.
 
 ## Build From Source
 

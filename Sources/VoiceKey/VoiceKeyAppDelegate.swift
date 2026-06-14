@@ -12,7 +12,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private var voiceProvider: RealtimeVoiceProvider?
     private var sessionLog = VoiceSessionLog()
     private let statusMenuItem = NSMenuItem(title: "Status: Loading", action: nil, keyEquivalent: "")
-    private let providerMenuItem = NSMenuItem(title: "Provider: OpenAI Realtime", action: nil, keyEquivalent: "")
+    private let providerMenuItem = NSMenuItem(title: "Provider: OpenAI Realtime API", action: nil, keyEquivalent: "")
     private let audioTipMenuItem = NSMenuItem(title: "Tip: Use headphones or non-speaker output to prevent voice loops", action: nil, keyEquivalent: "")
     private lazy var toggleMenuItem = NSMenuItem(
         title: "Start/End VoiceKey Voice",
@@ -24,6 +24,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private let setupProviderMenuItem = NSMenuItem(title: "Provider Settings...", action: #selector(setupProvider), keyEquivalent: "")
     private let showSessionLogMenuItem = NSMenuItem(title: "Show Session Log", action: #selector(showSessionLog), keyEquivalent: "")
     private let clearSessionLogMenuItem = NSMenuItem(title: "Clear Session Log", action: #selector(clearSessionLog), keyEquivalent: "")
+    private let copyDiagnosticsMenuItem = NSMenuItem(title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: "")
     private let settingsMenuItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -80,6 +81,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(reloadProviderMenuItem)
         menu.addItem(showSessionLogMenuItem)
         menu.addItem(clearSessionLogMenuItem)
+        menu.addItem(copyDiagnosticsMenuItem)
         settingsMenuItem.keyEquivalentModifierMask = [.command]
         menu.addItem(settingsMenuItem)
         menu.addItem(.separator())
@@ -182,6 +184,12 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         updateProviderMenuActions()
     }
 
+    @objc private func copyDiagnostics() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(diagnosticsSnapshot().displayText, forType: .string)
+        updateStatus(.needsAttention("Diagnostics copied to clipboard."))
+    }
+
     @objc private func showSettings() {
         let controller = settingsWindowController ?? SettingsWindowController(
             hotKey: voiceHotKey,
@@ -246,6 +254,20 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         return VoiceProviderMenuState(
             provider: provider,
             readiness: provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)),
+            supportsProviderInterface: voiceProvider?.capabilities.supportsProviderInterface == true,
+            hasSessionLog: sessionLog.isEmpty == false
+        )
+    }
+
+    private func diagnosticsSnapshot() -> VoiceKeyDiagnosticsSnapshot {
+        let provider = providerConfiguration.providerID
+        return VoiceKeyDiagnosticsSnapshot(
+            provider: provider,
+            configuration: providerConfiguration,
+            readiness: provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)),
+            hotKey: voiceHotKey,
+            currentStatus: currentStatus,
+            hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider),
             supportsProviderInterface: voiceProvider?.capabilities.supportsProviderInterface == true,
             hasSessionLog: sessionLog.isEmpty == false
         )

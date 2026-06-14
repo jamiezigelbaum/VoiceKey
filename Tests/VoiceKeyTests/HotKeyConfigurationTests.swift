@@ -123,6 +123,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
     func testOpenAIRealtimeIsTheDefaultProvider() {
         XCTAssertEqual(VoiceSessionConfiguration.default.providerID, .openAIRealtime)
         XCTAssertEqual(VoiceSessionConfiguration.default.model, "gpt-realtime-2")
+        XCTAssertEqual(VoiceProviderID.openAIRealtime.displayName, "OpenAI Realtime API")
         XCTAssertTrue(VoiceProviderID.openAIRealtime.requiresAPIKey)
     }
 
@@ -204,7 +205,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
             hasSessionLog: true
         )
 
-        XCTAssertEqual(state.providerTitle, "Provider: OpenAI Realtime")
+        XCTAssertEqual(state.providerTitle, "Provider: OpenAI Realtime API")
         XCTAssertEqual(state.toggleTitle, "Start/End VoiceKey Voice")
         XCTAssertTrue(state.isToggleEnabled)
         XCTAssertEqual(state.setupTitle, "Provider Settings...")
@@ -223,7 +224,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
             hasSessionLog: false
         )
 
-        XCTAssertEqual(state.providerTitle, "Provider: OpenAI Realtime - Needs key")
+        XCTAssertEqual(state.providerTitle, "Provider: OpenAI Realtime API - Needs key")
         XCTAssertEqual(state.toggleTitle, "Add API Key in Settings")
         XCTAssertFalse(state.isToggleEnabled)
         XCTAssertEqual(state.setupTitle, "Add API Key...")

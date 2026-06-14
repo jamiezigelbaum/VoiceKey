@@ -15,7 +15,7 @@ final class VoiceSessionLogTests: XCTestCase {
         log.append(.transcript("hel"), provider: .openAIRealtime)
         log.append(.transcript("lo"), provider: .openAIRealtime)
 
-        XCTAssertEqual(log.displayText, "OpenAI Realtime transcript: hello")
+        XCTAssertEqual(log.displayText, "OpenAI Realtime API transcript: hello")
     }
 
     func testTranscriptDeltasDoNotCoalesceAcrossProviders() {
@@ -27,7 +27,7 @@ final class VoiceSessionLogTests: XCTestCase {
         XCTAssertEqual(
             log.displayText,
             """
-            OpenAI Realtime transcript: hello
+            OpenAI Realtime API transcript: hello
             ChatGPT Web (OAuth) transcript: hi
             """
         )
@@ -42,8 +42,8 @@ final class VoiceSessionLogTests: XCTestCase {
         XCTAssertEqual(
             log.displayText,
             """
-            OpenAI Realtime status: Listening
-            OpenAI Realtime diagnostic: rate_limits.updated
+            OpenAI Realtime API status: Listening
+            OpenAI Realtime API diagnostic: rate_limits.updated
             """
         )
     }

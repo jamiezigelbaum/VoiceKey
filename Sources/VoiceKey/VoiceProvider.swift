@@ -9,7 +9,7 @@ enum VoiceProviderID: String, CaseIterable, Equatable {
     var displayName: String {
         switch self {
         case .openAIRealtime:
-            return "OpenAI Realtime"
+            return "OpenAI Realtime API"
         case .chatGPTWeb:
             return "ChatGPT Web (OAuth)"
         case .geminiLive:
