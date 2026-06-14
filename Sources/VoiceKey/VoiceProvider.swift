@@ -182,6 +182,54 @@ struct VoiceProviderCredentialViewState: Equatable {
     }
 }
 
+struct VoiceProviderMenuState: Equatable {
+    var providerTitle: String
+    var toggleTitle: String
+    var isToggleEnabled: Bool
+    var showProviderTitle: String
+    var reloadProviderTitle: String
+    var isProviderInterfaceEnabled: Bool
+    var isClearSessionLogEnabled: Bool
+
+    init(
+        provider: VoiceProviderID,
+        readiness: VoiceProviderReadiness,
+        supportsProviderInterface: Bool,
+        hasSessionLog: Bool
+    ) {
+        providerTitle = "Provider: \(provider.displayName)"
+        if let suffix = readiness.menuSuffix {
+            providerTitle += " - \(suffix)"
+        }
+
+        switch readiness {
+        case .ready, .providerSignIn:
+            toggleTitle = "Start/End VoiceKey Voice"
+            isToggleEnabled = true
+        case .needsAPIKey:
+            toggleTitle = "Add API Key in Settings"
+            isToggleEnabled = false
+        case .unavailable:
+            toggleTitle = "\(provider.displayName) Coming Soon"
+            isToggleEnabled = false
+        }
+
+        isProviderInterfaceEnabled = supportsProviderInterface
+        if supportsProviderInterface {
+            showProviderTitle = "Show Provider"
+            reloadProviderTitle = "Reload Provider"
+        } else if provider.isImplemented {
+            showProviderTitle = "Show Provider (API provider)"
+            reloadProviderTitle = "Reload Provider (API provider)"
+        } else {
+            showProviderTitle = "Show Provider (coming soon)"
+            reloadProviderTitle = "Reload Provider (coming soon)"
+        }
+
+        isClearSessionLogEnabled = hasSessionLog
+    }
+}
+
 struct VoiceSessionConfiguration: Equatable {
     var providerID: VoiceProviderID
     var model: String

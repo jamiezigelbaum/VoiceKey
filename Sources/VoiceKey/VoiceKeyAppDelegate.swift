@@ -210,25 +210,28 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateProviderMenuTitle() {
-        let provider = providerConfiguration.providerID
-        let readiness = provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider))
-        if let suffix = readiness.menuSuffix {
-            providerMenuItem.title = "Provider: \(provider.displayName) - \(suffix)"
-        } else {
-            providerMenuItem.title = "Provider: \(provider.displayName)"
-        }
+        providerMenuItem.title = providerMenuState().providerTitle
     }
 
     private func updateProviderMenuActions() {
-        let isAvailable = voiceProvider?.capabilities.supportsProviderInterface == true
-        showProviderMenuItem.isEnabled = isAvailable
-        reloadProviderMenuItem.isEnabled = isAvailable
-        showProviderMenuItem.title = isAvailable ? "Show Provider" : "Show Provider (API provider)"
-        reloadProviderMenuItem.title = isAvailable ? "Reload Provider" : "Reload Provider (API provider)"
-        clearSessionLogMenuItem.isEnabled = sessionLog.isEmpty == false
+        let state = providerMenuState()
+        showProviderMenuItem.isEnabled = state.isProviderInterfaceEnabled
+        reloadProviderMenuItem.isEnabled = state.isProviderInterfaceEnabled
+        showProviderMenuItem.title = state.showProviderTitle
+        reloadProviderMenuItem.title = state.reloadProviderTitle
+        clearSessionLogMenuItem.isEnabled = state.isClearSessionLogEnabled
+        toggleMenuItem.title = state.toggleTitle
+        toggleMenuItem.isEnabled = state.isToggleEnabled
+    }
+
+    private func providerMenuState() -> VoiceProviderMenuState {
         let provider = providerConfiguration.providerID
-        let readiness = provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider))
-        toggleMenuItem.isEnabled = readiness.allowsVoiceToggle
+        return VoiceProviderMenuState(
+            provider: provider,
+            readiness: provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)),
+            supportsProviderInterface: voiceProvider?.capabilities.supportsProviderInterface == true,
+            hasSessionLog: sessionLog.isEmpty == false
+        )
     }
 
     private func recordProviderEvent(_ event: VoiceProviderEvent) {

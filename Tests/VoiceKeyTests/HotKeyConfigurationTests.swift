@@ -196,6 +196,68 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertTrue(state.canRemoveAPIKey)
     }
 
+    func testProviderMenuStateForReadyAPIProvider() {
+        let state = VoiceProviderMenuState(
+            provider: .openAIRealtime,
+            readiness: .ready,
+            supportsProviderInterface: false,
+            hasSessionLog: true
+        )
+
+        XCTAssertEqual(state.providerTitle, "Provider: OpenAI Realtime")
+        XCTAssertEqual(state.toggleTitle, "Start/End VoiceKey Voice")
+        XCTAssertTrue(state.isToggleEnabled)
+        XCTAssertEqual(state.showProviderTitle, "Show Provider (API provider)")
+        XCTAssertFalse(state.isProviderInterfaceEnabled)
+        XCTAssertTrue(state.isClearSessionLogEnabled)
+    }
+
+    func testProviderMenuStateForMissingAPIKey() {
+        let state = VoiceProviderMenuState(
+            provider: .openAIRealtime,
+            readiness: .needsAPIKey("OpenAI API key required."),
+            supportsProviderInterface: false,
+            hasSessionLog: false
+        )
+
+        XCTAssertEqual(state.providerTitle, "Provider: OpenAI Realtime - Needs key")
+        XCTAssertEqual(state.toggleTitle, "Add API Key in Settings")
+        XCTAssertFalse(state.isToggleEnabled)
+        XCTAssertFalse(state.isClearSessionLogEnabled)
+    }
+
+    func testProviderMenuStateForProviderSignIn() {
+        let state = VoiceProviderMenuState(
+            provider: .chatGPTWeb,
+            readiness: .providerSignIn("Uses provider sign-in."),
+            supportsProviderInterface: true,
+            hasSessionLog: false
+        )
+
+        XCTAssertEqual(state.providerTitle, "Provider: ChatGPT Web (OAuth) - Sign-in")
+        XCTAssertEqual(state.toggleTitle, "Start/End VoiceKey Voice")
+        XCTAssertTrue(state.isToggleEnabled)
+        XCTAssertEqual(state.showProviderTitle, "Show Provider")
+        XCTAssertEqual(state.reloadProviderTitle, "Reload Provider")
+        XCTAssertTrue(state.isProviderInterfaceEnabled)
+    }
+
+    func testProviderMenuStateForComingSoonProvider() {
+        let state = VoiceProviderMenuState(
+            provider: .geminiLive,
+            readiness: .unavailable("Gemini Live is coming soon."),
+            supportsProviderInterface: false,
+            hasSessionLog: false
+        )
+
+        XCTAssertEqual(state.providerTitle, "Provider: Gemini Live - Coming soon")
+        XCTAssertEqual(state.toggleTitle, "Gemini Live Coming Soon")
+        XCTAssertFalse(state.isToggleEnabled)
+        XCTAssertEqual(state.showProviderTitle, "Show Provider (coming soon)")
+        XCTAssertEqual(state.reloadProviderTitle, "Reload Provider (coming soon)")
+        XCTAssertFalse(state.isProviderInterfaceEnabled)
+    }
+
     func testGeminiLiveProviderCapabilitiesMatchRealtimeVoiceAndVisionSlot() {
         let provider = GeminiLiveProvider()
 
