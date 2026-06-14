@@ -156,6 +156,30 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertEqual(readiness.menuSuffix, "Coming soon")
     }
 
+    func testCredentialViewStateForMissingAPIKey() {
+        let state = VoiceProviderCredentialViewState(provider: .openAIRealtime, hasAPIKey: false)
+
+        XCTAssertEqual(state.statusMessage, "OpenAI API key required.")
+        XCTAssertTrue(state.acceptsAPIKeyInput)
+        XCTAssertFalse(state.canRemoveAPIKey)
+    }
+
+    func testCredentialViewStateForStoredAPIKey() {
+        let state = VoiceProviderCredentialViewState(provider: .openAIRealtime, hasAPIKey: true)
+
+        XCTAssertEqual(state.statusMessage, "Ready to use.")
+        XCTAssertTrue(state.acceptsAPIKeyInput)
+        XCTAssertTrue(state.canRemoveAPIKey)
+    }
+
+    func testCredentialViewStateForProviderSignIn() {
+        let state = VoiceProviderCredentialViewState(provider: .chatGPTWeb, hasAPIKey: false)
+
+        XCTAssertEqual(state.statusMessage, "Uses provider sign-in.")
+        XCTAssertFalse(state.acceptsAPIKeyInput)
+        XCTAssertFalse(state.canRemoveAPIKey)
+    }
+
     func testGeminiLiveProviderCapabilitiesMatchRealtimeVoiceAndVisionSlot() {
         let provider = GeminiLiveProvider()
 

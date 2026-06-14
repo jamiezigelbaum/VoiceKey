@@ -36,6 +36,7 @@ final class SettingsWindowController: NSWindowController {
     private let voicePopup = NSPopUpButton()
     private let apiCredentialLabel = NSTextField(labelWithString: "")
     private let apiKeyField = NSSecureTextField()
+    private let removeAPIKeyButton = NSButton(title: "Remove Key", target: nil, action: nil)
     private let credentialStatusLabel = NSTextField(labelWithString: "")
     private let instructionsField = NSTextField()
 
@@ -108,6 +109,11 @@ final class SettingsWindowController: NSWindowController {
 
         configureProviderControls()
 
+        removeAPIKeyButton.target = self
+        removeAPIKeyButton.action = #selector(removeAPIKey)
+        removeAPIKeyButton.bezelStyle = .rounded
+        removeAPIKeyButton.translatesAutoresizingMaskIntoConstraints = false
+
         let saveButton = NSButton(title: "Save Voice Settings", target: self, action: #selector(saveVoiceSettings))
         saveButton.bezelStyle = .rounded
         saveButton.translatesAutoresizingMaskIntoConstraints = false
@@ -127,6 +133,7 @@ final class SettingsWindowController: NSWindowController {
         contentView.addSubview(voicePopup)
         contentView.addSubview(apiCredentialLabel)
         contentView.addSubview(apiKeyField)
+        contentView.addSubview(removeAPIKeyButton)
         contentView.addSubview(credentialStatusLabel)
         contentView.addSubview(instructionsLabel)
         contentView.addSubview(instructionsField)
@@ -168,8 +175,11 @@ final class SettingsWindowController: NSWindowController {
             apiCredentialLabel.topAnchor.constraint(equalTo: voiceLabel.bottomAnchor, constant: 18),
             apiCredentialLabel.widthAnchor.constraint(equalTo: providerLabel.widthAnchor),
             apiKeyField.leadingAnchor.constraint(equalTo: providerPopup.leadingAnchor),
-            apiKeyField.trailingAnchor.constraint(equalTo: providerPopup.trailingAnchor),
+            apiKeyField.trailingAnchor.constraint(equalTo: removeAPIKeyButton.leadingAnchor, constant: -8),
             apiKeyField.centerYAnchor.constraint(equalTo: apiCredentialLabel.centerYAnchor),
+            removeAPIKeyButton.trailingAnchor.constraint(equalTo: providerPopup.trailingAnchor),
+            removeAPIKeyButton.centerYAnchor.constraint(equalTo: apiKeyField.centerYAnchor),
+            removeAPIKeyButton.widthAnchor.constraint(equalToConstant: 104),
 
             credentialStatusLabel.leadingAnchor.constraint(equalTo: providerPopup.leadingAnchor),
             credentialStatusLabel.trailingAnchor.constraint(equalTo: providerPopup.trailingAnchor),
@@ -248,14 +258,18 @@ final class SettingsWindowController: NSWindowController {
         }
 
         apiCredentialLabel.stringValue = provider.credentialLabel
-        apiKeyField.isEnabled = provider.requiresAPIKey
+        let credentialState = VoiceProviderCredentialViewState(
+            provider: provider,
+            hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)
+        )
+        apiKeyField.isEnabled = credentialState.acceptsAPIKeyInput
         apiKeyField.placeholderString = provider.credentialPlaceholder
         if provider.requiresAPIKey == false {
             apiKeyField.stringValue = ""
         }
-        credentialStatusLabel.stringValue = provider.readiness(
-            hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)
-        ).settingsMessage
+        removeAPIKeyButton.isEnabled = credentialState.canRemoveAPIKey
+        removeAPIKeyButton.isHidden = provider.requiresAPIKey == false
+        credentialStatusLabel.stringValue = credentialState.statusMessage
 
         instructionsField.isEnabled = provider != .chatGPTWeb
         instructionsField.stringValue = configuration.instructions
@@ -301,6 +315,21 @@ final class SettingsWindowController: NSWindowController {
 
         delegate?.settingsWindowController(self, didUpdate: nextConfiguration)
         delegate?.settingsWindowControllerDidUpdateAPIKey(self)
+    }
+
+    @objc private func removeAPIKey() {
+        guard let raw = providerPopup.selectedItem?.representedObject as? String,
+              let provider = VoiceProviderID(rawValue: raw),
+              provider.requiresAPIKey else { return }
+
+        do {
+            try APIKeyStore.shared.deleteAPIKey(for: provider)
+            apiKeyField.stringValue = ""
+            syncProviderControls()
+            delegate?.settingsWindowControllerDidUpdateAPIKey(self)
+        } catch {
+            NSSound.beep()
+        }
     }
 }
 

@@ -280,5 +280,7 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
 
     func settingsWindowControllerDidUpdateAPIKey(_ controller: SettingsWindowController) {
         voiceProvider?.prepare()
+        updateProviderMenuTitle()
+        updateProviderMenuActions()
     }
 }

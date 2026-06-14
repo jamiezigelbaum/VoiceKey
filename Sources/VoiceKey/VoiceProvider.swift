@@ -170,6 +170,18 @@ struct VoiceProviderCapabilities: Equatable {
     var supportsProviderInterface: Bool
 }
 
+struct VoiceProviderCredentialViewState: Equatable {
+    var statusMessage: String
+    var acceptsAPIKeyInput: Bool
+    var canRemoveAPIKey: Bool
+
+    init(provider: VoiceProviderID, hasAPIKey: Bool) {
+        statusMessage = provider.readiness(hasAPIKey: hasAPIKey).settingsMessage
+        acceptsAPIKeyInput = provider.requiresAPIKey
+        canRemoveAPIKey = provider.requiresAPIKey && hasAPIKey
+    }
+}
+
 struct VoiceSessionConfiguration: Equatable {
     var providerID: VoiceProviderID
     var model: String

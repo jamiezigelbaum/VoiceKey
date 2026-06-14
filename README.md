@@ -101,8 +101,8 @@ Release, and Homebrew cask steps.
 
 VoiceKey runs from the menu bar. Open `Settings...` to choose a realtime
 provider, model, voice, instructions, and credentials. API keys are stored in
-the macOS Keychain. ChatGPT Web uses its normal sign-in flow in VoiceKey's
-provider window instead of an API key.
+the macOS Keychain and can be replaced or removed from Settings. ChatGPT Web
+uses its normal sign-in flow in VoiceKey's provider window instead of an API key.
 
 The menu shows the currently assigned voice hotkey in the native shortcut column.
 The menu bar icon shows a compact version of the same hotkey, plus a simple
