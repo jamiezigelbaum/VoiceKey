@@ -207,6 +207,7 @@ struct VoiceProviderMenuState: Equatable {
     init(
         provider: VoiceProviderID,
         readiness: VoiceProviderReadiness,
+        currentStatus: ProviderStatus = .ready,
         supportsProviderInterface: Bool,
         supportsConnectionCheck: Bool,
         hasSessionLog: Bool
@@ -218,14 +219,14 @@ struct VoiceProviderMenuState: Equatable {
 
         switch readiness {
         case .ready:
-            toggleTitle = "Start/End VoiceKey Voice"
-            isToggleEnabled = true
+            toggleTitle = currentStatus.voiceToggleTitle
+            isToggleEnabled = currentStatus.allowsVoiceToggleWhileReady
             setupTitle = "Provider Settings..."
             setupAction = .openSettings
             isSetupEnabled = true
         case .providerSignIn:
-            toggleTitle = "Start/End VoiceKey Voice"
-            isToggleEnabled = true
+            toggleTitle = currentStatus.voiceToggleTitle
+            isToggleEnabled = currentStatus.allowsVoiceToggleWhileReady
             setupTitle = "Sign In with Provider..."
             setupAction = supportsProviderInterface ? .showProviderInterface : .openSettings
             isSetupEnabled = true

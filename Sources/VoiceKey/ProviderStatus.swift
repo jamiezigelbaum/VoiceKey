@@ -72,6 +72,21 @@ enum ProviderStatus: Equatable {
         }
     }
 
+    var voiceToggleTitle: String {
+        switch self {
+        case .starting, .listening, .thinking, .speaking, .clickSent, .voiceActive:
+            return "Stop VoiceKey Voice"
+        case .stopping:
+            return "Stopping VoiceKey Voice"
+        default:
+            return "Start VoiceKey Voice"
+        }
+    }
+
+    var allowsVoiceToggleWhileReady: Bool {
+        self != .stopping
+    }
+
     var detail: String? {
         if case let .needsAttention(message) = self {
             return message

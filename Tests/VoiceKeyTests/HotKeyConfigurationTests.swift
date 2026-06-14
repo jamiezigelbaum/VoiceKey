@@ -118,6 +118,25 @@ final class MenuBarIconStateTests: XCTestCase {
     func testReadyStatusUsesReadyIcon() {
         XCTAssertEqual(MenuBarIconState(status: .ready), .ready)
     }
+
+    func testVoiceToggleTitleStartsWhenInactive() {
+        XCTAssertEqual(ProviderStatus.ready.voiceToggleTitle, "Start VoiceKey Voice")
+        XCTAssertEqual(ProviderStatus.checking.voiceToggleTitle, "Start VoiceKey Voice")
+        XCTAssertTrue(ProviderStatus.ready.allowsVoiceToggleWhileReady)
+    }
+
+    func testVoiceToggleTitleStopsWhenActive() {
+        XCTAssertEqual(ProviderStatus.starting.voiceToggleTitle, "Stop VoiceKey Voice")
+        XCTAssertEqual(ProviderStatus.listening.voiceToggleTitle, "Stop VoiceKey Voice")
+        XCTAssertEqual(ProviderStatus.thinking.voiceToggleTitle, "Stop VoiceKey Voice")
+        XCTAssertEqual(ProviderStatus.speaking.voiceToggleTitle, "Stop VoiceKey Voice")
+        XCTAssertTrue(ProviderStatus.speaking.allowsVoiceToggleWhileReady)
+    }
+
+    func testVoiceToggleTitleDisablesWhileStopping() {
+        XCTAssertEqual(ProviderStatus.stopping.voiceToggleTitle, "Stopping VoiceKey Voice")
+        XCTAssertFalse(ProviderStatus.stopping.allowsVoiceToggleWhileReady)
+    }
 }
 
 final class VoiceProviderSettingsStoreTests: XCTestCase {
@@ -208,7 +227,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         )
 
         XCTAssertEqual(state.providerTitle, "Provider: OpenAI Realtime API")
-        XCTAssertEqual(state.toggleTitle, "Start/End VoiceKey Voice")
+        XCTAssertEqual(state.toggleTitle, "Start VoiceKey Voice")
         XCTAssertTrue(state.isToggleEnabled)
         XCTAssertEqual(state.setupTitle, "Provider Settings...")
         XCTAssertEqual(state.setupAction, .openSettings)
@@ -242,6 +261,34 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertFalse(state.isClearSessionLogEnabled)
     }
 
+    func testProviderMenuStateForActiveAPIProviderOffersStop() {
+        let state = VoiceProviderMenuState(
+            provider: .openAIRealtime,
+            readiness: .ready,
+            currentStatus: .speaking,
+            supportsProviderInterface: false,
+            supportsConnectionCheck: true,
+            hasSessionLog: true
+        )
+
+        XCTAssertEqual(state.toggleTitle, "Stop VoiceKey Voice")
+        XCTAssertTrue(state.isToggleEnabled)
+    }
+
+    func testProviderMenuStateForStoppingAPIProviderDisablesToggle() {
+        let state = VoiceProviderMenuState(
+            provider: .openAIRealtime,
+            readiness: .ready,
+            currentStatus: .stopping,
+            supportsProviderInterface: false,
+            supportsConnectionCheck: true,
+            hasSessionLog: true
+        )
+
+        XCTAssertEqual(state.toggleTitle, "Stopping VoiceKey Voice")
+        XCTAssertFalse(state.isToggleEnabled)
+    }
+
     func testProviderMenuStateForProviderSignIn() {
         let state = VoiceProviderMenuState(
             provider: .chatGPTWeb,
@@ -252,7 +299,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         )
 
         XCTAssertEqual(state.providerTitle, "Provider: ChatGPT Web (OAuth) - Sign-in")
-        XCTAssertEqual(state.toggleTitle, "Start/End VoiceKey Voice")
+        XCTAssertEqual(state.toggleTitle, "Start VoiceKey Voice")
         XCTAssertTrue(state.isToggleEnabled)
         XCTAssertEqual(state.setupTitle, "Sign In with Provider...")
         XCTAssertEqual(state.setupAction, .showProviderInterface)

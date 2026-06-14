@@ -15,7 +15,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private let providerMenuItem = NSMenuItem(title: "Provider: OpenAI Realtime API", action: nil, keyEquivalent: "")
     private let audioTipMenuItem = NSMenuItem(title: "Tip: Use headphones or non-speaker output to prevent voice loops", action: nil, keyEquivalent: "")
     private lazy var toggleMenuItem = NSMenuItem(
-        title: "Start/End VoiceKey Voice",
+        title: "Start VoiceKey Voice",
         action: #selector(toggleVoice),
         keyEquivalent: voiceHotKey.menuKeyEquivalent
     )
@@ -123,7 +123,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureVoiceHotKeyMenuItem() {
-        toggleMenuItem.title = "Start/End VoiceKey Voice"
+        toggleMenuItem.title = currentStatus.voiceToggleTitle
         toggleMenuItem.keyEquivalent = voiceHotKey.menuKeyEquivalent
         toggleMenuItem.keyEquivalentModifierMask = voiceHotKey.menuModifierMask
     }
@@ -287,6 +287,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         return VoiceProviderMenuState(
             provider: provider,
             readiness: provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)),
+            currentStatus: currentStatus,
             supportsProviderInterface: voiceProvider?.capabilities.supportsProviderInterface == true,
             supportsConnectionCheck: voiceProvider?.capabilities.supportsConnectionCheck == true,
             hasSessionLog: sessionLog.isEmpty == false
