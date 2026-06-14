@@ -3,6 +3,23 @@ import Foundation
 import XCTest
 
 final class OpenAIRealtimeEventMapperTests: XCTestCase {
+    func testSessionCreatedMapsToDiagnosticOnly() {
+        XCTAssertEqual(
+            OpenAIRealtimeEventMapper.actions(from: #"{"type":"session.created"}"#),
+            [.providerEvent(.diagnostic("session.created"))]
+        )
+    }
+
+    func testSessionUpdatedMapsToDiagnosticAndSessionUpdatedAction() {
+        XCTAssertEqual(
+            OpenAIRealtimeEventMapper.actions(from: #"{"type":"session.updated"}"#),
+            [
+                .providerEvent(.diagnostic("session.updated")),
+                .sessionUpdated
+            ]
+        )
+    }
+
     func testSpeechStartedMapsToListening() {
         XCTAssertEqual(
             OpenAIRealtimeEventMapper.actions(from: #"{"type":"input_audio_buffer.speech_started"}"#),

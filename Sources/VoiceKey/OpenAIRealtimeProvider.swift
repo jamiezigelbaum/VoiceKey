@@ -22,6 +22,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     private var connectionCheck: OpenAIRealtimeConnectionCheck?
     private var isConnecting = false
     private var isConnected = false
+    private var isAudioStreaming = false
     private var isStopping = false
 
     init(
@@ -73,6 +74,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         self.webSocketTask = nil
         isConnecting = false
         isConnected = false
+        isAudioStreaming = false
         isStopping = false
         emit(.status(.ready))
     }
@@ -111,10 +113,12 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     }
 
     private func startAudioStreaming() {
+        guard isAudioStreaming == false else { return }
         do {
             try audioEngine.start { [weak self] audio in
                 self?.sendAudio(audio)
             }
+            isAudioStreaming = true
             emit(.status(.listening))
         } catch {
             audioEngine.stop()
@@ -122,6 +126,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             webSocketTask = nil
             isConnecting = false
             isConnected = false
+            isAudioStreaming = false
             emit(.status(.needsAttention(error.localizedDescription)))
         }
     }
@@ -148,6 +153,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
                 self.webSocketTask = nil
                 self.isConnecting = false
                 self.isConnected = false
+                self.isAudioStreaming = false
                 self.audioEngine.stop()
                 self.emit(.status(.needsAttention(error.localizedDescription)))
             }
@@ -172,6 +178,9 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             switch action {
             case let .audio(audio):
                 audioEngine.playPCM16(audio)
+            case .sessionUpdated:
+                guard isConnected else { break }
+                startAudioStreaming()
             case let .providerEvent(event):
                 emit(event)
             }
@@ -237,7 +246,6 @@ extension OpenAIRealtimeProvider: URLSessionWebSocketDelegate {
         isConnected = true
         emit(.diagnostic("OpenAI Realtime WebSocket opened."))
         sendSessionUpdate()
-        startAudioStreaming()
     }
 
     func urlSession(
@@ -252,6 +260,7 @@ extension OpenAIRealtimeProvider: URLSessionWebSocketDelegate {
         self.webSocketTask = nil
         isConnecting = false
         isConnected = false
+        isAudioStreaming = false
         audioEngine.stop()
         emit(.status(OpenAIRealtimeConnectionDiagnostics.closeStatus(code: closeCode, reason: reason)))
     }
