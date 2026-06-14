@@ -136,11 +136,17 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         voiceProvider = provider
-        providerMenuItem.title = "Provider: \(providerConfiguration.providerID.displayName)"
+        updateProviderMenuTitle()
         updateProviderMenuActions()
     }
 
     @objc private func toggleVoice() {
+        let provider = providerConfiguration.providerID
+        let readiness = provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider))
+        guard readiness.allowsVoiceToggle else {
+            updateStatus(.needsAttention(readiness.settingsMessage))
+            return
+        }
         voiceProvider?.toggleVoice()
     }
 
@@ -179,7 +185,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         currentStatus = status
         statusItem.button?.toolTip = "VoiceKey - \(status.menuTitle)"
         statusMenuItem.title = "Status: \(status.menuTitle)"
-        providerMenuItem.title = "Provider: \(providerConfiguration.providerID.displayName)"
+        updateProviderMenuTitle()
         updateHotKeyPresentation()
 
         if let detail = status.detail {
@@ -194,12 +200,25 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.image = MenuBarIconRenderer.image(for: voiceHotKey, status: currentStatus)
     }
 
+    private func updateProviderMenuTitle() {
+        let provider = providerConfiguration.providerID
+        let readiness = provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider))
+        if let suffix = readiness.menuSuffix {
+            providerMenuItem.title = "Provider: \(provider.displayName) - \(suffix)"
+        } else {
+            providerMenuItem.title = "Provider: \(provider.displayName)"
+        }
+    }
+
     private func updateProviderMenuActions() {
         let isAvailable = voiceProvider?.capabilities.supportsProviderInterface == true
         showProviderMenuItem.isEnabled = isAvailable
         reloadProviderMenuItem.isEnabled = isAvailable
         showProviderMenuItem.title = isAvailable ? "Show Provider" : "Show Provider (API provider)"
         reloadProviderMenuItem.title = isAvailable ? "Reload Provider" : "Reload Provider (API provider)"
+        let provider = providerConfiguration.providerID
+        let readiness = provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider))
+        toggleMenuItem.isEnabled = readiness.allowsVoiceToggle
     }
 
     private func updateProviderConfiguration(_ configuration: VoiceSessionConfiguration) {

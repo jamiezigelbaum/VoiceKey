@@ -17,6 +17,10 @@ final class APIKeyStore {
 
     private let service = "com.zigelbaum.VoiceKey"
 
+    func hasAPIKey(for provider: VoiceProviderID) -> Bool {
+        apiKey(for: provider) != nil
+    }
+
     func apiKey(for provider: VoiceProviderID) -> String? {
         guard provider.requiresAPIKey else { return nil }
 

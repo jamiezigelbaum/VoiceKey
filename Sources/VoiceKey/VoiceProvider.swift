@@ -109,6 +109,56 @@ enum VoiceProviderID: String, CaseIterable, Equatable {
             instructions: VoiceSessionConfiguration.defaultInstructions
         )
     }
+
+    func readiness(hasAPIKey: Bool) -> VoiceProviderReadiness {
+        guard isImplemented else {
+            return .unavailable("\(displayName) is coming soon.")
+        }
+        guard requiresAPIKey else {
+            return .providerSignIn("Uses provider sign-in.")
+        }
+        return hasAPIKey ? .ready : .needsAPIKey("\(credentialLabel) required.")
+    }
+}
+
+enum VoiceProviderReadiness: Equatable {
+    case ready
+    case providerSignIn(String)
+    case needsAPIKey(String)
+    case unavailable(String)
+
+    var menuSuffix: String? {
+        switch self {
+        case .ready:
+            return nil
+        case .providerSignIn:
+            return "Sign-in"
+        case .needsAPIKey:
+            return "Needs key"
+        case .unavailable:
+            return "Coming soon"
+        }
+    }
+
+    var settingsMessage: String {
+        switch self {
+        case .ready:
+            return "Ready to use."
+        case let .providerSignIn(message),
+             let .needsAPIKey(message),
+             let .unavailable(message):
+            return message
+        }
+    }
+
+    var allowsVoiceToggle: Bool {
+        switch self {
+        case .ready, .providerSignIn:
+            return true
+        case .needsAPIKey, .unavailable:
+            return false
+        }
+    }
 }
 
 struct VoiceProviderCapabilities: Equatable {

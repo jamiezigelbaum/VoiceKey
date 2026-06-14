@@ -134,6 +134,28 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertFalse(VoiceProviderID.chatGPTWeb.supportsVoiceSetting)
     }
 
+    func testOpenAIReadinessRequiresAPIKey() {
+        XCTAssertEqual(
+            VoiceProviderID.openAIRealtime.readiness(hasAPIKey: false),
+            .needsAPIKey("OpenAI API key required.")
+        )
+        XCTAssertEqual(VoiceProviderID.openAIRealtime.readiness(hasAPIKey: true), .ready)
+    }
+
+    func testChatGPTReadinessUsesProviderSignIn() {
+        let readiness = VoiceProviderID.chatGPTWeb.readiness(hasAPIKey: false)
+        XCTAssertEqual(readiness, .providerSignIn("Uses provider sign-in."))
+        XCTAssertTrue(readiness.allowsVoiceToggle)
+        XCTAssertEqual(readiness.menuSuffix, "Sign-in")
+    }
+
+    func testFutureProviderReadinessShowsComingSoon() {
+        let readiness = VoiceProviderID.geminiLive.readiness(hasAPIKey: true)
+        XCTAssertEqual(readiness, .unavailable("Gemini Live is coming soon."))
+        XCTAssertFalse(readiness.allowsVoiceToggle)
+        XCTAssertEqual(readiness.menuSuffix, "Coming soon")
+    }
+
     func testLoadsDefaultsWhenNoProviderSettingsAreSaved() throws {
         let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

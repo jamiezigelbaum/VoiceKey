@@ -36,6 +36,7 @@ final class SettingsWindowController: NSWindowController {
     private let voicePopup = NSPopUpButton()
     private let apiCredentialLabel = NSTextField(labelWithString: "")
     private let apiKeyField = NSSecureTextField()
+    private let credentialStatusLabel = NSTextField(labelWithString: "")
     private let instructionsField = NSTextField()
 
     init(hotKey: HotKeyConfiguration, configuration: VoiceSessionConfiguration) {
@@ -90,6 +91,9 @@ final class SettingsWindowController: NSWindowController {
         let voiceLabel = formLabel("Voice")
         apiCredentialLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         apiCredentialLabel.translatesAutoresizingMaskIntoConstraints = false
+        credentialStatusLabel.font = NSFont.systemFont(ofSize: 12)
+        credentialStatusLabel.textColor = .tertiaryLabelColor
+        credentialStatusLabel.translatesAutoresizingMaskIntoConstraints = false
         let instructionsLabel = formLabel("Instructions")
         let hotKeyLabel = NSTextField(labelWithString: "Hotkey")
         hotKeyLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
@@ -123,6 +127,7 @@ final class SettingsWindowController: NSWindowController {
         contentView.addSubview(voicePopup)
         contentView.addSubview(apiCredentialLabel)
         contentView.addSubview(apiKeyField)
+        contentView.addSubview(credentialStatusLabel)
         contentView.addSubview(instructionsLabel)
         contentView.addSubview(instructionsField)
         contentView.addSubview(saveButton)
@@ -166,8 +171,12 @@ final class SettingsWindowController: NSWindowController {
             apiKeyField.trailingAnchor.constraint(equalTo: providerPopup.trailingAnchor),
             apiKeyField.centerYAnchor.constraint(equalTo: apiCredentialLabel.centerYAnchor),
 
+            credentialStatusLabel.leadingAnchor.constraint(equalTo: providerPopup.leadingAnchor),
+            credentialStatusLabel.trailingAnchor.constraint(equalTo: providerPopup.trailingAnchor),
+            credentialStatusLabel.topAnchor.constraint(equalTo: apiKeyField.bottomAnchor, constant: 5),
+
             instructionsLabel.leadingAnchor.constraint(equalTo: providerLabel.leadingAnchor),
-            instructionsLabel.topAnchor.constraint(equalTo: apiCredentialLabel.bottomAnchor, constant: 18),
+            instructionsLabel.topAnchor.constraint(equalTo: credentialStatusLabel.bottomAnchor, constant: 14),
             instructionsLabel.widthAnchor.constraint(equalTo: providerLabel.widthAnchor),
             instructionsField.leadingAnchor.constraint(equalTo: providerPopup.leadingAnchor),
             instructionsField.trailingAnchor.constraint(equalTo: providerPopup.trailingAnchor),
@@ -244,6 +253,9 @@ final class SettingsWindowController: NSWindowController {
         if provider.requiresAPIKey == false {
             apiKeyField.stringValue = ""
         }
+        credentialStatusLabel.stringValue = provider.readiness(
+            hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)
+        ).settingsMessage
 
         instructionsField.isEnabled = provider != .chatGPTWeb
         instructionsField.stringValue = configuration.instructions
@@ -281,6 +293,7 @@ final class SettingsWindowController: NSWindowController {
             do {
                 try APIKeyStore.shared.setAPIKey(apiKey, for: provider)
                 apiKeyField.stringValue = ""
+                syncProviderControls()
             } catch {
                 NSSound.beep()
             }
