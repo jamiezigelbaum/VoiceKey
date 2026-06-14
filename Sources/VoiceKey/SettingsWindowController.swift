@@ -303,7 +303,11 @@ final class SettingsWindowController: NSWindowController {
         VoiceProviderSettingsStore.save(nextConfiguration)
 
         let apiKey = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if provider.requiresAPIKey, apiKey.isEmpty == false {
+        let credentialState = VoiceProviderCredentialViewState(
+            provider: provider,
+            hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)
+        )
+        if credentialState.acceptsAPIKeyInput, apiKey.isEmpty == false {
             do {
                 try APIKeyStore.shared.setAPIKey(apiKey, for: provider)
                 apiKeyField.stringValue = ""

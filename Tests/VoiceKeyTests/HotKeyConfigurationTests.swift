@@ -180,6 +180,22 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertFalse(state.canRemoveAPIKey)
     }
 
+    func testCredentialViewStateForComingSoonProviderDoesNotAcceptNewKey() {
+        let state = VoiceProviderCredentialViewState(provider: .geminiLive, hasAPIKey: false)
+
+        XCTAssertEqual(state.statusMessage, "Gemini Live is coming soon.")
+        XCTAssertFalse(state.acceptsAPIKeyInput)
+        XCTAssertFalse(state.canRemoveAPIKey)
+    }
+
+    func testCredentialViewStateForComingSoonProviderAllowsStoredKeyRemoval() {
+        let state = VoiceProviderCredentialViewState(provider: .geminiLive, hasAPIKey: true)
+
+        XCTAssertEqual(state.statusMessage, "Gemini Live is coming soon.")
+        XCTAssertFalse(state.acceptsAPIKeyInput)
+        XCTAssertTrue(state.canRemoveAPIKey)
+    }
+
     func testGeminiLiveProviderCapabilitiesMatchRealtimeVoiceAndVisionSlot() {
         let provider = GeminiLiveProvider()
 

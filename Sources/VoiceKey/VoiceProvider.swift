@@ -177,7 +177,7 @@ struct VoiceProviderCredentialViewState: Equatable {
 
     init(provider: VoiceProviderID, hasAPIKey: Bool) {
         statusMessage = provider.readiness(hasAPIKey: hasAPIKey).settingsMessage
-        acceptsAPIKeyInput = provider.requiresAPIKey
+        acceptsAPIKeyInput = provider.requiresAPIKey && provider.isImplemented
         canRemoveAPIKey = provider.requiresAPIKey && hasAPIKey
     }
 }
