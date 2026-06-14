@@ -23,7 +23,10 @@ final class OpenAIRealtimeEventMapperTests: XCTestCase {
     func testSpeechStartedMapsToListening() {
         XCTAssertEqual(
             OpenAIRealtimeEventMapper.actions(from: #"{"type":"input_audio_buffer.speech_started"}"#),
-            [.providerEvent(.status(.listening))]
+            [
+                .stopPlayback,
+                .providerEvent(.status(.listening))
+            ]
         )
     }
 

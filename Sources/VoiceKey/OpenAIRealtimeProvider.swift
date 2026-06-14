@@ -181,6 +181,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             case .sessionUpdated:
                 guard isConnected else { break }
                 startAudioStreaming()
+            case .stopPlayback:
+                audioEngine.stopPlayback()
             case let .providerEvent(event):
                 emit(event)
             }

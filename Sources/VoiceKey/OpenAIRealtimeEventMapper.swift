@@ -3,6 +3,7 @@ import Foundation
 enum OpenAIRealtimeEventAction: Equatable {
     case providerEvent(VoiceProviderEvent)
     case sessionUpdated
+    case stopPlayback
     case audio(Data)
 }
 
@@ -23,7 +24,10 @@ enum OpenAIRealtimeEventMapper {
                 .sessionUpdated
             ]
         case "input_audio_buffer.speech_started":
-            return [.providerEvent(.status(.listening))]
+            return [
+                .stopPlayback,
+                .providerEvent(.status(.listening))
+            ]
         case "input_audio_buffer.speech_stopped", "input_audio_buffer.committed", "response.created":
             return [.providerEvent(.status(.thinking))]
         case "response.output_audio.delta", "response.audio.delta":

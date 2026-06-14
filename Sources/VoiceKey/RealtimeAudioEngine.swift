@@ -83,7 +83,13 @@ final class RealtimeAudioEngine {
     func stop() {
         inputEngine.inputNode.removeTap(onBus: 0)
         inputEngine.stop()
-        playerNode.stop()
+        stopPlayback()
+    }
+
+    func stopPlayback() {
+        queue.async { [weak self] in
+            self?.playerNode.stop()
+        }
     }
 
     func playPCM16(_ data: Data) {
