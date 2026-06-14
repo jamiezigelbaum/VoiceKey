@@ -52,7 +52,7 @@ This is an early native Swift/AppKit app with:
 - settings window for recording a new hotkey and configuring the selected voice provider
 - provider-neutral realtime voice session contract
 - OpenAI Realtime API provider over WebSocket as the default path, with live
-  WebSocket/session-update smoke coverage
+  WebSocket/session-update smoke coverage and mic-to-model-to-audio validation
 - ChatGPT Web provider as a sign-in/OAuth fallback path
 - menu action for checking an API provider connection without starting the microphone
 - Keychain-backed provider API key storage
@@ -67,9 +67,10 @@ This is an early native Swift/AppKit app with:
 - fixture-tested DOM probes that distinguish ChatGPT Voice Mode from text
   dictation controls
 
-The next milestone is human mic/speaker end-to-end testing of the OpenAI
-Realtime API path, followed by additional provider adapters for Gemini Live and
-Deepgram Voice Agent.
+OpenAI Realtime mic-to-model-to-audio was validated in the built menu bar app on
+June 14, 2026. The next milestone is provider adapter hardening for Gemini Live
+and Deepgram Voice Agent, plus release polish around first-run microphone
+permission and speaker feedback guidance.
 
 ## Build From Source
 
