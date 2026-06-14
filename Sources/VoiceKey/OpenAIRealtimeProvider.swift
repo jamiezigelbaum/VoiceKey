@@ -18,6 +18,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     private let audioEngine: RealtimeAudioEngine
     private lazy var urlSession = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
     private var webSocketTask: URLSessionWebSocketTask?
+    private var isConnecting = false
     private var isConnected = false
     private var isStopping = false
 
@@ -43,13 +44,15 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         self.configuration = configuration
         if isConnected {
             sendSessionUpdate()
+        } else if isConnecting {
+            emit(.status(.starting))
         } else {
             prepare()
         }
     }
 
     func toggleVoice() {
-        if isConnected {
+        if isConnected || isConnecting {
             stopVoice()
         } else {
             startVoice()
@@ -59,11 +62,14 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     func stopVoice() {
         isStopping = true
         emit(.status(.stopping))
-        sendJSON(OpenAIRealtimeRequestBuilder.responseCancelEvent)
-        sendJSON(OpenAIRealtimeRequestBuilder.inputAudioBufferClearEvent)
+        if isConnected {
+            sendJSON(OpenAIRealtimeRequestBuilder.responseCancelEvent)
+            sendJSON(OpenAIRealtimeRequestBuilder.inputAudioBufferClearEvent)
+        }
         audioEngine.stop()
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
-        webSocketTask = nil
+        self.webSocketTask = nil
+        isConnecting = false
         isConnected = false
         isStopping = false
         emit(.status(.ready))
@@ -97,19 +103,24 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
 
         let task = urlSession.webSocketTask(with: request)
         webSocketTask = task
+        isConnecting = true
         task.resume()
-        isConnected = true
         receiveLoop()
-        sendSessionUpdate()
+    }
 
+    private func startAudioStreaming() {
         do {
             try audioEngine.start { [weak self] audio in
                 self?.sendAudio(audio)
             }
             emit(.status(.listening))
         } catch {
+            audioEngine.stop()
+            webSocketTask?.cancel(with: .normalClosure, reason: nil)
+            webSocketTask = nil
+            isConnecting = false
+            isConnected = false
             emit(.status(.needsAttention(error.localizedDescription)))
-            stopVoice()
         }
     }
 
@@ -131,7 +142,9 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
                     self.receiveLoop()
                 }
             case let .failure(error):
-                guard self.isStopping == false else { return }
+                guard self.webSocketTask != nil, self.isStopping == false else { return }
+                self.webSocketTask = nil
+                self.isConnecting = false
                 self.isConnected = false
                 self.audioEngine.stop()
                 self.emit(.status(.needsAttention(error.localizedDescription)))
@@ -189,7 +202,14 @@ extension OpenAIRealtimeProvider: URLSessionWebSocketDelegate {
         webSocketTask: URLSessionWebSocketTask,
         didOpenWithProtocol protocol: String?
     ) {
+        guard let currentTask = self.webSocketTask,
+              currentTask === webSocketTask,
+              isStopping == false else { return }
+        isConnecting = false
+        isConnected = true
         emit(.diagnostic("OpenAI Realtime WebSocket opened."))
+        sendSessionUpdate()
+        startAudioStreaming()
     }
 
     func urlSession(
@@ -198,7 +218,11 @@ extension OpenAIRealtimeProvider: URLSessionWebSocketDelegate {
         didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
         reason: Data?
     ) {
-        guard isStopping == false else { return }
+        guard let currentTask = self.webSocketTask,
+              currentTask === webSocketTask,
+              isStopping == false else { return }
+        self.webSocketTask = nil
+        isConnecting = false
         isConnected = false
         audioEngine.stop()
         emit(.status(.ready))
