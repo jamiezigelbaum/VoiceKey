@@ -59,8 +59,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     func stopVoice() {
         isStopping = true
         emit(.status(.stopping))
-        sendJSON(["type": "response.cancel"])
-        sendJSON(["type": "input_audio_buffer.clear"])
+        sendJSON(OpenAIRealtimeRequestBuilder.responseCancelEvent)
+        sendJSON(OpenAIRealtimeRequestBuilder.inputAudioBufferClearEvent)
         audioEngine.stop()
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
@@ -87,18 +87,13 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     }
 
     private func connect(apiKey: String) {
-        var components = URLComponents(string: "wss://api.openai.com/v1/realtime")!
-        components.queryItems = [
-            URLQueryItem(name: "model", value: configuration.model)
-        ]
-        guard let url = components.url else {
+        guard let request = OpenAIRealtimeRequestBuilder.webSocketRequest(
+            apiKey: apiKey,
+            configuration: configuration
+        ) else {
             emit(.status(.needsAttention("Could not build the OpenAI Realtime URL.")))
             return
         }
-
-        var request = URLRequest(url: url)
-        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 30
 
         let task = urlSession.webSocketTask(with: request)
         webSocketTask = task
@@ -119,42 +114,11 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     }
 
     private func sendSessionUpdate() {
-        sendJSON([
-            "type": "session.update",
-            "session": [
-                "type": "realtime",
-                "model": configuration.model,
-                "output_modalities": ["audio"],
-                "audio": [
-                    "input": [
-                        "format": [
-                            "type": "audio/pcm",
-                            "rate": 24_000
-                        ],
-                        "turn_detection": [
-                            "type": "semantic_vad",
-                            "eagerness": "auto",
-                            "create_response": true,
-                            "interrupt_response": true
-                        ]
-                    ],
-                    "output": [
-                        "format": [
-                            "type": "audio/pcm"
-                        ],
-                        "voice": configuration.voice
-                    ]
-                ],
-                "instructions": configuration.instructions
-            ]
-        ])
+        sendJSON(OpenAIRealtimeRequestBuilder.sessionUpdateEvent(configuration: configuration))
     }
 
     private func sendAudio(_ data: Data) {
-        sendJSON([
-            "type": "input_audio_buffer.append",
-            "audio": data.base64EncodedString()
-        ])
+        sendJSON(OpenAIRealtimeRequestBuilder.inputAudioAppendEvent(audio: data))
     }
 
     private func receiveLoop() {
