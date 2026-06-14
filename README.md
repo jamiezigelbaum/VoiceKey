@@ -109,6 +109,9 @@ The menu bar icon shows a compact version of the same hotkey, plus a simple
 shape state: ready, loading, attention, or voice active. Choose `Settings...` to
 record a different global hotkey.
 
+Choose `Show Session Log` to inspect provider status changes, diagnostics, and
+streamed transcript text during live testing.
+
 If the voice provider appears to hear phrases you did not say, change macOS audio output to
 headphones or another output path that the microphone cannot hear. VoiceKey
 sends one start click per F16 press; repeated phantom turns are usually speaker
@@ -133,6 +136,8 @@ VoiceKey is intentionally small:
   same provider contract.
 - `GeminiLiveProvider` and `DeepgramVoiceAgentProvider`: planned realtime
   provider adapter slots with provider-specific capabilities.
+- `VoiceSessionLog` and `SessionLogWindowController`: live provider diagnostics
+  and transcript inspection.
 - `RealtimeAudioEngine`: native microphone capture, audio conversion, and playback.
 - `APIKeyStore`: Keychain-backed provider credential storage.
 - `WebWindowController`: persistent `WKWebView`, mic permission, native click bridge.

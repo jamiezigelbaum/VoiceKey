@@ -8,7 +8,9 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private var hotKey: GlobalHotKey?
     private var currentStatus: ProviderStatus = .loading
     private var settingsWindowController: SettingsWindowController?
+    private var sessionLogWindowController: SessionLogWindowController?
     private var voiceProvider: RealtimeVoiceProvider?
+    private var sessionLog = VoiceSessionLog()
     private let statusMenuItem = NSMenuItem(title: "Status: Loading", action: nil, keyEquivalent: "")
     private let providerMenuItem = NSMenuItem(title: "Provider: OpenAI Realtime", action: nil, keyEquivalent: "")
     private let audioTipMenuItem = NSMenuItem(title: "Tip: Use headphones or non-speaker output to prevent voice loops", action: nil, keyEquivalent: "")
@@ -19,6 +21,8 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     )
     private let showProviderMenuItem = NSMenuItem(title: "Show Provider", action: #selector(showProvider), keyEquivalent: "")
     private let reloadProviderMenuItem = NSMenuItem(title: "Reload Provider", action: #selector(reloadProvider), keyEquivalent: "")
+    private let showSessionLogMenuItem = NSMenuItem(title: "Show Session Log", action: #selector(showSessionLog), keyEquivalent: "")
+    private let clearSessionLogMenuItem = NSMenuItem(title: "Clear Session Log", action: #selector(clearSessionLog), keyEquivalent: "")
     private let settingsMenuItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -72,6 +76,8 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(toggleMenuItem)
         menu.addItem(showProviderMenuItem)
         menu.addItem(reloadProviderMenuItem)
+        menu.addItem(showSessionLogMenuItem)
+        menu.addItem(clearSessionLogMenuItem)
         settingsMenuItem.keyEquivalentModifierMask = [.command]
         menu.addItem(settingsMenuItem)
         menu.addItem(.separator())
@@ -113,12 +119,14 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private func configureProvider() {
         let provider = VoiceProviderFactory.makeProvider(for: providerConfiguration)
         provider.onEvent = { [weak self] event in
+            self?.recordProviderEvent(event)
             switch event {
             case let .status(status):
                 self?.updateStatus(status)
             case let .diagnostic(message):
                 self?.statusMenuItem.toolTip = message
-            case .transcript:
+            case let .transcript(delta):
+                self?.statusMenuItem.toolTip = delta
                 break
             }
         }
@@ -144,6 +152,19 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func reloadProvider() {
         voiceProvider?.reloadProviderInterface()
+    }
+
+    @objc private func showSessionLog() {
+        let controller = sessionLogWindowController ?? SessionLogWindowController(text: sessionLog.displayText)
+        sessionLogWindowController = controller
+        controller.update(text: sessionLog.displayText)
+        controller.showAndFocus()
+    }
+
+    @objc private func clearSessionLog() {
+        sessionLog.clear()
+        sessionLogWindowController?.update(text: sessionLog.displayText)
+        updateProviderMenuActions()
     }
 
     @objc private func showSettings() {
@@ -204,9 +225,16 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         reloadProviderMenuItem.isEnabled = isAvailable
         showProviderMenuItem.title = isAvailable ? "Show Provider" : "Show Provider (API provider)"
         reloadProviderMenuItem.title = isAvailable ? "Reload Provider" : "Reload Provider (API provider)"
+        clearSessionLogMenuItem.isEnabled = sessionLog.isEmpty == false
         let provider = providerConfiguration.providerID
         let readiness = provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider))
         toggleMenuItem.isEnabled = readiness.allowsVoiceToggle
+    }
+
+    private func recordProviderEvent(_ event: VoiceProviderEvent) {
+        sessionLog.append(event, provider: providerConfiguration.providerID)
+        sessionLogWindowController?.update(text: sessionLog.displayText)
+        updateProviderMenuActions()
     }
 
     private func updateProviderConfiguration(_ configuration: VoiceSessionConfiguration) {
