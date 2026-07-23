@@ -37,6 +37,13 @@ final class CustomEndpointProviderTests: XCTestCase {
         )
     }
 
+    func testNormalizedBaseURLAddsSecureSchemeToHostAndPort() {
+        XCTAssertEqual(
+            OpenAIRealtimeRequestBuilder.normalizedBaseURL(for: "assistant.local:8443"),
+            "wss://assistant.local:8443/v1/realtime"
+        )
+    }
+
     func testNormalizedBaseURLConvertsHTTPSchemeAndKeepsPort() {
         XCTAssertEqual(
             OpenAIRealtimeRequestBuilder.normalizedBaseURL(for: "http://assistant.local:9000"),
@@ -67,6 +74,24 @@ final class CustomEndpointProviderTests: XCTestCase {
             OpenAIRealtimeRequestBuilder.normalizedBaseURL(for: "  \n"),
             OpenAIRealtimeRequestBuilder.defaultBaseURL
         )
+    }
+
+    func testWebSocketRequestReplacesExistingModelQueryItem() throws {
+        let request = try XCTUnwrap(OpenAIRealtimeRequestBuilder.webSocketRequest(
+            baseURL: "wss://assistant.local/v1/realtime?organization=example&model=old-model",
+            apiKey: "custom-key",
+            configuration: testConfiguration
+        ))
+
+        let queryItems = try XCTUnwrap(
+            URLComponents(url: XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
+        )
+        XCTAssertEqual(queryItems.filter { $0.name == "model" }, [
+            URLQueryItem(name: "model", value: "gpt-realtime-2-test")
+        ])
+        XCTAssertEqual(queryItems.filter { $0.name == "organization" }, [
+            URLQueryItem(name: "organization", value: "example")
+        ])
     }
 
     func testFactoryReturnsOpenAIRealtimeProviderForCustomEndpoint() {

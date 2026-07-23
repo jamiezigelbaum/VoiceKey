@@ -8,6 +8,9 @@ enum OpenAIRealtimeRequestBuilder {
         guard trimmed.isEmpty == false else { return defaultBaseURL }
 
         var normalized = trimmed
+        if normalized.contains("://") == false {
+            normalized = "wss://\(normalized)"
+        }
         let lowercased = normalized.lowercased()
         if lowercased.hasPrefix("https://") {
             normalized = "wss://" + normalized.dropFirst("https://".count)
@@ -30,7 +33,7 @@ enum OpenAIRealtimeRequestBuilder {
         configuration: VoiceSessionConfiguration
     ) -> URLRequest? {
         var components = URLComponents(string: baseURL)
-        let existingQueryItems = components?.queryItems ?? []
+        let existingQueryItems = (components?.queryItems ?? []).filter { $0.name != "model" }
         components?.queryItems = existingQueryItems + [
             URLQueryItem(name: "model", value: configuration.model)
         ]
@@ -44,30 +47,37 @@ enum OpenAIRealtimeRequestBuilder {
         return request
     }
 
-    static func sessionUpdateEvent(configuration: VoiceSessionConfiguration) -> [String: Any] {
-        [
-            "type": "session.update",
-            "session": [
-                "type": "realtime",
-                "model": configuration.model,
-                "output_modalities": ["audio"],
-                "audio": [
-                    "input": [
-                        "format": pcm24kFormat,
-                        "turn_detection": [
-                            "type": "semantic_vad",
-                            "eagerness": "auto",
-                            "create_response": true,
-                            "interrupt_response": true
-                        ]
+    static func sessionUpdateEvent(
+        configuration: VoiceSessionConfiguration,
+        includeModel: Bool = true
+    ) -> [String: Any] {
+        var session: [String: Any] = [
+            "type": "realtime",
+            "output_modalities": ["audio"],
+            "audio": [
+                "input": [
+                    "format": pcm24kFormat,
+                    "turn_detection": [
+                        "type": "semantic_vad",
+                        "eagerness": "auto",
+                        "create_response": true,
+                        "interrupt_response": true
                     ],
-                    "output": [
-                        "format": pcm24kFormat,
-                        "voice": configuration.voice
-                    ]
                 ],
-                "instructions": configuration.instructions
-            ]
+                "output": [
+                    "format": pcm24kFormat,
+                    "voice": configuration.voice
+                ]
+            ],
+            "instructions": configuration.instructions
+        ]
+        if includeModel {
+            session["model"] = configuration.model
+        }
+
+        return [
+            "type": "session.update",
+            "session": session
         ]
     }
 

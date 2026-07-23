@@ -1,5 +1,19 @@
 import Foundation
 
+protocol OpenAIRealtimeWebSocketTaskProtocol: AnyObject {
+    func resume()
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
+    func send(
+        _ message: URLSessionWebSocketTask.Message,
+        completionHandler: @escaping @Sendable (Error?) -> Void
+    )
+    func receive(
+        completionHandler: @escaping @Sendable (Result<URLSessionWebSocketTask.Message, Error>) -> Void
+    )
+}
+
+extension URLSessionWebSocketTask: OpenAIRealtimeWebSocketTaskProtocol {}
+
 /// Pure decision behind `toggleVoice()`: any live session state — including a
 /// session that is only streaming audio — must toggle to a full stop, never to
 /// a second start that would abandon the running audio engine.
@@ -13,7 +27,9 @@ enum VoiceToggleDecision: Equatable {
 }
 
 final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
-    var id: VoiceProviderID { configuration.providerID }
+    var id: VoiceProviderID {
+        syncOnStateQueue { configuration.providerID }
+    }
     let capabilities = VoiceProviderCapabilities(
         supportsSpeechToSpeech: true,
         supportsTextInput: true,
@@ -28,9 +44,14 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
 
     private var configuration: VoiceSessionConfiguration
     private let apiKeyProvider: () -> String?
-    private let audioEngine: RealtimeAudioEngineProtocol
+    private let audioEngineProvider: () -> RealtimeAudioEngineProtocol
+    private lazy var audioEngine = audioEngineProvider()
+    private let webSocketTaskFactory: ((URLRequest) -> OpenAIRealtimeWebSocketTaskProtocol)?
+    private let stateQueue = DispatchQueue(label: "VoiceKey.OpenAIRealtimeProvider")
+    private let stateQueueKey = DispatchSpecificKey<UInt8>()
     private lazy var urlSession = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
-    private var webSocketTask: URLSessionWebSocketTask?
+    private var webSocketTask: OpenAIRealtimeWebSocketTaskProtocol?
+    private var activeModel: String?
     private var connectionCheck: OpenAIRealtimeConnectionCheck?
     private var startGeneration = 0
     private var isStarting = false
@@ -44,14 +65,28 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     init(
         configuration: VoiceSessionConfiguration,
         apiKeyProvider: @escaping () -> String?,
-        audioEngine: RealtimeAudioEngineProtocol = RealtimeAudioEngine()
+        audioEngine: RealtimeAudioEngineProtocol? = nil,
+        webSocketTaskFactory: ((URLRequest) -> OpenAIRealtimeWebSocketTaskProtocol)? = nil
     ) {
         self.configuration = configuration
         self.apiKeyProvider = apiKeyProvider
-        self.audioEngine = audioEngine
+        if let audioEngine {
+            self.audioEngineProvider = { audioEngine }
+        } else {
+            self.audioEngineProvider = { RealtimeAudioEngine() }
+        }
+        self.webSocketTaskFactory = webSocketTaskFactory
+        super.init()
+        stateQueue.setSpecific(key: stateQueueKey, value: 1)
     }
 
     func prepare() {
+        syncOnStateQueue {
+            prepareOnStateQueue()
+        }
+    }
+
+    private func prepareOnStateQueue() {
         guard requiresAPIKey == false || apiKeyProvider()?.isEmpty == false else {
             emit(.status(.needsAttention("Add an OpenAI API key in Settings.")))
             return
@@ -60,31 +95,45 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     }
 
     func update(configuration: VoiceSessionConfiguration) {
+        syncOnStateQueue {
+            updateOnStateQueue(configuration)
+        }
+    }
+
+    private func updateOnStateQueue(_ configuration: VoiceSessionConfiguration) {
         self.configuration = configuration
         if isConnected {
-            sendSessionUpdate()
+            sendSessionUpdate(includeModel: false)
         } else if isStarting || isConnecting {
             emit(.status(.starting))
         } else {
-            prepare()
+            prepareOnStateQueue()
         }
     }
 
     func toggleVoice() {
-        switch VoiceToggleDecision.decide(
-            isStarting: isStarting,
-            isConnecting: isConnecting,
-            isConnected: isConnected,
-            isAudioStreaming: isAudioStreaming
-        ) {
-        case .stop:
-            stopVoice()
-        case .start:
-            startVoice()
+        syncOnStateQueue {
+            switch VoiceToggleDecision.decide(
+                isStarting: isStarting,
+                isConnecting: isConnecting,
+                isConnected: isConnected,
+                isAudioStreaming: isAudioStreaming
+            ) {
+            case .stop:
+                stopVoiceOnStateQueue()
+            case .start:
+                startVoice()
+            }
         }
     }
 
     func stopVoice() {
+        syncOnStateQueue {
+            stopVoiceOnStateQueue()
+        }
+    }
+
+    private func stopVoiceOnStateQueue() {
         startGeneration += 1
         isStopping = true
         emit(.status(.stopping))
@@ -95,6 +144,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         audioEngine.stop()
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         self.webSocketTask = nil
+        activeModel = nil
         isStarting = false
         isConnecting = false
         isConnected = false
@@ -120,15 +170,17 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         emit(.status(.starting))
         audioEngine.requestMicrophoneAccess { [weak self] granted in
             guard let self else { return }
-            guard self.startGeneration == generation,
-                  self.isStarting,
-                  self.isStopping == false else { return }
-            guard granted else {
-                self.isStarting = false
-                self.emit(.status(.needsAttention(RealtimeAudioEngineError.microphoneDenied.localizedDescription)))
-                return
+            self.asyncOnStateQueue {
+                guard self.startGeneration == generation,
+                      self.isStarting,
+                      self.isStopping == false else { return }
+                guard granted else {
+                    self.isStarting = false
+                    self.emit(.status(.needsAttention(RealtimeAudioEngineError.microphoneDenied.localizedDescription)))
+                    return
+                }
+                self.connect(apiKey: apiKey, generation: generation)
             }
-            self.connect(apiKey: apiKey, generation: generation)
         }
     }
 
@@ -151,12 +203,13 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             return
         }
 
-        let task = urlSession.webSocketTask(with: request)
+        let task = webSocketTaskFactory?(request) ?? urlSession.webSocketTask(with: request)
         webSocketTask = task
+        activeModel = configuration.model
         isStarting = false
         isConnecting = true
         task.resume()
-        receiveLoop()
+        receiveLoop(for: task, generation: generation)
     }
 
     private func startAudioStreaming() {
@@ -165,16 +218,16 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         do {
             try audioEngine.start(
                 inputHandler: { [weak self] audio in
-                    self?.sendAudio(audio)
+                    self?.asyncOnStateQueue {
+                        self?.sendAudio(audio)
+                    }
                 },
                 activityHandler: { [weak self] activity in
-                    self?.handleInputActivity(activity)
+                    self?.asyncOnStateQueue {
+                        self?.handleInputActivity(activity)
+                    }
                 }
             )
-            // stopVoice() runs on the main thread while this runs on the URLSession
-            // delegate queue. If a stop landed while the engine was starting, the
-            // engine may be running for a session that no longer exists — tear it
-            // down instead of leaking the microphone.
             guard isConnected, isStopping == false else {
                 isAudioStreaming = false
                 audioEngine.stop()
@@ -185,6 +238,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             audioEngine.stop()
             webSocketTask?.cancel(with: .normalClosure, reason: nil)
             webSocketTask = nil
+            activeModel = nil
             isConnecting = false
             isConnected = false
             isAudioStreaming = false
@@ -204,34 +258,55 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         }
     }
 
-    private func sendSessionUpdate() {
-        sendJSON(OpenAIRealtimeRequestBuilder.sessionUpdateEvent(configuration: configuration))
+    private func sendSessionUpdate(includeModel: Bool = true) {
+        var sessionConfiguration = configuration
+        if includeModel, let activeModel {
+            sessionConfiguration.model = activeModel
+        }
+        sendJSON(OpenAIRealtimeRequestBuilder.sessionUpdateEvent(
+            configuration: sessionConfiguration,
+            includeModel: includeModel
+        ))
     }
 
     private func sendAudio(_ data: Data) {
         sendJSON(OpenAIRealtimeRequestBuilder.inputAudioAppendEvent(audio: data))
     }
 
-    private func receiveLoop() {
-        webSocketTask?.receive { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case let .success(message):
-                guard self.webSocketTask != nil, self.isStopping == false else { return }
-                self.handle(message)
-                if self.webSocketTask != nil {
-                    self.receiveLoop()
+    private func receiveLoop(
+        for task: OpenAIRealtimeWebSocketTaskProtocol,
+        generation: Int
+    ) {
+        task.receive { [weak self, weak task] result in
+            guard let self, let task else { return }
+            self.asyncOnStateQueue {
+                guard self.isCurrent(task: task, generation: generation),
+                      self.isStopping == false else { return }
+                switch result {
+                case let .success(message):
+                    self.handle(message)
+                    guard self.isCurrent(task: task, generation: generation),
+                          self.isStopping == false else { return }
+                    self.receiveLoop(for: task, generation: generation)
+                case let .failure(error):
+                    self.webSocketTask = nil
+                    self.activeModel = nil
+                    self.isConnecting = false
+                    self.isConnected = false
+                    self.isAudioStreaming = false
+                    self.audioEngine.stop()
+                    self.emit(.status(.needsAttention(error.localizedDescription)))
                 }
-            case let .failure(error):
-                guard self.webSocketTask != nil, self.isStopping == false else { return }
-                self.webSocketTask = nil
-                self.isConnecting = false
-                self.isConnected = false
-                self.isAudioStreaming = false
-                self.audioEngine.stop()
-                self.emit(.status(.needsAttention(error.localizedDescription)))
             }
         }
+    }
+
+    private func isCurrent(
+        task: OpenAIRealtimeWebSocketTaskProtocol,
+        generation: Int
+    ) -> Bool {
+        guard let currentTask = webSocketTask else { return false }
+        return currentTask === task && startGeneration == generation
     }
 
     private func handle(_ message: URLSessionWebSocketTask.Message) {
@@ -264,15 +339,34 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     }
 
     private func sendJSON(_ object: [String: Any]) {
-        guard let webSocketTask,
+        guard let task = webSocketTask,
               let data = try? JSONSerialization.data(withJSONObject: object),
               let text = String(data: data, encoding: .utf8) else {
             return
         }
-        webSocketTask.send(.string(text)) { [weak self] error in
-            if let error {
-                self?.emit(.status(.needsAttention(error.localizedDescription)))
+        let generation = startGeneration
+        task.send(.string(text)) { [weak self, weak task] error in
+            guard let self, let task, let error else { return }
+            self.asyncOnStateQueue {
+                guard self.isCurrent(task: task, generation: generation),
+                      self.isStopping == false else { return }
+                self.emit(.status(.needsAttention(error.localizedDescription)))
             }
+        }
+    }
+
+    private func syncOnStateQueue<T>(_ work: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: stateQueueKey) != nil {
+            return work()
+        }
+        return stateQueue.sync(execute: work)
+    }
+
+    private func asyncOnStateQueue(_ work: @escaping () -> Void) {
+        if DispatchQueue.getSpecific(key: stateQueueKey) != nil {
+            work()
+        } else {
+            stateQueue.async(execute: work)
         }
     }
 
@@ -285,6 +379,12 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
 
 extension OpenAIRealtimeProvider: VoiceProviderConnectionChecking {
     func checkConnection() {
+        syncOnStateQueue {
+            checkConnectionOnStateQueue()
+        }
+    }
+
+    private func checkConnectionOnStateQueue() {
         let apiKey = apiKeyProvider() ?? ""
         guard requiresAPIKey == false || apiKey.isEmpty == false else {
             emit(.status(.needsAttention("Add an OpenAI API key in Settings.")))
@@ -297,14 +397,17 @@ extension OpenAIRealtimeProvider: VoiceProviderConnectionChecking {
         let check = OpenAIRealtimeConnectionCheck(apiKey: apiKey, configuration: configuration)
         connectionCheck = check
         check.start { [weak self, weak check] result in
-            guard let self, self.connectionCheck === check else { return }
-            self.connectionCheck = nil
-            switch result {
-            case let .success(eventTypes):
-                self.emit(.diagnostic("OpenAI Realtime API check succeeded: \(eventTypes.joined(separator: ", "))."))
-                self.emit(.status(.ready))
-            case let .failure(message):
-                self.emit(.status(.needsAttention(message)))
+            guard let self else { return }
+            self.asyncOnStateQueue {
+                guard self.connectionCheck === check else { return }
+                self.connectionCheck = nil
+                switch result {
+                case let .success(eventTypes):
+                    self.emit(.diagnostic("OpenAI Realtime API check succeeded: \(eventTypes.joined(separator: ", "))."))
+                    self.emit(.status(.ready))
+                case let .failure(message):
+                    self.emit(.status(.needsAttention(message)))
+                }
             }
         }
     }
@@ -316,13 +419,19 @@ extension OpenAIRealtimeProvider: URLSessionWebSocketDelegate {
         webSocketTask: URLSessionWebSocketTask,
         didOpenWithProtocol protocol: String?
     ) {
-        guard let currentTask = self.webSocketTask,
-              currentTask === webSocketTask,
-              isStopping == false else { return }
-        isConnecting = false
-        isConnected = true
-        emit(.diagnostic("OpenAI Realtime WebSocket opened."))
-        sendSessionUpdate()
+        webSocketDidOpen(webSocketTask)
+    }
+
+    func webSocketDidOpen(_ task: OpenAIRealtimeWebSocketTaskProtocol) {
+        syncOnStateQueue {
+            guard let currentTask = webSocketTask,
+                  currentTask === task,
+                  isStopping == false else { return }
+            isConnecting = false
+            isConnected = true
+            emit(.diagnostic("OpenAI Realtime WebSocket opened."))
+            sendSessionUpdate()
+        }
     }
 
     func urlSession(
@@ -331,15 +440,18 @@ extension OpenAIRealtimeProvider: URLSessionWebSocketDelegate {
         didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
         reason: Data?
     ) {
-        guard let currentTask = self.webSocketTask,
-              currentTask === webSocketTask,
-              isStopping == false else { return }
-        self.webSocketTask = nil
-        isConnecting = false
-        isConnected = false
-        isAudioStreaming = false
-        isStarting = false
-        audioEngine.stop()
-        emit(.status(OpenAIRealtimeConnectionDiagnostics.closeStatus(code: closeCode, reason: reason)))
+        syncOnStateQueue {
+            guard let currentTask = self.webSocketTask,
+                  currentTask === webSocketTask,
+                  isStopping == false else { return }
+            self.webSocketTask = nil
+            activeModel = nil
+            isConnecting = false
+            isConnected = false
+            isAudioStreaming = false
+            isStarting = false
+            audioEngine.stop()
+            emit(.status(OpenAIRealtimeConnectionDiagnostics.closeStatus(code: closeCode, reason: reason)))
+        }
     }
 }
