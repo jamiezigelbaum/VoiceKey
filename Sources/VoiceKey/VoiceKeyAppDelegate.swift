@@ -697,4 +697,19 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
     func settingsControllerDidUpdateCredentials(_ controller: SettingsWindowController) {
         updateMenuContent()
     }
+
+    // Carbon hotkeys are consumed system-wide before any window sees them,
+    // so while the recorder is capturing, suspend every registration:
+    // otherwise pressing an already-assigned key toggles that profile's
+    // session instead of reaching the recorder (and its conflict check).
+    func settingsController(_ controller: SettingsWindowController, isRecordingHotKey: Bool) {
+        if isRecordingHotKey {
+            hotKeys.removeAll()
+            carbonRegisteredProfileIDs.removeAll()
+        } else {
+            for profile in profiles where profile.hotKey != nil {
+                registerHotKey(for: profile)
+            }
+        }
+    }
 }

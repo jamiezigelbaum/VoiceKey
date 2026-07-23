@@ -39,6 +39,7 @@ protocol SettingsWindowControllerDelegate: AnyObject {
         for profile: VoiceProfile
     ) -> Bool
     func settingsControllerDidUpdateCredentials(_ controller: SettingsWindowController)
+    func settingsController(_ controller: SettingsWindowController, isRecordingHotKey: Bool)
 }
 
 final class SettingsWindowController: NSWindowController {
@@ -111,6 +112,10 @@ final class SettingsWindowController: NSWindowController {
 
         recorderView.onHotKeyRecorded = { [weak self] profileID, hotKey in
             self?.handleRecordedHotKey(hotKey, forProfileID: profileID)
+        }
+        recorderView.onRecordingStateChanged = { [weak self] isRecording in
+            guard let self else { return }
+            self.delegate?.settingsController(self, isRecordingHotKey: isRecording)
         }
     }
 
@@ -832,10 +837,14 @@ final class HotKeyRecorderView: NSView {
     }
 
     var onHotKeyRecorded: ((UUID, HotKeyConfiguration) -> Void)?
+    var onRecordingStateChanged: ((Bool) -> Void)?
 
     private var isRecording = false {
         didSet {
             needsDisplay = true
+            if isRecording != oldValue {
+                onRecordingStateChanged?(isRecording)
+            }
         }
     }
 
