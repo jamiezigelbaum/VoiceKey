@@ -49,6 +49,17 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         XCTAssertEqual(output["voice"] as? String, "marin-test")
     }
 
+    func testLiveSessionUpdateOmitsModel() throws {
+        let event = OpenAIRealtimeRequestBuilder.sessionUpdateEvent(
+            configuration: testConfiguration,
+            includeModel: false
+        )
+
+        let session = try dictionary(event["session"])
+        XCTAssertNil(session["model"])
+        XCTAssertEqual(session["instructions"] as? String, "Keep it concise.")
+    }
+
     func testInputAudioAppendEventBase64EncodesPCMBytes() {
         let event = OpenAIRealtimeRequestBuilder.inputAudioAppendEvent(audio: Data([0x01, 0x02, 0x03]))
 

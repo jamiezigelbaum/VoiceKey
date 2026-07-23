@@ -21,6 +21,11 @@
   <string>13.0</string>
   <key>LSUIElement</key>
   <true/>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+  </dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>VoiceKey needs microphone access to stream your speech to your selected realtime voice provider.</string>
 </dict>
