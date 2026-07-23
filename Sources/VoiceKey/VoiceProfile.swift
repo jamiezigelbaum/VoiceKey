@@ -29,6 +29,19 @@ struct VoiceProfile: Codable, Equatable, Identifiable {
         self.instructions = instructions
         self.endpointURL = endpointURL
     }
+
+    static func defaultOpenAI(name: String = "OpenAI") -> VoiceProfile {
+        let provider = VoiceProviderID.openAIRealtime
+        return VoiceProfile(
+            name: name,
+            providerID: provider,
+            hotKey: .defaultVoiceToggle,
+            model: provider.defaultModel,
+            voice: provider.defaultVoice,
+            instructions: VoiceSessionConfiguration.defaultInstructions,
+            endpointURL: ""
+        )
+    }
 }
 
 enum VoiceProfileStore {
@@ -102,15 +115,6 @@ enum VoiceProfileStore {
     }
 
     private static func freshInstallProfile() -> VoiceProfile {
-        let provider = VoiceProviderID.openAIRealtime
-        return VoiceProfile(
-            name: "OpenAI",
-            providerID: provider,
-            hotKey: .defaultVoiceToggle,
-            model: provider.defaultModel,
-            voice: provider.defaultVoice,
-            instructions: "",
-            endpointURL: ""
-        )
+        VoiceProfile.defaultOpenAI()
     }
 }

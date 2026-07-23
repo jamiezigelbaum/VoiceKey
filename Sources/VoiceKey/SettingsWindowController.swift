@@ -1,9 +1,44 @@
 import AppKit
 import Carbon
 
+struct VoiceProfileProviderSettings: Equatable {
+    var model: String
+    var voice: String
+}
+
+struct VoiceProfileProviderSettingsCache {
+    private var settingsByProfile: [UUID: [String: VoiceProfileProviderSettings]] = [:]
+
+    init(profiles: [VoiceProfile]) {
+        for profile in profiles {
+            remember(profile)
+        }
+    }
+
+    mutating func remember(_ profile: VoiceProfile) {
+        settingsByProfile[profile.id, default: [:]][profile.providerID.rawValue] = VoiceProfileProviderSettings(
+            model: profile.model,
+            voice: profile.voice
+        )
+    }
+
+    func settings(for profileID: UUID, provider: VoiceProviderID) -> VoiceProfileProviderSettings? {
+        settingsByProfile[profileID]?[provider.rawValue]
+    }
+
+    mutating func remove(profileID: UUID) {
+        settingsByProfile[profileID] = nil
+    }
+}
+
 protocol SettingsWindowControllerDelegate: AnyObject {
     func settingsController(_ controller: SettingsWindowController, didUpdateProfiles profiles: [VoiceProfile])
-    func settingsController(_ controller: SettingsWindowController, didRecordHotKey hotKey: HotKeyConfiguration, forProfileID id: UUID) -> Bool
+    func settingsController(
+        _ controller: SettingsWindowController,
+        didRecordHotKey hotKey: HotKeyConfiguration,
+        for profile: VoiceProfile
+    ) -> Bool
+    func settingsControllerDidUpdateCredentials(_ controller: SettingsWindowController)
 }
 
 final class SettingsWindowController: NSWindowController {
@@ -11,6 +46,7 @@ final class SettingsWindowController: NSWindowController {
 
     private var workingProfiles: [VoiceProfile]
     private var selectedProfileID: UUID
+    private var providerSettingsCache: VoiceProfileProviderSettingsCache
 
     /// The profiles under edit. The app delegate pushes its authoritative list whenever the
     /// settings window opens; setting this replaces the working copy and refreshes the form.
@@ -53,6 +89,7 @@ final class SettingsWindowController: NSWindowController {
         let initialProfiles = profiles.isEmpty ? [Self.makeDefaultProfile()] : profiles
         workingProfiles = initialProfiles
         selectedProfileID = initialProfiles[0].id
+        providerSettingsCache = VoiceProfileProviderSettingsCache(profiles: initialProfiles)
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 560, height: 660),
@@ -384,17 +421,7 @@ final class SettingsWindowController: NSWindowController {
     // MARK: - Working copy
 
     private static func makeDefaultProfile() -> VoiceProfile {
-        let provider = VoiceProviderID.openAIRealtime
-        return VoiceProfile(
-            id: UUID(),
-            name: provider.displayName,
-            providerID: provider,
-            hotKey: .defaultVoiceToggle,
-            model: provider.defaultModel,
-            voice: provider.defaultVoice,
-            instructions: VoiceSessionConfiguration.defaultInstructions,
-            endpointURL: ""
-        )
+        VoiceProfile.defaultOpenAI(name: VoiceProviderID.openAIRealtime.displayName)
     }
 
     private func adoptProfiles(_ newValue: [VoiceProfile]) {
@@ -404,6 +431,7 @@ final class SettingsWindowController: NSWindowController {
 
         let nextProfiles = newValue.isEmpty ? [Self.makeDefaultProfile()] : newValue
         workingProfiles = nextProfiles
+        providerSettingsCache = VoiceProfileProviderSettingsCache(profiles: nextProfiles)
         if nextProfiles.contains(where: { $0.id == selectedProfileID }) == false {
             selectedProfileID = nextProfiles[0].id
         }
@@ -552,6 +580,7 @@ final class SettingsWindowController: NSWindowController {
             endpointURL: ""
         )
         workingProfiles.append(profile)
+        providerSettingsCache.remember(profile)
         selectProfile(id: profile.id)
         updateProfileButtons()
     }
@@ -565,6 +594,7 @@ final class SettingsWindowController: NSWindowController {
         copy.name = uniqueProfileName(base: "\(displayName(for: source)) Copy")
         copy.hotKey = nil
         workingProfiles.insert(copy, at: sourceIndex + 1)
+        providerSettingsCache.remember(copy)
         selectProfile(id: copy.id)
         updateProfileButtons()
     }
@@ -581,7 +611,9 @@ final class SettingsWindowController: NSWindowController {
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
+        let removedProfileID = workingProfiles[index].id
         workingProfiles.remove(at: index)
+        providerSettingsCache.remove(profileID: removedProfileID)
         selectedProfileID = workingProfiles[min(index, workingProfiles.count - 1)].id
         rebuildProfilePopup()
         syncFormFromSelectedProfile()
@@ -594,13 +626,21 @@ final class SettingsWindowController: NSWindowController {
         guard let index = selectedProfileIndex,
               let raw = providerPopup.selectedItem?.representedObject as? String,
               let provider = VoiceProviderID(rawValue: raw) else { return }
-        guard provider != workingProfiles[index].providerID else { return }
+        let previousProvider = workingProfiles[index].providerID
+        guard provider != previousProvider else { return }
 
-        // Commit typed values first so switching providers never discards them.
+        // The popup already shows the destination, so commit temporarily adopts it.
+        // Restore the source provider before stashing the fields that are still onscreen.
         commitFormToWorkingCopy()
+        workingProfiles[index].providerID = previousProvider
+        providerSettingsCache.remember(workingProfiles[index])
         workingProfiles[index].providerID = provider
-        workingProfiles[index].model = provider.defaultModel
-        workingProfiles[index].voice = provider.defaultVoice
+        let settings = providerSettingsCache.settings(
+            for: workingProfiles[index].id,
+            provider: provider
+        )
+        workingProfiles[index].model = settings?.model ?? provider.defaultModel
+        workingProfiles[index].voice = settings?.voice ?? provider.defaultVoice
         syncFormFromSelectedProfile()
     }
 
@@ -613,7 +653,11 @@ final class SettingsWindowController: NSWindowController {
             return
         }
 
-        let accepted = delegate?.settingsController(self, didRecordHotKey: hotKey, forProfileID: profileID) ?? false
+        let accepted = delegate?.settingsController(
+            self,
+            didRecordHotKey: hotKey,
+            for: workingProfiles[index]
+        ) ?? false
         if accepted {
             workingProfiles[index].hotKey = hotKey
             resetHotKeyStatus()
@@ -658,6 +702,9 @@ final class SettingsWindowController: NSWindowController {
             }
         }
         workingProfiles = normalized
+        for profile in normalized {
+            providerSettingsCache.remember(profile)
+        }
         VoiceProfileStore.save(normalized)
 
         if let index = selectedProfileIndex {
@@ -694,9 +741,7 @@ final class SettingsWindowController: NSWindowController {
             try APIKeyStore.shared.deleteAPIKey(for: provider)
             apiKeyField.stringValue = ""
             syncCredentialStatus(for: provider)
-            // No dedicated API-key hook exists; reusing didUpdateProfiles refreshes
-            // menu enablement (e.g. Check API Connection) for the new key state.
-            delegate?.settingsController(self, didUpdateProfiles: workingProfiles)
+            delegate?.settingsControllerDidUpdateCredentials(self)
         } catch {
             showFormError("Couldn’t remove the API key: \(error.localizedDescription)")
         }
