@@ -691,3 +691,71 @@ Live-probed 2026-07-23 against `wss://api.openai.com/v1/realtime?model=gpt-realt
 - `swift build` and `swift test` green. CoreAudio-dependent tests:
   skip-and-flag if the sandbox lacks the device.
 - Skip-and-flag standing authority applies.
+
+## WO-I: Port speaker-mode gating to the OpenClaw Talk provider
+
+Castor on open speakers (Studio Display) gets interrupted/choppy: the
+provider's barge-in gate fires at peak >= 0.02 whenever the assistant is
+speaking (OpenClawTalkProvider.swift:1262-1275), with no playback gating,
+so speaker echo cancels gateway output on virtually every turn, and mic
+audio streams to the gateway continuously (sendPendingAudio,
+OpenClawTalkProvider.swift:1240-1249) so the relay-side VAD also hears
+echo. WO-H already built the cure for the OpenAI provider; this WO ports
+it. Jamie verified WO-H's behavior on hardware (long narrative, barge-in,
+fast replies all clean); Castor showed the failure in the same session.
+
+### Verified facts (do not re-investigate)
+
+1. All WO-H facts and infrastructure stand: RealtimeAudioEngine (shared
+   class) already exposes stateSnapshot/state-change handler with
+   outputRoute, isEchoCancellationActive, isPlaybackActive, and played-ms
+   tracking; OpenAIRealtimeSpeakerGate/Policy/Tuning live in
+   OpenAIRealtimeSpeakerMode.swift; classification matrix + override
+   semantics are tested.
+2. OpenClawTalkProvider tracks isSpeaking from audio envelopes
+   (OpenClawTalkProvider.swift:1349-1357) and uses
+   audioEngine.playPCM16/stopPlayback on the same engine class.
+3. The gateway owns the relay's OpenAI-side session config; the client
+   cannot set interrupt_response there. Client-side mic gating is the
+   whole defense: if echo never reaches the gateway, the relay VAD cannot
+   interrupt on it. (Do NOT attempt gateway config changes in this WO.)
+4. The cancel-output frame is cancelOutputFrame (existing, correct); the
+   gateway answers with a "clear" envelope that flushes playback.
+
+### Required behavior
+
+1. Reuse (do not fork) OpenAIRealtimeSpeakerGate, the policy, and the
+   tuning constants from OpenAIRealtimeSpeakerMode.swift for the OpenClaw
+   provider. If a rename to drop the OpenAI prefix improves honesty, do it
+   mechanically across both providers (types only, no logic changes).
+2. Speaker-mode determination identical to WO-H (route + per-profile
+   Auto/Always/Off preference + AEC-inactive force). Add the same
+   preference control to OpenClaw profiles in Settings; persist like the
+   OpenAI profiles do.
+3. In speaker mode: mic frames are NOT appended to the gateway while
+   playback is active or within the 1000ms hangover, unless barge-in has
+   triggered for the current assistant turn. Activity monitoring
+   continues while gated.
+4. Barge-in: replace the bare peak >= 0.02 check with the gate's
+   threshold+consecutive-buffer trigger (same tuning constants). On
+   trigger: stop local playback, send cancelOutputFrame once per turn
+   (existing hasCancelledOutput latch semantics), resume streaming
+   immediately. In headphone mode keep today's behavior unchanged
+   (0.02 immediate barge-in is fine when there is no echo path).
+5. Hangover trigger nuance (mirror the WO-H review fix): if the gate
+   trips after playback has fully drained, do NOT send cancelOutputFrame —
+   just open the gate and stream.
+6. Reset gating state on session teardown/reconnect and on new assistant
+   turns (isSpeaking transitions).
+7. Do not touch the consult round-trip, MCP, or hotkey logic.
+
+### Acceptance
+
+- Unit tests mirroring the WO-H provider suite for the OpenClaw side:
+  gate closed during playback+hangover in speaker mode, open in headphone
+  mode; threshold barge-in sends cancelOutputFrame exactly once per turn
+  and only while playback is active; hangover trip sends nothing and
+  opens the gate; AEC-inactive forces gating; state resets on teardown.
+- `swift build` and `swift test` green; CoreAudio-dependent tests
+  skip-and-flag if the sandbox lacks devices.
+- Skip-and-flag standing authority applies.
