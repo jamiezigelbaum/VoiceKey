@@ -164,7 +164,9 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         try XCTUnwrap(value as? [String: Any], file: file, line: line)
     }
 
-    func testWebSearchEnabledAddsHostedToolBeforeMCPServers() throws {
+    func testWebSearchEnabledNeverEmitsInvalidHostedToolType() throws {
+        // The Realtime API rejects tools whose type is not "function" or
+        // "mcp"; enabling web search must not inject a "web_search" entry.
         var configuration = VoiceSessionConfiguration(
             providerID: .openAIRealtime,
             model: "gpt-realtime-2-test",
@@ -182,9 +184,9 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         )
         let session = try XCTUnwrap(event["session"] as? [String: Any])
         let tools = try XCTUnwrap(session["tools"] as? [[String: Any]])
-        XCTAssertEqual(tools.count, 2)
-        XCTAssertEqual(tools[0]["type"] as? String, "web_search")
-        XCTAssertEqual(tools[1]["type"] as? String, "mcp")
+        let types = tools.compactMap { $0["type"] as? String }
+        XCTAssertFalse(types.contains("web_search"))
+        XCTAssertTrue(types.allSatisfy { $0 == "function" || $0 == "mcp" })
     }
 
     func testWebSearchDisabledAndNoServersOmitsToolsKey() throws {

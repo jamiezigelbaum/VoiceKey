@@ -95,11 +95,12 @@ enum OpenAIRealtimeRequestBuilder {
         if includeModel {
             session["model"] = configuration.model
         }
-        var tools: [[String: Any]] = []
-        if configuration.webSearchEnabled {
-            tools.append(["type": "web_search"])
-        }
-        tools += configuration.mcpServers.map { server in
+        // The Realtime API tools array accepts only "function" and "mcp"
+        // (verified live: it rejects "web_search" as an invalid value).
+        // Web search is therefore delivered as an MCP server, not a hosted
+        // tool type; `webSearchEnabled` maps to a web-search MCP entry
+        // upstream rather than a distinct tool here.
+        var tools: [[String: Any]] = configuration.mcpServers.map { server in
             var tool: [String: Any] = [
                 "type": "mcp",
                 "server_label": server.label,
