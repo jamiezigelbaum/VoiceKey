@@ -15,6 +15,19 @@ enum OpenAIRealtimeEventMapper {
             return []
         }
 
+        if type.hasPrefix("mcp_list_tools.") || type.hasPrefix("response.mcp_call.") {
+            let diagnostic = VoiceProviderEvent.diagnostic(
+                mcpDiagnostic(type: type, object: object)
+            )
+            if type == "response.mcp_call.in_progress" {
+                return [
+                    .providerEvent(diagnostic),
+                    .providerEvent(.status(.thinking))
+                ]
+            }
+            return [.providerEvent(diagnostic)]
+        }
+
         switch type {
         case "session.created":
             return [.providerEvent(.diagnostic(type))]
@@ -51,5 +64,46 @@ enum OpenAIRealtimeEventMapper {
         default:
             return [.providerEvent(.diagnostic(type))]
         }
+    }
+
+    private static func mcpDiagnostic(type: String, object: [String: Any]) -> String {
+        let nestedObjects = ["item", "call", "mcp_call"].compactMap {
+            object[$0] as? [String: Any]
+        }
+        let objects = [object] + nestedObjects
+        let serverLabel = firstString(
+            keys: ["server_label", "serverLabel"],
+            objects: objects
+        ) ?? "unknown"
+        let toolName = firstString(
+            keys: ["name", "tool_name", "toolName"],
+            objects: objects
+        ) ?? toolNames(in: objects).first ?? "unknown"
+        return "MCP \(type) — server: \(serverLabel); tool: \(toolName)."
+    }
+
+    private static func firstString(
+        keys: [String],
+        objects: [[String: Any]]
+    ) -> String? {
+        for object in objects {
+            for key in keys {
+                if let value = object[key] as? String, value.isEmpty == false {
+                    return value
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func toolNames(in objects: [[String: Any]]) -> [String] {
+        for object in objects {
+            guard let tools = object["tools"] as? [[String: Any]] else { continue }
+            let names = tools.compactMap { $0["name"] as? String }
+            if names.isEmpty == false {
+                return names
+            }
+        }
+        return []
     }
 }

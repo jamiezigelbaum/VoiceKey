@@ -120,7 +120,10 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             model: profile.model,
             voice: profile.voice,
             instructions: profile.instructions,
-            endpointURL: profile.endpointURL
+            endpointURL: profile.endpointURL,
+            mcpServers: [.openAIRealtime, .custom].contains(profile.providerID)
+                ? profile.mcpServers
+                : []
         )
     }
 

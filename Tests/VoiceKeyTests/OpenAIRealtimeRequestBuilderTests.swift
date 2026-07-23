@@ -31,6 +31,7 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         XCTAssertTrue(instructions.hasPrefix("Keep it concise."))
         XCTAssertTrue(instructions.contains("Session started"))
         XCTAssertEqual(session["output_modalities"] as? [String], ["audio"])
+        XCTAssertNil(session["tools"])
 
         let audio = try dictionary(session["audio"])
         let input = try dictionary(audio["input"])
@@ -62,6 +63,77 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         let instructions = try XCTUnwrap(session["instructions"] as? String)
         XCTAssertTrue(instructions.hasPrefix("Keep it concise."))
         XCTAssertTrue(instructions.contains("Session started"))
+    }
+
+    func testSessionUpdateDeclaresMCPServersWithOptionalFields() throws {
+        let authorizedID = UUID()
+        let publicID = UUID()
+        var configuration = testConfiguration
+        configuration.mcpServers = [
+            MCPServerConfiguration(
+                id: authorizedID,
+                label: "calendar",
+                urlString: "https://mcp.example.com/calendar",
+                allowedTools: ["search_events", "create_event"]
+            ),
+            MCPServerConfiguration(
+                id: publicID,
+                label: "search",
+                urlString: "https://mcp.example.com/search"
+            )
+        ]
+
+        let event = OpenAIRealtimeRequestBuilder.sessionUpdateEvent(
+            configuration: configuration,
+            authorizationProvider: { id in
+                id == authorizedID ? "secret-token" : nil
+            }
+        )
+
+        let session = try dictionary(event["session"])
+        let tools = try XCTUnwrap(session["tools"] as? [[String: Any]])
+        XCTAssertEqual(tools.count, 2)
+        XCTAssertEqual(tools[0]["type"] as? String, "mcp")
+        XCTAssertEqual(tools[0]["server_label"] as? String, "calendar")
+        XCTAssertEqual(
+            tools[0]["server_url"] as? String,
+            "https://mcp.example.com/calendar"
+        )
+        XCTAssertEqual(tools[0]["require_approval"] as? String, "never")
+        XCTAssertEqual(
+            tools[0]["allowed_tools"] as? [String],
+            ["search_events", "create_event"]
+        )
+        XCTAssertEqual(tools[0]["authorization"] as? String, "secret-token")
+
+        XCTAssertEqual(tools[1]["type"] as? String, "mcp")
+        XCTAssertEqual(tools[1]["server_label"] as? String, "search")
+        XCTAssertEqual(
+            tools[1]["server_url"] as? String,
+            "https://mcp.example.com/search"
+        )
+        XCTAssertEqual(tools[1]["require_approval"] as? String, "never")
+        XCTAssertNil(tools[1]["allowed_tools"])
+        XCTAssertNil(tools[1]["authorization"])
+    }
+
+    func testSessionUpdateOmitsEmptyAuthorization() throws {
+        var configuration = testConfiguration
+        configuration.mcpServers = [
+            MCPServerConfiguration(
+                label: "public",
+                urlString: "https://mcp.example.com"
+            )
+        ]
+
+        let event = OpenAIRealtimeRequestBuilder.sessionUpdateEvent(
+            configuration: configuration,
+            authorizationProvider: { _ in "" }
+        )
+
+        let session = try dictionary(event["session"])
+        let tools = try XCTUnwrap(session["tools"] as? [[String: Any]])
+        XCTAssertNil(try XCTUnwrap(tools.first)["authorization"])
     }
 
     func testInputAudioAppendEventBase64EncodesPCMBytes() {

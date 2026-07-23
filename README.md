@@ -140,6 +140,19 @@ the profile's endpoint field; an API key is optional and, when set, is stored
 in the Keychain like any other provider key. This is the intended path for
 self-hosted assistants.
 
+### Tools via MCP
+
+OpenAI Realtime API and Custom Realtime Endpoint profiles can declare remote
+MCP servers in Settings. The realtime channel owns and executes those tools;
+VoiceKey only sends the server declarations and reports their lifecycle in the
+session log. VoiceKey never executes a tool locally. Optional MCP authorization
+tokens are stored in the macOS Keychain, not in the saved profile.
+
+For example, an “Assistant” profile could declare a server labeled `calendar`
+at `https://mcp.example.com` and limit it to `search_events, create_event`.
+During a voice session the channel can use those tools, while VoiceKey shows
+the MCP call as thinking and records the server and tool names in diagnostics.
+
 The OpenClaw Talk provider turns VoiceKey into an interactive voice client of
 an OpenClaw gateway's Talk realtime channel: the gateway owns the OpenAI
 Realtime session and consults your OpenClaw agent (for example Castor, agent
