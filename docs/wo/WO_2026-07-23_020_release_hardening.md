@@ -564,3 +564,130 @@ probe (two runs, identical results) plus two in-app reproductions in
   CoreAudio and may not run in the Codex sandbox — skip-and-flag, do not
   chase them.
 - Skip-and-flag standing authority applies.
+
+## WO-H: Open-speaker stability (energy-gated half-duplex + client-owned interruption)
+
+Fixes the model interrupting itself when its own speech leaks from open
+speakers (Studio Display) into the mic. Headphones already work; this WO
+adds a "speaker mode" that makes echo-triggered self-interruption
+impossible by construction while keeping barge-in for assertive speech.
+Approved by Jamie 2026-07-23 (energy-gated variant, not strict half-duplex).
+
+### Verified facts (do not re-investigate)
+
+Live-probed 2026-07-23 against `wss://api.openai.com/v1/realtime?model=gpt-realtime-2`
+(probes committed: `scripts/dev/probe-echo-fields.js`, `scripts/dev/probe-truncate.js`):
+
+1. `session.audio.input.noise_reduction: {type: "far_field"|"near_field"}` —
+   ACCEPTED and echoed. VoiceKey currently sends nothing there.
+2. `turn_detection: {type: "semantic_vad", eagerness: "low", interrupt_response: false}`
+   — ACCEPTED. `create_response` and `interrupt_response` are independently
+   settable.
+3. `turn_detection: {type: "server_vad", threshold: 0.8, prefix_padding_ms: 300,
+   silence_duration_ms: 700, create_response: true, interrupt_response: true}`
+   — ACCEPTED and echoed (any threshold; default when unset is server_vad 0.5).
+4. `turn_detection: null` — ACCEPTED (fully client-controlled turns).
+5. Interruption dance: `{"type":"response.cancel"}` yields `response.done`
+   with `status: "cancelled"`, `status_details.reason: "client_cancelled"`;
+   `{"type":"conversation.item.truncate", "item_id": <assistant item id from
+   response.output_item.added>, "content_index": 0, "audio_end_ms": N}` yields
+   a `conversation.item.truncated` echo. Both verified live mid-stream.
+6. Code audit findings (2026-07-23, file:line current at WO time):
+   - Mic frames stream to the WS unconditionally, including during playback:
+     tap fires inputHandler whenever isInputStreaming
+     (RealtimeAudioEngine.swift:259-267); provider sendAudio appends
+     unconditionally (OpenAIRealtimeProvider.swift:305-307). No gate, duck,
+     or threshold on the OpenAI path.
+   - Per-buffer RMS/peak already computed and delivered:
+     RealtimeAudioInputActivity{rms, peak} (RealtimeAudioEngine.swift:41-44,
+     422-438) → provider activityHandler (OpenAIRealtimeProvider.swift:274-284).
+   - The barge-in gate pattern already exists in-repo:
+     OpenClawTalkProvider.handleInputActivity gates on
+     isSpeaking && peak >= 0.02 with a once-per-turn latch
+     (OpenClawTalkProvider.swift:1251-1275).
+   - `isEchoCancellationActive` (RealtimeAudioEngine.swift:67, set at
+     210/216) is WRITE-ONLY — no consumer. If voice processing fails on a
+     rebuild the app streams raw echo silently.
+   - Playback goes through the same engine/player node as capture (AEC
+     reference requirement satisfied); playPCM16 schedules on playerNode
+     (RealtimeAudioEngine.swift:152-171); mapper speech_started →
+     .stopPlayback (OpenAIRealtimeEventMapper.swift:49-53).
+   - Session config today: semantic_vad eagerness auto, create_response
+     true, interrupt_response true (OpenAIRealtimeRequestBuilder.swift:82-87).
+7. Research consensus (report on file; key sources: OpenAI realtime VAD +
+   conversations guides, community thread 977801, LiveKit/Pipecat docs):
+   server-side VAD tuning alone does not fix open-speaker echo; the working
+   pattern is client-side mic gating during playback + client-owned
+   interruption; far_field + raised server_vad threshold has a field report
+   of fixing self-interruption on speakerphone hardware.
+
+### Required behavior
+
+1. **Speaker-mode determination.** Engine exposes the current output
+   device's transport/classification. Mapping: Bluetooth/BluetoothLE →
+   headphone mode; built-in output whose data source is headphones (3.5mm)
+   → headphone mode; everything else (built-in speakers, DisplayPort, HDMI,
+   USB, AirPlay, virtual) → speaker mode. A user setting with three states
+   Auto (default) / Always on / Off overrides the auto classification.
+   Place the setting wherever Settings structure fits best (global audio
+   section if one exists, else with the OpenAI profile controls). USB is
+   ambiguous (USB headset vs Studio Display) — Auto treats USB as speaker
+   mode; the override exists for misclassification. Re-evaluate mode on
+   route/config change (the engine already observes config changes).
+2. **Speaker-mode session config** (headphone mode keeps today's config):
+   `audio.input.noise_reduction = {type: "far_field"}` and
+   `turn_detection = {type: "server_vad", threshold: 0.75,
+   prefix_padding_ms: 300, silence_duration_ms: 700, create_response: true,
+   interrupt_response: false}`. Send the right config at session start for
+   the current route; on a mid-session route change that flips the mode,
+   re-send session.update with the new config.
+   (Headphone mode also gains `noise_reduction = {type: "near_field"}` —
+   free improvement, verified accepted.)
+3. **Playback-active signal.** Engine tracks whether scheduled playback is
+   audibly in progress (scheduleBuffer completion handlers decrementing a
+   pending count; playerNode stop clears it) and exposes it to the provider
+   (callback or polled state), plus the played duration of the CURRENT
+   assistant audio turn in milliseconds (prefer playerNode playerTime;
+   fall back to a scheduled-bytes counter at 24kHz). Provider tracks the
+   current assistant message item_id from response.output_item.added
+   (type == "message").
+4. **Half-duplex gate (speaker mode only).** While playback is active and
+   for a 1000ms hangover after it ends, mic frames are NOT appended to the
+   WS — unless barge-in (5) has triggered for this turn. Gating lives in
+   the provider path (sendAudio or inputHandler), not by stopping the tap
+   (activity monitoring must continue while gated).
+5. **Energy-gated barge-in (speaker mode only).** While gated, monitor
+   activity.peak. When peak >= threshold for >= 3 consecutive buffers
+   (~consts, single tunables block: default threshold 0.08), trigger
+   client-owned interruption exactly once per assistant turn:
+   stop playback; send `{"type":"response.cancel"}`; send
+   `conversation.item.truncate` with the tracked item_id, content_index 0,
+   audio_end_ms = played ms (clamp to played, never beyond); resume mic
+   streaming immediately so the server VAD hears the user's speech.
+   Reset the latch when a new assistant turn starts.
+6. **Client-side speech_started handling in speaker mode:** while playback
+   is active, ignore the mapper's .stopPlayback for speech_started (the
+   energy gate owns interruption; with the mic gated the server should not
+   see speech anyway — this is belt-and-braces). Headphone mode unchanged.
+7. **AEC-failure fallback:** provider reads the engine's echo-cancellation
+   state; if voice processing is inactive after build/rebuild, force
+   speaker-mode gating regardless of route or setting, and emit a
+   diagnostic saying so.
+8. **Interaction with WO-G:** the MCP-continuation logic must be unaffected;
+   a client-initiated cancel produces response.done (status cancelled) which
+   already clears isResponseInFlight. Verify no continuation fires for a
+   response the user just cancelled with no MCP terminal event pending.
+
+### Acceptance
+
+- Unit tests: mode classification from transport/data-source + override
+  matrix; speaker-mode session config exactly as in (2) including the
+  mid-session mode-flip resend; gate closed during playback and hangover,
+  open otherwise; barge-in fires once after N consecutive over-threshold
+  buffers and emits cancel + truncate with correct item_id/audio_end_ms
+  clamping; latch resets on new turn; speech_started stopPlayback ignored
+  only in speaker mode during playback; AEC-inactive forces gating;
+  WO-G continuation untouched by a cancelled response.
+- `swift build` and `swift test` green. CoreAudio-dependent tests:
+  skip-and-flag if the sandbox lacks the device.
+- Skip-and-flag standing authority applies.
