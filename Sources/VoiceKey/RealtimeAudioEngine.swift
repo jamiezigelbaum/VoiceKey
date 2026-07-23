@@ -1,10 +1,12 @@
 import AVFoundation
 import Foundation
+import VoiceKeyObjCShield
 
 enum RealtimeAudioEngineError: LocalizedError {
     case microphoneDenied
     case missingInputFormat
     case conversionFailed
+    case audioSystemFailure(String)
 
     var errorDescription: String? {
         switch self {
@@ -14,6 +16,8 @@ enum RealtimeAudioEngineError: LocalizedError {
             return "VoiceKey could not read the current microphone format."
         case .conversionFailed:
             return "VoiceKey could not convert microphone audio."
+        case let .audioSystemFailure(reason):
+            return "The audio system reported a failure: \(reason)"
         }
     }
 }
@@ -34,18 +38,30 @@ struct RealtimeAudioInputActivity: Equatable {
     var peak: Float
 }
 
+/// Capture and playback share ONE AVAudioEngine so that Apple's voice
+/// processing (echo cancellation) has the playback signal as its reference.
+/// Splitting capture and playback across two engines is unsupported and
+/// yields a silenced input tap. All engine state is confined to `queue`;
+/// AVFoundation calls that can raise Objective-C exceptions (uncatchable
+/// from Swift) run behind VKCatchObjCException so a mid-route-change
+/// failure surfaces as an error instead of aborting the process.
 final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
-    private let inputEngine = AVAudioEngine()
-    private let outputEngine = AVAudioEngine()
-    private let playerNode = AVAudioPlayerNode()
+    private var engine = AVAudioEngine()
+    private var playerNode = AVAudioPlayerNode()
     private let queue = DispatchQueue(label: "VoiceKey.RealtimeAudioEngine")
-    private let stateLock = NSLock()
+    private let queueKey = DispatchSpecificKey<Void>()
     private var inputConverter: AVAudioConverter?
     private var inputConverterSourceFormat: AVAudioFormat?
     private var isInputStreaming = false
     private var storedInputHandler: ((Data) -> Void)?
     private var storedActivityHandler: ((RealtimeAudioInputActivity) -> Void)?
-    private var configurationObservers: [NSObjectProtocol] = []
+    private var configurationObserver: NSObjectProtocol?
+    private var rebuildWorkItem: DispatchWorkItem?
+    private var rebuildAttempts = 0
+    private(set) var isEchoCancellationActive = false
+
+    private static let rebuildDebounce: TimeInterval = 0.4
+    private static let maxRebuildAttempts = 3
 
     private let realtimeFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
@@ -55,57 +71,15 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     )!
 
     init() {
-        outputEngine.attach(playerNode)
-        outputEngine.connect(playerNode, to: outputEngine.mainMixerNode, format: realtimeFormat)
-
-        for engine in [inputEngine, outputEngine] {
-            let observer = NotificationCenter.default.addObserver(
-                forName: .AVAudioEngineConfigurationChange,
-                object: engine,
-                queue: nil
-            ) { [weak self] _ in
-                self?.handleConfigurationChange()
-            }
-            configurationObservers.append(observer)
+        queue.setSpecific(key: queueKey, value: ())
+        onQueue {
+            self.buildEngine()
         }
     }
 
     deinit {
-        for observer in configurationObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
-    }
-
-    // A device switch (e.g. connecting AirPods) invalidates the engines'
-    // cached formats mid-session; restart capture against the new route
-    // instead of letting the next tap install throw an ObjC exception.
-    private func handleConfigurationChange() {
-        queue.async { [weak self] in
-            guard let self else { return }
-
-            self.stateLock.lock()
-            let wasStreaming = self.isInputStreaming
-            let inputHandler = self.storedInputHandler
-            let activityHandler = self.storedActivityHandler
-            self.stateLock.unlock()
-
-            self.inputEngine.inputNode.removeTap(onBus: 0)
-            self.inputEngine.stop()
-            self.outputEngine.stop()
-            self.inputConverter = nil
-            self.inputConverterSourceFormat = nil
-
-            guard wasStreaming, let inputHandler, let activityHandler else { return }
-            do {
-                try self.startInput(
-                    inputHandler: inputHandler,
-                    activityHandler: activityHandler
-                )
-            } catch {
-                self.stateLock.lock()
-                self.isInputStreaming = false
-                self.stateLock.unlock()
-            }
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
         }
     }
 
@@ -126,82 +100,40 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
         inputHandler: @escaping (Data) -> Void,
         activityHandler: @escaping (RealtimeAudioInputActivity) -> Void
     ) throws {
-        stateLock.lock()
-        guard isInputStreaming == false else {
-            stateLock.unlock()
-            return
-        }
-        isInputStreaming = true
-        storedInputHandler = inputHandler
-        storedActivityHandler = activityHandler
-        stateLock.unlock()
-
-        do {
-            try startInput(
-                inputHandler: inputHandler,
-                activityHandler: activityHandler
-            )
-        } catch {
-            stateLock.lock()
-            isInputStreaming = false
-            stateLock.unlock()
-            throw error
-        }
-    }
-
-    private func startInput(
-        inputHandler: @escaping (Data) -> Void,
-        activityHandler: @escaping (RealtimeAudioInputActivity) -> Void
-    ) throws {
-        try startOutputIfNeeded()
-
-        if inputEngine.isRunning == false {
-            inputEngine.reset()
-        }
-
-        let inputNode = inputEngine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
-        guard inputFormat.channelCount > 0, inputFormat.sampleRate > 0 else {
-            throw RealtimeAudioEngineError.missingInputFormat
-        }
-
-        inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat) { [weak self] buffer, _ in
-            guard let self else { return }
-            self.queue.async {
-                do {
-                    let result = try self.convertInputBuffer(buffer, sourceFormat: inputFormat)
-                    if result.pcm.isEmpty == false {
-                        activityHandler(result.activity)
-                        inputHandler(result.pcm)
-                    }
-                } catch {
-                    // Audio taps cannot surface errors synchronously; provider-level
-                    // connection status will report if no usable audio is accepted.
-                }
+        try onQueueThrowing {
+            guard self.isInputStreaming == false else { return }
+            self.storedInputHandler = inputHandler
+            self.storedActivityHandler = activityHandler
+            do {
+                try self.startCapture()
+                self.isInputStreaming = true
+            } catch {
+                self.storedInputHandler = nil
+                self.storedActivityHandler = nil
+                self.teardownEngine()
+                throw error
             }
         }
-
-        inputEngine.prepare()
-        try inputEngine.start()
     }
 
     func stop() {
-        stateLock.lock()
-        isInputStreaming = false
-        storedInputHandler = nil
-        storedActivityHandler = nil
-        stateLock.unlock()
-
-        inputEngine.inputNode.removeTap(onBus: 0)
-        inputEngine.stop()
-        stopPlayback()
-        outputEngine.stop()
+        onQueueSync {
+            self.isInputStreaming = false
+            self.storedInputHandler = nil
+            self.storedActivityHandler = nil
+            self.rebuildWorkItem?.cancel()
+            self.rebuildWorkItem = nil
+            self.rebuildAttempts = 0
+            self.teardownEngine()
+        }
     }
 
     func stopPlayback() {
         queue.async { [weak self] in
-            self?.playerNode.stop()
+            guard let self else { return }
+            _ = VKCatchObjCException {
+                self.playerNode.stop()
+            }
         }
     }
 
@@ -212,26 +144,204 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
         queue.async { [weak self] in
             guard let self else { return }
             do {
-                try self.startOutputIfNeeded()
-                if self.playerNode.isPlaying == false {
-                    self.playerNode.play()
+                try self.startEngineIfNeeded()
+                try self.shielded("schedule playback") {
+                    if self.playerNode.isPlaying == false {
+                        self.playerNode.play()
+                    }
+                    self.playerNode.scheduleBuffer(buffer, completionHandler: nil)
                 }
-                self.playerNode.scheduleBuffer(buffer, completionHandler: nil)
             } catch {
-                return
+                // Playback is best-effort; a route change mid-schedule will
+                // be recovered by the configuration-change rebuild.
             }
         }
     }
 
-    private func startOutputIfNeeded() throws {
-        if outputEngine.isRunning == false {
-            outputEngine.prepare()
-            try outputEngine.start()
-        }
-        if playerNode.isPlaying == false {
-            playerNode.play()
+    // MARK: - Engine lifecycle (queue-confined)
+
+    // Order is load-bearing (verified empirically on hardware, 2026-07-23):
+    // the player graph must be wired BEFORE voice processing is enabled —
+    // enabling VP first fails engine start with kAUInitialize (-10875) —
+    // and the input tap must be installed BEFORE the engine starts or the
+    // tap can deliver silence.
+    private func buildEngine() {
+        engine.attach(playerNode)
+        engine.connect(playerNode, to: engine.mainMixerNode, format: realtimeFormat)
+        configureVoiceProcessing()
+        observeConfigurationChanges(of: engine)
+    }
+
+    private func configureVoiceProcessing() {
+        let inputNode = engine.inputNode
+        let outputNode = engine.outputNode
+        do {
+            try shielded("enable voice processing") {
+                try inputNode.setVoiceProcessingEnabled(true)
+                try outputNode.setVoiceProcessingEnabled(true)
+            }
+            isEchoCancellationActive = true
+        } catch {
+            _ = VKCatchObjCException {
+                try? inputNode.setVoiceProcessingEnabled(false)
+                try? outputNode.setVoiceProcessingEnabled(false)
+            }
+            isEchoCancellationActive = false
         }
     }
+
+    private func observeConfigurationChanges(of engine: AVAudioEngine) {
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+        }
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.queue.async {
+                self.scheduleRebuild()
+            }
+        }
+    }
+
+    private func startCapture() throws {
+        let inputNode = engine.inputNode
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+        guard inputFormat.channelCount > 0, inputFormat.sampleRate > 0 else {
+            throw RealtimeAudioEngineError.missingInputFormat
+        }
+
+        inputConverter = nil
+        inputConverterSourceFormat = nil
+
+        try shielded("install microphone tap") {
+            inputNode.removeTap(onBus: 0)
+            inputNode.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat) { [weak self] buffer, _ in
+                guard let self else { return }
+                self.queue.async {
+                    guard self.isInputStreaming,
+                          let inputHandler = self.storedInputHandler,
+                          let activityHandler = self.storedActivityHandler else { return }
+                    do {
+                        let result = try self.convertInputBuffer(buffer, sourceFormat: inputFormat)
+                        if result.pcm.isEmpty == false {
+                            activityHandler(result.activity)
+                            inputHandler(result.pcm)
+                        }
+                    } catch {
+                        // Audio taps cannot surface errors synchronously; provider-level
+                        // connection status will report if no usable audio is accepted.
+                    }
+                }
+            }
+        }
+
+        try startEngineIfNeeded()
+    }
+
+    private func startEngineIfNeeded() throws {
+        guard engine.isRunning == false else { return }
+        try shielded("start audio engine") {
+            self.engine.prepare()
+            try self.engine.start()
+        }
+    }
+
+    private func teardownEngine() {
+        _ = VKCatchObjCException {
+            self.engine.inputNode.removeTap(onBus: 0)
+            self.playerNode.stop()
+            self.engine.stop()
+        }
+        inputConverter = nil
+        inputConverterSourceFormat = nil
+    }
+
+    /// A device switch (e.g. connecting AirPods) invalidates the engine's
+    /// cached formats. Route transitions fire several configuration-change
+    /// notifications in a burst and the new route needs time to settle, so
+    /// rebuilds are debounced and retried with backoff.
+    private func scheduleRebuild(after delay: TimeInterval = RealtimeAudioEngine.rebuildDebounce) {
+        rebuildWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.performRebuild()
+        }
+        rebuildWorkItem = item
+        queue.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    private func performRebuild() {
+        rebuildWorkItem = nil
+        teardownEngine()
+
+        guard isInputStreaming else {
+            rebuildAttempts = 0
+            return
+        }
+
+        engine = AVAudioEngine()
+        playerNode = AVAudioPlayerNode()
+        buildEngine()
+
+        do {
+            try startCapture()
+            rebuildAttempts = 0
+        } catch {
+            rebuildAttempts += 1
+            if rebuildAttempts <= RealtimeAudioEngine.maxRebuildAttempts {
+                scheduleRebuild(after: 0.5 * Double(rebuildAttempts))
+            } else {
+                rebuildAttempts = 0
+                isInputStreaming = false
+                storedInputHandler = nil
+                storedActivityHandler = nil
+            }
+        }
+    }
+
+    // MARK: - Queue and exception plumbing
+
+    private func onQueue(_ action: () -> Void) {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            action()
+        } else {
+            queue.sync(execute: action)
+        }
+    }
+
+    private func onQueueSync(_ action: () -> Void) {
+        onQueue(action)
+    }
+
+    private func onQueueThrowing(_ action: () throws -> Void) throws {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            try action()
+        } else {
+            try queue.sync(execute: action)
+        }
+    }
+
+    private func shielded(_ operation: String, _ block: () throws -> Void) throws {
+        var swiftError: Error?
+        let exception = VKCatchObjCException {
+            do {
+                try block()
+            } catch {
+                swiftError = error
+            }
+        }
+        if let exception {
+            let reason = exception.reason ?? exception.name.rawValue
+            throw RealtimeAudioEngineError.audioSystemFailure("\(operation): \(reason)")
+        }
+        if let swiftError {
+            throw swiftError
+        }
+    }
+
+    // MARK: - Conversion
 
     private func convertInputBuffer(
         _ buffer: AVAudioPCMBuffer,
@@ -276,7 +386,14 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
             || inputConverterSourceFormat?.commonFormat != sourceFormat.commonFormat
 
         if inputConverter == nil || sourceChanged {
-            inputConverter = AVAudioConverter(from: sourceFormat, to: realtimeFormat)
+            let converter = AVAudioConverter(from: sourceFormat, to: realtimeFormat)
+            // Voice processing can expose a multichannel input stream (9ch
+            // observed live); default multichannel-to-mono conversion yields
+            // silence, so map the first channel explicitly.
+            if sourceFormat.channelCount > 1 {
+                converter?.channelMap = [0]
+            }
+            inputConverter = converter
             inputConverterSourceFormat = sourceFormat
         }
 

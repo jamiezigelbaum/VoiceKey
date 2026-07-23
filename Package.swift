@@ -11,8 +11,12 @@ let package = Package(
         .executable(name: "VoiceKey", targets: ["VoiceKey"])
     ],
     targets: [
+        .target(
+            name: "VoiceKeyObjCShield"
+        ),
         .executableTarget(
             name: "VoiceKey",
+            dependencies: ["VoiceKeyObjCShield"],
             linkerSettings: [
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("AppKit"),
