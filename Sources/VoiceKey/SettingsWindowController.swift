@@ -79,6 +79,7 @@ final class SettingsWindowController: NSWindowController {
     private let apiKeyField = NSSecureTextField()
     private let removeAPIKeyButton = NSButton(title: "Remove Key", target: nil, action: nil)
     private let credentialStatusLabel = NSTextField(labelWithString: "")
+    private let webSearchCheckbox = NSButton(checkboxWithTitle: "Enable OpenAI web search (hosted tool)", target: nil, action: nil)
     private let mcpServerPopup = NSPopUpButton()
     private let addMCPServerButton = NSButton(title: "Add", target: nil, action: nil)
     private let editMCPServerButton = NSButton(title: "Edit", target: nil, action: nil)
@@ -237,7 +238,7 @@ final class SettingsWindowController: NSWindowController {
         endSection(after: credentialHintRow)
 
         // MCP tools are declared to OpenAI-protocol channels and executed there.
-        let mcpHeader = sectionLabel("MCP Servers")
+        let mcpHeader = sectionLabel("Tools")
         let mcpSeparator = makeSeparator()
         let mcpRow = makeControlRow(
             views: [
@@ -248,10 +249,11 @@ final class SettingsWindowController: NSWindowController {
             ],
             stretching: mcpServerPopup
         )
-        mcpSectionViews = [mcpHeader, mcpSeparator, mcpRow]
+        mcpSectionViews = [mcpHeader, mcpSeparator, webSearchCheckbox, mcpRow]
         addArranged(mcpHeader)
         formStackView.setCustomSpacing(4, after: mcpHeader)
         addArranged(mcpSeparator)
+        addArranged(webSearchCheckbox)
         addArranged(mcpRow)
         endSection(after: mcpRow)
 
@@ -516,6 +518,7 @@ final class SettingsWindowController: NSWindowController {
         profile.voice = voiceComboBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         profile.instructions = instructionsTextView.string
         profile.endpointURL = endpointField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.webSearchEnabled = webSearchCheckbox.state == .on
         workingProfiles[index] = profile
     }
 
@@ -570,6 +573,10 @@ final class SettingsWindowController: NSWindowController {
         for view in mcpSectionViews {
             view.isHidden = supportsMCP == false
         }
+        // Hosted web search is an OpenAI platform feature, not part of the
+        // generic realtime protocol, so only OpenAI profiles offer it.
+        webSearchCheckbox.isHidden = profile.providerID != .openAIRealtime
+        webSearchCheckbox.state = profile.webSearchEnabled ? .on : .off
         guard supportsMCP else { return }
 
         let selectedID = mcpServerPopup.selectedItem?.representedObject as? String

@@ -163,4 +163,42 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
     private func dictionary(_ value: Any?, file: StaticString = #filePath, line: UInt = #line) throws -> [String: Any] {
         try XCTUnwrap(value as? [String: Any], file: file, line: line)
     }
+
+    func testWebSearchEnabledAddsHostedToolBeforeMCPServers() throws {
+        var configuration = VoiceSessionConfiguration(
+            providerID: .openAIRealtime,
+            model: "gpt-realtime-2-test",
+            voice: "marin",
+            instructions: "Keep it concise."
+        )
+        configuration.webSearchEnabled = true
+        configuration.mcpServers = [
+            MCPServerConfiguration(label: "deepwiki", urlString: "https://mcp.deepwiki.com/mcp")
+        ]
+
+        let event = OpenAIRealtimeRequestBuilder.sessionUpdateEvent(
+            configuration: configuration,
+            authorizationProvider: { _ in nil }
+        )
+        let session = try XCTUnwrap(event["session"] as? [String: Any])
+        let tools = try XCTUnwrap(session["tools"] as? [[String: Any]])
+        XCTAssertEqual(tools.count, 2)
+        XCTAssertEqual(tools[0]["type"] as? String, "web_search")
+        XCTAssertEqual(tools[1]["type"] as? String, "mcp")
+    }
+
+    func testWebSearchDisabledAndNoServersOmitsToolsKey() throws {
+        let configuration = VoiceSessionConfiguration(
+            providerID: .openAIRealtime,
+            model: "gpt-realtime-2-test",
+            voice: "marin",
+            instructions: "Keep it concise."
+        )
+        let event = OpenAIRealtimeRequestBuilder.sessionUpdateEvent(
+            configuration: configuration,
+            authorizationProvider: { _ in nil }
+        )
+        let session = try XCTUnwrap(event["session"] as? [String: Any])
+        XCTAssertNil(session["tools"])
+    }
 }

@@ -95,23 +95,28 @@ enum OpenAIRealtimeRequestBuilder {
         if includeModel {
             session["model"] = configuration.model
         }
-        if configuration.mcpServers.isEmpty == false {
-            session["tools"] = configuration.mcpServers.map { server in
-                var tool: [String: Any] = [
-                    "type": "mcp",
-                    "server_label": server.label,
-                    "server_url": server.urlString,
-                    "require_approval": "never"
-                ]
-                if let allowedTools = server.allowedTools, allowedTools.isEmpty == false {
-                    tool["allowed_tools"] = allowedTools
-                }
-                if let authorization = authorizationProvider(server.id),
-                   authorization.isEmpty == false {
-                    tool["authorization"] = authorization
-                }
-                return tool
+        var tools: [[String: Any]] = []
+        if configuration.webSearchEnabled {
+            tools.append(["type": "web_search"])
+        }
+        tools += configuration.mcpServers.map { server in
+            var tool: [String: Any] = [
+                "type": "mcp",
+                "server_label": server.label,
+                "server_url": server.urlString,
+                "require_approval": "never"
+            ]
+            if let allowedTools = server.allowedTools, allowedTools.isEmpty == false {
+                tool["allowed_tools"] = allowedTools
             }
+            if let authorization = authorizationProvider(server.id),
+               authorization.isEmpty == false {
+                tool["authorization"] = authorization
+            }
+            return tool
+        }
+        if tools.isEmpty == false {
+            session["tools"] = tools
         }
 
         return [

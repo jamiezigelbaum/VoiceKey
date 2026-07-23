@@ -29,6 +29,7 @@ struct VoiceProfile: Codable, Equatable, Identifiable {
     var instructions: String
     var endpointURL: String
     var mcpServers: [MCPServerConfiguration]
+    var webSearchEnabled: Bool
 
     init(
         id: UUID = UUID(),
@@ -39,7 +40,8 @@ struct VoiceProfile: Codable, Equatable, Identifiable {
         voice: String,
         instructions: String = "",
         endpointURL: String = "",
-        mcpServers: [MCPServerConfiguration] = []
+        mcpServers: [MCPServerConfiguration] = [],
+        webSearchEnabled: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -50,6 +52,7 @@ struct VoiceProfile: Codable, Equatable, Identifiable {
         self.instructions = instructions
         self.endpointURL = endpointURL
         self.mcpServers = mcpServers
+        self.webSearchEnabled = webSearchEnabled
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -62,6 +65,7 @@ struct VoiceProfile: Codable, Equatable, Identifiable {
         case instructions
         case endpointURL
         case mcpServers
+        case webSearchEnabled
     }
 
     init(from decoder: Decoder) throws {
@@ -78,6 +82,10 @@ struct VoiceProfile: Codable, Equatable, Identifiable {
             [MCPServerConfiguration].self,
             forKey: .mcpServers
         ) ?? []
+        webSearchEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .webSearchEnabled
+        ) ?? false
     }
 
     static func defaultOpenAI(name: String = "OpenAI") -> VoiceProfile {
