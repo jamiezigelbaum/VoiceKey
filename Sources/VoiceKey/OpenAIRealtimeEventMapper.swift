@@ -74,12 +74,17 @@ enum OpenAIRealtimeEventMapper {
         let serverLabel = firstString(
             keys: ["server_label", "serverLabel"],
             objects: objects
-        ) ?? "unknown"
+        )
         let toolName = firstString(
             keys: ["name", "tool_name", "toolName"],
             objects: objects
-        ) ?? toolNames(in: objects).first ?? "unknown"
-        return "MCP \(type) — server: \(serverLabel); tool: \(toolName)."
+        ) ?? toolNames(in: objects).first
+
+        var details: [String] = []
+        if let serverLabel { details.append("server: \(serverLabel)") }
+        if let toolName { details.append("tool: \(toolName)") }
+        guard details.isEmpty == false else { return "MCP \(type)." }
+        return "MCP \(type) — \(details.joined(separator: "; "))."
     }
 
     private static func firstString(

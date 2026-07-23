@@ -62,6 +62,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private var sessionLogWindowController: SessionLogWindowController?
     private var voiceProvider: RealtimeVoiceProvider?
     private var sessionLog = VoiceSessionLog()
+    private let sessionLogFile = VoiceSessionLogFile()
     private var localHotKeyMonitor: Any?
     private var globalHotKeyMonitor: Any?
     private let iconAnimator = MenuBarIconAnimator()
@@ -653,6 +654,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
     private func recordProviderEvent(_ event: VoiceProviderEvent) {
         sessionLog.append(event, provider: providerConfiguration.providerID)
+        sessionLogFile.append(event, provider: providerConfiguration.providerID)
         sessionLogWindowController?.update(text: sessionLog.displayText)
         updateMenuContent()
     }
