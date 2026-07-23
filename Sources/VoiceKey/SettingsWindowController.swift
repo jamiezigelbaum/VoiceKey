@@ -75,6 +75,8 @@ final class SettingsWindowController: NSWindowController {
     private let endpointField = NSTextField()
     private let endpointRequiredLabel = NSTextField(labelWithString: "Required")
     private let endpointRow = NSStackView()
+    private let speakerModePopup = NSPopUpButton()
+    private var speakerModeRow: NSStackView?
     private let apiCredentialLabel = NSTextField(labelWithString: "")
     private let apiKeyField = NSSecureTextField()
     private let removeAPIKeyButton = NSButton(title: "Remove Key", target: nil, action: nil)
@@ -179,6 +181,7 @@ final class SettingsWindowController: NSWindowController {
 
         configureProfileControls()
         configureProviderPopup()
+        configureSpeakerModePopup()
         configureInstructionsEditor()
         configureStaticControls()
         configureMCPServerControls()
@@ -198,6 +201,13 @@ final class SettingsWindowController: NSWindowController {
         addArranged(makeRow(label: "Provider", views: [providerPopup], stretching: providerPopup))
         addArranged(makeRow(label: "Model", views: [modelField], stretching: modelField))
         addArranged(makeRow(label: "Voice", views: [voiceComboBox], stretching: voiceComboBox))
+        let speakerModeRow = makeRow(
+            label: "Speaker mode",
+            views: [speakerModePopup],
+            stretching: speakerModePopup
+        )
+        self.speakerModeRow = speakerModeRow
+        addArranged(speakerModeRow)
 
         endpointRow.orientation = .horizontal
         endpointRow.alignment = .centerY
@@ -322,6 +332,17 @@ final class SettingsWindowController: NSWindowController {
         }
         providerPopup.target = self
         providerPopup.action = #selector(providerChanged)
+    }
+
+    private func configureSpeakerModePopup() {
+        speakerModePopup.translatesAutoresizingMaskIntoConstraints = false
+        speakerModePopup.removeAllItems()
+        for preference in OpenAISpeakerModePreference.allCases {
+            speakerModePopup.addItem(withTitle: preference.displayName)
+            speakerModePopup.lastItem?.representedObject = preference.rawValue
+        }
+        speakerModePopup.toolTip =
+            "Auto uses headphone behavior for Bluetooth and the built-in headphone jack. USB defaults to speaker behavior."
     }
 
     private func configureMCPServerControls() {
@@ -528,6 +549,10 @@ final class SettingsWindowController: NSWindowController {
         profile.instructions = instructionsTextView.string
         profile.endpointURL = endpointField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         profile.webSearchEnabled = webSearchCheckbox.state == .on
+        if let raw = speakerModePopup.selectedItem?.representedObject as? String,
+           let preference = OpenAISpeakerModePreference(rawValue: raw) {
+            profile.speakerModePreference = preference
+        }
         workingProfiles[index] = profile
     }
 
@@ -565,6 +590,12 @@ final class SettingsWindowController: NSWindowController {
         endpointRequiredLabel.isHidden = provider != .custom
         endpointField.placeholderString = provider.endpointPlaceholder
         endpointField.stringValue = profile.endpointURL
+        speakerModeRow?.isHidden = provider != .openAIRealtime
+        if let index = speakerModePopup.itemArray.firstIndex(where: {
+            ($0.representedObject as? String) == profile.speakerModePreference.rawValue
+        }) {
+            speakerModePopup.selectItem(at: index)
+        }
 
         instructionsTextView.string = profile.instructions
         instructionsTextView.isEditable = provider != .chatGPTWeb

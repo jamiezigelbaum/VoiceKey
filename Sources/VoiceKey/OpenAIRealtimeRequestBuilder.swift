@@ -67,24 +67,46 @@ enum OpenAIRealtimeRequestBuilder {
 
     static func sessionUpdateEvent(
         configuration: VoiceSessionConfiguration,
+        speakerMode: Bool = false,
         includeModel: Bool = true,
         sessionStart: Date = Date(),
         authorizationProvider: (UUID) -> String? = {
             APIKeyStore.shared.authorizationToken(forMCPServer: $0)
         }
     ) -> [String: Any] {
+        let turnDetection: [String: Any]
+        let noiseReduction: [String: Any]
+        if speakerMode {
+            // Live verification on 2026-07-23 established that server_vad can
+            // create responses without interrupting them. Client-side energy
+            // gating therefore remains the sole interruption owner.
+            turnDetection = [
+                "type": "server_vad",
+                "threshold": OpenAIRealtimeSpeakerModeTuning.serverVADThreshold,
+                "prefix_padding_ms": OpenAIRealtimeSpeakerModeTuning.serverVADPrefixPaddingMilliseconds,
+                "silence_duration_ms": OpenAIRealtimeSpeakerModeTuning.serverVADSilenceDurationMilliseconds,
+                "create_response": true,
+                "interrupt_response": false
+            ]
+            noiseReduction = ["type": "far_field"]
+        } else {
+            turnDetection = [
+                "type": "semantic_vad",
+                "eagerness": "auto",
+                "create_response": true,
+                "interrupt_response": true
+            ]
+            noiseReduction = ["type": "near_field"]
+        }
+
         var session: [String: Any] = [
             "type": "realtime",
             "output_modalities": ["audio"],
             "audio": [
                 "input": [
                     "format": pcm24kFormat,
-                    "turn_detection": [
-                        "type": "semantic_vad",
-                        "eagerness": "auto",
-                        "create_response": true,
-                        "interrupt_response": true
-                    ],
+                    "noise_reduction": noiseReduction,
+                    "turn_detection": turnDetection,
                 ],
                 "output": [
                     "format": pcm24kFormat,
@@ -149,6 +171,18 @@ enum OpenAIRealtimeRequestBuilder {
 
     static var inputAudioBufferClearEvent: [String: Any] {
         ["type": "input_audio_buffer.clear"]
+    }
+
+    static func conversationItemTruncateEvent(
+        itemID: String,
+        audioEndMilliseconds: Int
+    ) -> [String: Any] {
+        [
+            "type": "conversation.item.truncate",
+            "item_id": itemID,
+            "content_index": 0,
+            "audio_end_ms": max(0, audioEndMilliseconds)
+        ]
     }
 
     private static var pcm24kFormat: [String: Any] {

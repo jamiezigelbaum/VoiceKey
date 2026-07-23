@@ -38,6 +38,10 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         let inputFormat = try dictionary(input["format"])
         XCTAssertEqual(inputFormat["type"] as? String, "audio/pcm")
         XCTAssertEqual(inputFormat["rate"] as? Int, 24_000)
+        XCTAssertEqual(
+            try dictionary(input["noise_reduction"])["type"] as? String,
+            "near_field"
+        )
 
         let turnDetection = try dictionary(input["turn_detection"])
         XCTAssertEqual(turnDetection["type"] as? String, "semantic_vad")
@@ -50,6 +54,30 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         XCTAssertEqual(outputFormat["type"] as? String, "audio/pcm")
         XCTAssertEqual(outputFormat["rate"] as? Int, 24_000)
         XCTAssertEqual(output["voice"] as? String, "marin-test")
+    }
+
+    func testSpeakerModeSessionUpdateUsesExactEchoSafeContract() throws {
+        let event = OpenAIRealtimeRequestBuilder.sessionUpdateEvent(
+            configuration: testConfiguration,
+            speakerMode: true
+        )
+
+        let session = try dictionary(event["session"])
+        let audio = try dictionary(session["audio"])
+        let input = try dictionary(audio["input"])
+        XCTAssertEqual(
+            try dictionary(input["noise_reduction"])["type"] as? String,
+            "far_field"
+        )
+
+        let turnDetection = try dictionary(input["turn_detection"])
+        XCTAssertEqual(turnDetection["type"] as? String, "server_vad")
+        XCTAssertEqual(turnDetection["threshold"] as? Double, 0.75)
+        XCTAssertEqual(turnDetection["prefix_padding_ms"] as? Int, 300)
+        XCTAssertEqual(turnDetection["silence_duration_ms"] as? Int, 700)
+        XCTAssertEqual(turnDetection["create_response"] as? Bool, true)
+        XCTAssertEqual(turnDetection["interrupt_response"] as? Bool, false)
+        XCTAssertNil(turnDetection["eagerness"])
     }
 
     func testLiveSessionUpdateOmitsModel() throws {
@@ -149,6 +177,18 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
             OpenAIRealtimeRequestBuilder.inputAudioBufferClearEvent["type"] as? String,
             "input_audio_buffer.clear"
         )
+    }
+
+    func testConversationItemTruncateUsesTrackedItemAndClampsNegativeTime() {
+        let event = OpenAIRealtimeRequestBuilder.conversationItemTruncateEvent(
+            itemID: "assistant-item",
+            audioEndMilliseconds: -1
+        )
+
+        XCTAssertEqual(event["type"] as? String, "conversation.item.truncate")
+        XCTAssertEqual(event["item_id"] as? String, "assistant-item")
+        XCTAssertEqual(event["content_index"] as? Int, 0)
+        XCTAssertEqual(event["audio_end_ms"] as? Int, 0)
     }
 
     private var testConfiguration: VoiceSessionConfiguration {

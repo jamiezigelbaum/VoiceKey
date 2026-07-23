@@ -328,6 +328,7 @@ struct VoiceSessionConfiguration: Equatable {
     var endpointURL: String = ""
     var mcpServers: [MCPServerConfiguration] = []
     var webSearchEnabled: Bool = false
+    var speakerModePreference: OpenAISpeakerModePreference = .automatic
 
     static let defaultInstructions = "You are VoiceKey, a concise and helpful voice assistant. Speak naturally and keep answers brief unless the user asks for detail."
 

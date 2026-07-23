@@ -52,10 +52,20 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
                 self?.handleFatalAudioFailure()
             }
         }
+        engine.setStateChangeHandler { [weak self] state in
+            self?.asyncOnStateQueue { [weak self] in
+                self?.adoptAudioEngineState(
+                    state,
+                    resendSessionOnModeChange: true
+                )
+            }
+        }
+        audioEngineState = engine.stateSnapshot()
         return engine
     }()
     private let webSocketTaskFactory: ((URLRequest) -> OpenAIRealtimeWebSocketTaskProtocol)?
     private let now: () -> Date
+    private let gateNow: () -> Date
     private let stateQueue = DispatchQueue(label: "VoiceKey.OpenAIRealtimeProvider")
     private let stateQueueKey = DispatchSpecificKey<UInt8>()
     private lazy var urlSession = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
@@ -74,6 +84,11 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     private var isResponseInFlight = false
     private var isMCPContinuationPending = false
     private var consecutiveMCPContinuationCount = 0
+    private var audioEngineState: RealtimeAudioEngineState?
+    private var speakerGate = OpenAIRealtimeSpeakerGate()
+    private var currentAssistantMessageItemID: String?
+    private var lastSessionSpeakerMode: Bool?
+    private var hasReportedAECFallback = false
 
     private static let fatalAudioFailureMessage =
         "Microphone audio stopped after repeated audio device failures. Start the voice session again."
@@ -84,7 +99,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         apiKeyProvider: @escaping () -> String?,
         audioEngine: RealtimeAudioEngineProtocol? = nil,
         webSocketTaskFactory: ((URLRequest) -> OpenAIRealtimeWebSocketTaskProtocol)? = nil,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        gateNow: @escaping () -> Date = Date.init
     ) {
         self.configuration = configuration
         self.apiKeyProvider = apiKeyProvider
@@ -95,6 +111,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         }
         self.webSocketTaskFactory = webSocketTaskFactory
         self.now = now
+        self.gateNow = gateNow
         super.init()
         stateQueue.setSpecific(key: stateQueueKey, value: 1)
     }
@@ -173,6 +190,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         hasReportedMicrophoneAudio = false
         hasReportedMicrophoneSignal = false
         resetMCPContinuationState()
+        resetSpeakerModeState()
         emit(.status(.ready))
     }
 
@@ -215,6 +233,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
               isStopping == false else { return }
 
         resetMCPContinuationState()
+        resetSpeakerModeState()
         guard let request = OpenAIRealtimeRequestBuilder.webSocketRequest(
             baseURL: OpenAIRealtimeRequestBuilder.normalizedBaseURL(for: configuration.endpointURL),
             apiKey: apiKey,
@@ -267,6 +286,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             isConnected = false
             isAudioStreaming = false
             resetMCPContinuationState()
+            resetSpeakerModeState()
             emit(.status(.needsAttention(error.localizedDescription)))
         }
     }
@@ -281,6 +301,14 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             hasReportedMicrophoneSignal = true
             emit(.diagnostic(String(format: "Microphone input detected (peak %.3f).", activity.peak)))
         }
+
+        refreshAudioEngineState(resendSessionOnModeChange: true)
+        guard currentAssistantMessageItemID != nil else {
+            speakerGate.resetActivity()
+            return
+        }
+        guard speakerGate.observe(activity, at: gateNow()) else { return }
+        interruptAssistantPlayback()
     }
 
     private func handleFatalAudioFailure() {
@@ -291,18 +319,28 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     }
 
     private func sendSessionUpdate(includeModel: Bool = true) {
+        // The engine can remain instantiated between sessions, so read the
+        // default output device again before choosing the initial contract.
+        audioEngine.refreshOutputRoute()
+        refreshAudioEngineState(resendSessionOnModeChange: false)
         var sessionConfiguration = configuration
         if includeModel, let activeModel {
             sessionConfiguration.model = activeModel
         }
+        let speakerMode = effectiveSpeakerMode()
+        speakerGate.setSpeakerMode(speakerMode)
         sendJSON(OpenAIRealtimeRequestBuilder.sessionUpdateEvent(
             configuration: sessionConfiguration,
+            speakerMode: speakerMode,
             includeModel: includeModel,
             sessionStart: sessionStart ?? now()
         ))
+        lastSessionSpeakerMode = speakerMode
     }
 
     private func sendAudio(_ data: Data) {
+        refreshAudioEngineState(resendSessionOnModeChange: true)
+        guard speakerGate.isGateClosed(at: gateNow()) == false else { return }
         sendJSON(OpenAIRealtimeRequestBuilder.inputAudioAppendEvent(audio: data))
     }
 
@@ -329,6 +367,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
                     self.isConnected = false
                     self.isAudioStreaming = false
                     self.resetMCPContinuationState()
+                    self.resetSpeakerModeState()
                     self.audioEngine.stop()
                     self.emit(.status(.needsAttention(error.localizedDescription)))
                 }
@@ -367,12 +406,26 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
                 startAudioStreaming()
             case .responseStarted:
                 isResponseInFlight = true
+                currentAssistantMessageItemID = nil
+                speakerGate.beginAssistantTurn()
             case .responseEnded:
                 isResponseInFlight = false
                 sendPendingMCPContinuationIfNeeded()
+            case let .assistantMessageStarted(itemID):
+                currentAssistantMessageItemID = itemID
+                speakerGate.beginAssistantTurn()
+                audioEngine.beginAssistantAudioTurn()
             case .mcpCallTerminated:
                 handleMCPCallTermination()
             case .stopPlayback:
+                refreshAudioEngineState(resendSessionOnModeChange: true)
+                if speakerGate.isSpeakerMode,
+                   audioEngineState?.isPlaybackActive == true {
+                    // In speaker mode the mic gate and local energy threshold
+                    // own interruption. A server speech_started event must not
+                    // let leaked speaker audio stop its own response.
+                    break
+                }
                 isMCPContinuationPending = false
                 consecutiveMCPContinuationCount = 0
                 audioEngine.stopPlayback()
@@ -408,6 +461,82 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         isResponseInFlight = false
         isMCPContinuationPending = false
         consecutiveMCPContinuationCount = 0
+    }
+
+    private func refreshAudioEngineState(resendSessionOnModeChange: Bool) {
+        adoptAudioEngineState(
+            audioEngine.stateSnapshot(),
+            resendSessionOnModeChange: resendSessionOnModeChange
+        )
+    }
+
+    private func adoptAudioEngineState(
+        _ state: RealtimeAudioEngineState,
+        resendSessionOnModeChange: Bool
+    ) {
+        audioEngineState = state
+        let speakerMode = effectiveSpeakerMode()
+        speakerGate.setSpeakerMode(speakerMode)
+        speakerGate.updatePlayback(isActive: state.isPlaybackActive, at: gateNow())
+
+        if state.isEchoCancellationActive {
+            hasReportedAECFallback = false
+        } else if hasReportedAECFallback == false {
+            hasReportedAECFallback = true
+            emit(.diagnostic(
+                "Echo cancellation is inactive; forcing speaker-mode microphone gating."
+            ))
+        }
+
+        if resendSessionOnModeChange,
+           isConnected,
+           let lastSessionSpeakerMode,
+           lastSessionSpeakerMode != speakerMode {
+            sendSessionUpdate(includeModel: false)
+        }
+    }
+
+    private func effectiveSpeakerMode() -> Bool {
+        let state = audioEngineState ?? audioEngine.stateSnapshot()
+        return OpenAIRealtimeSpeakerModePolicy.isSpeakerMode(
+            route: state.outputRoute,
+            preference: configuration.speakerModePreference,
+            isEchoCancellationActive: state.isEchoCancellationActive
+        )
+    }
+
+    private func interruptAssistantPlayback() {
+        guard let itemID = currentAssistantMessageItemID else { return }
+        // A loud reply during the post-playback hangover trips the gate too,
+        // but with playback finished there is nothing to cancel or truncate —
+        // the user heard everything, and a response.cancel with no active
+        // response makes the server emit an error event that would surface
+        // as a spurious needsAttention. The gate latch opening the mic is
+        // the whole interruption in that window.
+        guard audioEngineState?.isPlaybackActive == true else { return }
+        let playedMilliseconds =
+            audioEngineState?.currentAssistantPlayedDurationMilliseconds ?? 0
+        audioEngine.stopPlayback()
+        // Live verification on 2026-07-23 confirmed this cancel + truncate
+        // sequence and the client_cancelled response.done that follows it.
+        // Cancel targets the in-flight response only; truncate is valid (and
+        // needed) even after response.done while playback is still draining.
+        if isResponseInFlight {
+            sendJSON(OpenAIRealtimeRequestBuilder.responseCancelEvent)
+        }
+        sendJSON(OpenAIRealtimeRequestBuilder.conversationItemTruncateEvent(
+            itemID: itemID,
+            audioEndMilliseconds: playedMilliseconds
+        ))
+        emit(.diagnostic("User interrupted OpenAI playback."))
+    }
+
+    private func resetSpeakerModeState() {
+        audioEngineState = nil
+        speakerGate = OpenAIRealtimeSpeakerGate()
+        currentAssistantMessageItemID = nil
+        lastSessionSpeakerMode = nil
+        hasReportedAECFallback = false
     }
 
     private func sendJSON(_ object: [String: Any]) {
@@ -524,6 +653,7 @@ extension OpenAIRealtimeProvider: URLSessionWebSocketDelegate {
             isAudioStreaming = false
             isStarting = false
             resetMCPContinuationState()
+            resetSpeakerModeState()
             audioEngine.stop()
             emit(.status(OpenAIRealtimeConnectionDiagnostics.closeStatus(code: closeCode, reason: reason)))
         }

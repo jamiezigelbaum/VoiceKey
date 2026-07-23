@@ -5,6 +5,7 @@ enum OpenAIRealtimeEventAction: Equatable {
     case sessionUpdated
     case responseStarted
     case responseEnded
+    case assistantMessageStarted(itemID: String)
     case mcpCallTerminated
     case stopPlayback
     case audio(Data)
@@ -57,6 +58,16 @@ enum OpenAIRealtimeEventMapper {
             return [
                 .providerEvent(.status(.thinking)),
                 .responseStarted
+            ]
+        case "response.output_item.added":
+            guard let item = object["item"] as? [String: Any],
+                  item["type"] as? String == "message",
+                  let itemID = item["id"] as? String else {
+                return [.providerEvent(.diagnostic(type))]
+            }
+            return [
+                .assistantMessageStarted(itemID: itemID),
+                .providerEvent(.diagnostic(type))
             ]
         case "response.output_audio.delta", "response.audio.delta":
             guard let delta = object["delta"] as? String,

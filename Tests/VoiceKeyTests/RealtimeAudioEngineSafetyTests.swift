@@ -23,6 +23,33 @@ final class RealtimeAudioEngineSafetyTests: XCTestCase {
 
         XCTAssertEqual(operations, ["remove tap", "stop playback", "stop engine"])
     }
+
+    func testPlayedDurationPrefersRenderedFramesAndClampsToScheduledAudio() {
+        XCTAssertEqual(
+            RealtimeAudioEngine.playedDurationMilliseconds(
+                renderedFrameCount: 2_400,
+                scheduledFrameCount: 4_800
+            ),
+            100
+        )
+        XCTAssertEqual(
+            RealtimeAudioEngine.playedDurationMilliseconds(
+                renderedFrameCount: 9_600,
+                scheduledFrameCount: 4_800
+            ),
+            200
+        )
+    }
+
+    func testPlayedDurationFallsBackToScheduledPCM24kFrames() {
+        XCTAssertEqual(
+            RealtimeAudioEngine.playedDurationMilliseconds(
+                renderedFrameCount: nil,
+                scheduledFrameCount: 6_000
+            ),
+            250
+        )
+    }
 }
 
 private enum TeardownError: Error {
