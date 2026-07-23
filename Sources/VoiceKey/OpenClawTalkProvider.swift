@@ -2,6 +2,19 @@ import AppKit
 import CryptoKit
 import Foundation
 
+struct OpenClawTalkToolCall: Equatable {
+    var name: String
+    var callID: String
+    var argumentsJSON: String
+
+    func decodedArguments() -> Any? {
+        try? JSONSerialization.jsonObject(
+            with: Data(argumentsJSON.utf8),
+            options: [.fragmentsAllowed]
+        )
+    }
+}
+
 enum OpenClawTalkEventAction: Equatable {
     case providerEvent(VoiceProviderEvent)
     case connectChallenge
@@ -13,6 +26,11 @@ enum OpenClawTalkEventAction: Equatable {
     case stopPlayback
     case sessionClosed(reason: String?)
     case handshakeFailed(message: String)
+    case toolCall(OpenClawTalkToolCall)
+    case malformedToolCall(callID: String?, reason: String)
+    case requestSucceeded(id: String, runID: String?)
+    case requestFailed(id: String, message: String)
+    case chatLifecycle(runID: String?, state: String?, text: String?, errorMessage: String?)
     /// The gateway rejected connect as NOT_PAIRED because the requested scopes
     /// exceed the device's approved set; it closes the socket (1008), so the
     /// provider must reconnect and retry with exactly these approved scopes.
@@ -160,6 +178,50 @@ enum OpenClawTalkRequestBuilder {
                 "sessionId": sessionID,
                 "reason": reason
             ]
+        ]
+    }
+
+    static func clientToolCallFrame(
+        id: String,
+        relaySessionID: String,
+        toolCall: OpenClawTalkToolCall
+    ) -> [String: Any]? {
+        guard let arguments = toolCall.decodedArguments() else { return nil }
+        return [
+            "type": "req",
+            "id": id,
+            "method": "talk.client.toolCall",
+            "params": [
+                "sessionKey": sessionKey,
+                "voiceSessionId": relaySessionID,
+                "relaySessionId": relaySessionID,
+                "callId": toolCall.callID,
+                "name": toolCall.name,
+                "args": arguments
+            ]
+        ]
+    }
+
+    static func submitToolResultFrame(
+        id: String,
+        sessionID: String,
+        callID: String,
+        result: [String: Any],
+        options: [String: Bool]? = nil
+    ) -> [String: Any] {
+        var params: [String: Any] = [
+            "sessionId": sessionID,
+            "callId": callID,
+            "result": result
+        ]
+        if let options {
+            params["options"] = options
+        }
+        return [
+            "type": "req",
+            "id": id,
+            "method": "talk.session.submitToolResult",
+            "params": params
         ]
     }
 
@@ -386,8 +448,18 @@ enum OpenClawTalkEventMapper {
             case "talk.event":
                 guard let envelope = object["payload"] as? [String: Any] else { return [] }
                 return talkEnvelopeActions(envelope, sessionID: sessionID)
+            case "chat":
+                let payload = object["payload"] as? [String: Any]
+                return [
+                    .chatLifecycle(
+                        runID: payload?["runId"] as? String,
+                        state: payload?["state"] as? String,
+                        text: chatMessageText(payload?["message"]),
+                        errorMessage: payload?["errorMessage"] as? String
+                    )
+                ]
             default:
-                // health/tick/agent/chat/heartbeat frames are not talk traffic.
+                // health/tick/agent/heartbeat frames are not talk traffic.
                 return []
             }
         default:
@@ -410,7 +482,9 @@ enum OpenClawTalkEventMapper {
     }
 
     private static func responseActions(_ object: [String: Any]) -> [OpenClawTalkEventAction] {
-        guard let id = object["id"] as? String else { return [] }
+        guard let id = object["id"] as? String else {
+            return [.providerEvent(.diagnostic("OpenClaw response omitted a request id."))]
+        }
 
         guard (object["ok"] as? Bool) == true else {
             let error = object["error"] as? [String: Any]
@@ -435,7 +509,7 @@ enum OpenClawTalkEventMapper {
                 }
                 return [.handshakeFailed(message: message)]
             default:
-                return [.providerEvent(.diagnostic("OpenClaw request \(id) failed: \(message)"))]
+                return [.requestFailed(id: id, message: message)]
             }
         }
 
@@ -456,8 +530,9 @@ enum OpenClawTalkEventMapper {
                 .providerEvent(.diagnostic("OpenClaw talk session created."))
             ]
         default:
-            // Ack frames (appendAudio, cancelOutput, close) carry no action.
-            return []
+            let payload = object["payload"] as? [String: Any]
+            let runID = (payload?["runId"] as? String) ?? (payload?["idempotencyKey"] as? String)
+            return [.requestSucceeded(id: id, runID: runID)]
         }
     }
 
@@ -479,10 +554,15 @@ enum OpenClawTalkEventMapper {
     }
 
     private static func talkEnvelopeActions(_ envelope: [String: Any], sessionID: String?) -> [OpenClawTalkEventAction] {
-        guard let sessionID,
-              envelope["relaySessionId"] as? String == sessionID,
-              let envelopeType = envelope["type"] as? String else {
+        guard let sessionID else {
             return []
+        }
+        guard let relaySessionID = envelope["relaySessionId"] as? String else {
+            return [.providerEvent(.diagnostic("OpenClaw talk event omitted a relay session id."))]
+        }
+        guard relaySessionID == sessionID else { return [] }
+        guard let envelopeType = envelope["type"] as? String else {
+            return [.providerEvent(.diagnostic("OpenClaw talk event omitted its type."))]
         }
 
         let talkEvent = envelope["talkEvent"] as? [String: Any]
@@ -525,6 +605,8 @@ enum OpenClawTalkEventMapper {
                 talkEventType: talkEventType,
                 talkEventPayload: talkEventPayload
             )
+        case "toolCall":
+            return toolCallActions(envelope: envelope, talkEventPayload: talkEventPayload)
         case "close":
             let reason = (envelope["reason"] as? String) ?? (talkEventPayload?["reason"] as? String)
             return [.sessionClosed(reason: reason)]
@@ -534,6 +616,99 @@ enum OpenClawTalkEventMapper {
         default:
             return [.providerEvent(.diagnostic("talk.event.\(envelopeType)"))]
         }
+    }
+
+    private static func toolCallActions(
+        envelope: [String: Any],
+        talkEventPayload: [String: Any]?
+    ) -> [OpenClawTalkEventAction] {
+        let callID = ((envelope["callId"] as? String) ?? (talkEventPayload?["callId"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = ((envelope["name"] as? String) ?? (talkEventPayload?["name"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let name, name.isEmpty == false else {
+            return [
+                .malformedToolCall(
+                    callID: callID?.isEmpty == false ? callID : nil,
+                    reason: "OpenClaw tool call omitted its tool name."
+                )
+            ]
+        }
+        guard let callID, callID.isEmpty == false else {
+            return [
+                .malformedToolCall(
+                    callID: nil,
+                    reason: "OpenClaw tool call \(diagnosticToolName(name)) omitted its call id."
+                )
+            ]
+        }
+
+        let rawArguments = envelope["args"] ?? talkEventPayload?["args"] ?? [String: Any]()
+        guard let argumentsJSON = normalizedArgumentsJSON(rawArguments) else {
+            return [
+                .malformedToolCall(
+                    callID: callID,
+                    reason: "OpenClaw tool call \(diagnosticToolName(name)) had malformed arguments."
+                )
+            ]
+        }
+
+        return [
+            .toolCall(OpenClawTalkToolCall(
+                name: name,
+                callID: callID,
+                argumentsJSON: argumentsJSON
+            )),
+            .providerEvent(.diagnostic(
+                "OpenClaw tool call \(diagnosticToolName(name)) received."
+            ))
+        ]
+    }
+
+    private static func normalizedArgumentsJSON(_ rawArguments: Any) -> String? {
+        let object: Any
+        if let string = rawArguments as? String {
+            guard let data = string.data(using: .utf8),
+                  let parsed = try? JSONSerialization.jsonObject(
+                    with: data,
+                    options: [.fragmentsAllowed]
+                  ) else {
+                return nil
+            }
+            object = parsed
+        } else {
+            object = rawArguments
+        }
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: object,
+            options: [.sortedKeys, .fragmentsAllowed]
+        ) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func diagnosticToolName(_ name: String) -> String {
+        let withoutControls = name
+            .components(separatedBy: .controlCharacters)
+            .joined(separator: "?")
+        return "'\(withoutControls.prefix(80))'"
+    }
+
+    private static func chatMessageText(_ message: Any?) -> String? {
+        guard let message = message as? [String: Any] else { return nil }
+        if let text = message["text"] as? String,
+           text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return text
+        }
+        guard let content = message["content"] as? [Any] else { return nil }
+        let text = content.compactMap { entry -> String? in
+            guard let block = entry as? [String: Any] else { return nil }
+            guard block["type"] as? String == "text" else { return nil }
+            return block["text"] as? String
+        }.joined(separator: "\n\n")
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
     }
 
     private static func transcriptActions(
@@ -712,6 +887,9 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     /// ~200 ms of PCM16 mono 24 kHz, the chunk size the gateway relay expects.
     private static let audioChunkByteCount = 9_600
     private static let handshakeTimeout: TimeInterval = 3
+    private static let consultTimeout: TimeInterval = 60
+    private static let agentConsultToolName = "openclaw_agent_consult"
+    private static let confirmationMarker = "VOICE_CONFIRMATION_REQUIRED:"
 
     private enum HandshakePhase: Equatable {
         case awaitingSocketOpen
@@ -731,6 +909,13 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
                 return "talk.session.create"
             }
         }
+    }
+
+    private struct ConsultState {
+        var callID: String
+        var startRequestID: String
+        var runID: String?
+        var submitRequestID: String?
     }
 
     private let stateQueue = DispatchQueue(label: "VoiceKey.OpenClawTalkProvider.state")
@@ -754,6 +939,9 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     private var handshakeWatchdog: OpenClawTalkWatchdogCancellation?
     private var handshakeWatchdogGeneration = 0
     private var handshakePhase: HandshakePhase?
+    private var consultWatchdog: OpenClawTalkWatchdogCancellation?
+    private var consultWatchdogGeneration = 0
+    private var consultState: ConsultState?
     private var startGeneration = 0
     private var isStarting = false
     private var isConnecting = false
@@ -812,6 +1000,7 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     deinit {
         withStateSync {
             cancelHandshakeWatchdog()
+            cancelConsultWatchdog()
             instantiatedAudioEngine?.stop()
             disposeCurrentSocket()
         }
@@ -1152,10 +1341,252 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
                 handleHandshakeFailed(message: message)
             case let .connectRetryWithScopes(scopes, message):
                 retryConnectWithApprovedScopes(scopes, failureMessage: message)
+            case let .toolCall(toolCall):
+                handleToolCall(toolCall)
+            case let .malformedToolCall(callID, reason):
+                handleMalformedToolCall(callID: callID, reason: reason)
+            case let .requestSucceeded(id, runID):
+                handleRequestSucceeded(id: id, runID: runID)
+            case let .requestFailed(id, message):
+                handleRequestFailed(id: id, message: message)
+            case let .chatLifecycle(runID, state, text, errorMessage):
+                handleChatLifecycle(
+                    runID: runID,
+                    state: state,
+                    text: text,
+                    errorMessage: errorMessage
+                )
             case let .providerEvent(event):
-                emit(event)
+                if case .status(.listening) = event, consultState != nil {
+                    emit(.status(.thinking))
+                } else {
+                    emit(event)
+                }
             }
         }
+    }
+
+    // MARK: - Agent consult tool calls
+
+    private func handleToolCall(_ toolCall: OpenClawTalkToolCall) {
+        guard toolCall.name == Self.agentConsultToolName else {
+            emit(.diagnostic("OpenClaw Talk rejected unsupported tool '\(safeToolName(toolCall.name))'."))
+            submitUntrackedToolResult(
+                callID: toolCall.callID,
+                result: ["error": "Unsupported OpenClaw Talk tool."]
+            )
+            return
+        }
+        guard consultState == nil else {
+            emit(.diagnostic(
+                "OpenClaw Talk rejected overlapping tool '\(safeToolName(toolCall.name))'; a consult is already in progress."
+            ))
+            submitUntrackedToolResult(
+                callID: toolCall.callID,
+                result: ["error": "Another OpenClaw consult is already in progress."]
+            )
+            emit(.status(.thinking))
+            return
+        }
+        guard let relaySessionID else {
+            emit(.diagnostic("OpenClaw consult could not start because the relay session id is unavailable."))
+            return
+        }
+
+        let requestID = nextRequestID()
+        consultState = ConsultState(
+            callID: toolCall.callID,
+            startRequestID: requestID
+        )
+        emit(.status(.thinking))
+
+        guard let frame = OpenClawTalkRequestBuilder.clientToolCallFrame(
+            id: requestID,
+            relaySessionID: relaySessionID,
+            toolCall: toolCall
+        ) else {
+            emit(.diagnostic("OpenClaw consult arguments could not be encoded."))
+            submitConsultResult(["error": "OpenClaw consult arguments were invalid."])
+            return
+        }
+        sendJSON(frame) { [weak self] _ in
+            guard let self,
+                  self.consultState?.startRequestID == requestID else { return }
+            self.emit(.diagnostic("OpenClaw consult request could not be sent."))
+            self.finishConsult()
+        }
+    }
+
+    private func handleMalformedToolCall(callID: String?, reason: String) {
+        emit(.diagnostic(reason))
+        guard let callID else { return }
+        submitUntrackedToolResult(
+            callID: callID,
+            result: ["error": "Malformed OpenClaw Talk tool call."]
+        )
+    }
+
+    private func handleRequestSucceeded(id: String, runID: String?) {
+        guard var consultState else { return }
+        if id == consultState.startRequestID {
+            guard let runID = runID?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  runID.isEmpty == false else {
+                emit(.diagnostic("OpenClaw consult response omitted its run id."))
+                submitConsultResult(["error": "OpenClaw consult did not return a run id."])
+                return
+            }
+            consultState.runID = runID
+            self.consultState = consultState
+            scheduleConsultWatchdog(runID: runID)
+            return
+        }
+        if id == consultState.submitRequestID {
+            finishConsult()
+        }
+    }
+
+    private func handleRequestFailed(id: String, message: String) {
+        guard let consultState else {
+            emit(.diagnostic("OpenClaw request \(id) failed: \(message)"))
+            return
+        }
+        if id == consultState.startRequestID {
+            emit(.diagnostic("OpenClaw consult request was rejected by the gateway."))
+            submitConsultResult(["error": "OpenClaw consult request failed."])
+            return
+        }
+        if id == consultState.submitRequestID {
+            emit(.diagnostic("OpenClaw consult tool result was rejected by the gateway."))
+            finishConsult()
+            return
+        }
+        emit(.diagnostic("OpenClaw request \(id) failed: \(message)"))
+    }
+
+    private func handleChatLifecycle(
+        runID: String?,
+        state: String?,
+        text: String?,
+        errorMessage: String?
+    ) {
+        guard let consultState else { return }
+        guard let runID = runID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              runID.isEmpty == false else {
+            emit(.diagnostic("OpenClaw chat lifecycle event omitted its run id."))
+            return
+        }
+        guard runID == consultState.runID else { return }
+        guard let state = state?.trimmingCharacters(in: .whitespacesAndNewlines),
+              state.isEmpty == false else {
+            emit(.diagnostic("OpenClaw consult lifecycle event omitted its state."))
+            return
+        }
+
+        switch state {
+        case "status", "delta":
+            emit(.status(.thinking))
+        case "final":
+            guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  text.isEmpty == false else {
+                emit(.diagnostic("OpenClaw consult completed without a text result."))
+                submitConsultResult(["error": "OpenClaw consult completed without a text result."])
+                return
+            }
+            if text.contains(Self.confirmationMarker) {
+                emit(.transcript(text))
+                emit(.diagnostic("OpenClaw consult requires voice confirmation."))
+            }
+            submitConsultResult(["result": text])
+        case "aborted":
+            submitConsultResult([
+                "status": "cancelled",
+                "message": "Cancelled the active OpenClaw run."
+            ])
+        case "error":
+            emit(.diagnostic("OpenClaw consult run failed."))
+            let resultMessage = errorMessage?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            submitConsultResult([
+                "error": resultMessage?.isEmpty == false
+                    ? resultMessage ?? "OpenClaw consult failed."
+                    : "OpenClaw consult failed."
+            ])
+        default:
+            emit(.diagnostic("OpenClaw consult lifecycle event had unknown state '\(safeToolName(state))'."))
+        }
+    }
+
+    private func submitConsultResult(_ result: [String: Any]) {
+        guard var consultState,
+              consultState.submitRequestID == nil,
+              let sessionID else { return }
+        cancelConsultWatchdog()
+        let requestID = nextRequestID()
+        consultState.submitRequestID = requestID
+        self.consultState = consultState
+        sendJSON(OpenClawTalkRequestBuilder.submitToolResultFrame(
+            id: requestID,
+            sessionID: sessionID,
+            callID: consultState.callID,
+            result: result
+        )) { [weak self] _ in
+            guard let self,
+                  self.consultState?.submitRequestID == requestID else { return }
+            self.emit(.diagnostic("OpenClaw consult tool result could not be sent."))
+            self.finishConsult()
+        }
+    }
+
+    private func submitUntrackedToolResult(callID: String, result: [String: Any]) {
+        guard let sessionID else { return }
+        sendJSON(OpenClawTalkRequestBuilder.submitToolResultFrame(
+            id: nextRequestID(),
+            sessionID: sessionID,
+            callID: callID,
+            result: result
+        )) { [weak self] _ in
+            self?.emit(.diagnostic("OpenClaw Talk rejection result could not be sent."))
+        }
+    }
+
+    private func scheduleConsultWatchdog(runID: String) {
+        cancelConsultWatchdog()
+        consultWatchdogGeneration += 1
+        let watchdogGeneration = consultWatchdogGeneration
+        consultWatchdog = watchdogScheduler(Self.consultTimeout) { [weak self] in
+            self?.performOnStateQueue { [weak self] in
+                guard let self,
+                      self.consultWatchdogGeneration == watchdogGeneration,
+                      self.consultState?.runID == runID,
+                      self.consultState?.submitRequestID == nil,
+                      self.isStopping == false else { return }
+                self.consultWatchdog = nil
+                self.emit(.diagnostic(
+                    "OpenClaw consult timed out; submitting an expired tool result."
+                ))
+                self.submitConsultResult(["error": "OpenClaw consult timed out."])
+            }
+        }
+    }
+
+    private func cancelConsultWatchdog() {
+        consultWatchdogGeneration += 1
+        consultWatchdog?.cancel()
+        consultWatchdog = nil
+    }
+
+    private func finishConsult() {
+        cancelConsultWatchdog()
+        consultState = nil
+        if sessionID != nil, isStopping == false {
+            emit(.status(.listening))
+        }
+    }
+
+    private func safeToolName(_ name: String) -> String {
+        String(name.components(separatedBy: .controlCharacters)
+            .joined(separator: "?")
+            .prefix(80))
     }
 
     private func sendConnectFrame(nonce: String?) {
@@ -1358,6 +1789,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
 
     private func teardownConnection() {
         cancelHandshakeWatchdog()
+        cancelConsultWatchdog()
+        consultState = nil
         audioEngine.stop()
         disposeCurrentSocket()
         isStarting = false
@@ -1388,7 +1821,10 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
     }
 
-    private func sendJSON(_ object: [String: Any]) {
+    private func sendJSON(
+        _ object: [String: Any],
+        onError: ((Error) -> Void)? = nil
+    ) {
         guard let socket = webSocket,
               let data = try? JSONSerialization.data(withJSONObject: object),
               let text = String(data: data, encoding: .utf8) else {
@@ -1401,7 +1837,11 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
                       let socket,
                       self.webSocket === socket,
                       self.isStopping == false else { return }
-                self.emit(.status(.needsAttention(error.localizedDescription)))
+                if let onError {
+                    onError(error)
+                } else {
+                    self.emit(.status(.needsAttention(error.localizedDescription)))
+                }
             }
         }
     }
