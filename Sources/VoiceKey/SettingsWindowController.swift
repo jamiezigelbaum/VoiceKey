@@ -590,7 +590,8 @@ final class SettingsWindowController: NSWindowController {
         endpointRequiredLabel.isHidden = provider != .custom
         endpointField.placeholderString = provider.endpointPlaceholder
         endpointField.stringValue = profile.endpointURL
-        speakerModeRow?.isHidden = provider != .openAIRealtime
+        speakerModeRow?.isHidden =
+            provider != .openAIRealtime && provider != .openClaw
         if let index = speakerModePopup.itemArray.firstIndex(where: {
             ($0.representedObject as? String) == profile.speakerModePreference.rawValue
         }) {
