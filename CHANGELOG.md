@@ -23,6 +23,13 @@ Voice profiles, an OpenClaw Talk provider, and UX overhaul.
   conventional SSH tunnel endpoint for a remote workspace), with optional
   endpoint and gateway-token overrides in Settings (token stored in the
   Keychain).
+- Adds system echo cancellation (Apple voice processing) on a rebuilt
+  single-engine audio path, so speaker output no longer feeds back into the
+  microphone and interrupts the assistant mid-reply.
+- Survives audio output/input device changes during a live session (for
+  example connecting AirPods): capture rebuilds against the new route
+  instead of crashing, and audio-system failures now surface as status
+  messages rather than aborting the app.
 - Adds an animated menu bar icon: spinning arc while connecting, distinct
   listening, thinking, and speaking motion during a live session, and a red
   badge when attention is needed.
