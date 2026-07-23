@@ -1,6 +1,50 @@
 import AppKit
 import AVFoundation
 
+enum HotKeyRecordingLifecycle {
+    static func record(
+        _ hotKey: HotKeyConfiguration,
+        for workingProfile: VoiceProfile,
+        savedProfiles: inout [VoiceProfile],
+        register: (VoiceProfile) -> Bool,
+        save: ([VoiceProfile]) -> Void
+    ) -> Bool {
+        let savedIndex = savedProfiles.firstIndex(where: { $0.id == workingProfile.id })
+        var candidate = savedIndex.map { savedProfiles[$0] } ?? workingProfile
+        let previousCandidate = candidate
+        candidate.hotKey = hotKey
+
+        guard register(candidate) else {
+            if previousCandidate.hotKey != nil {
+                _ = register(previousCandidate)
+            }
+            return false
+        }
+
+        if let savedIndex {
+            savedProfiles[savedIndex].hotKey = hotKey
+            save(savedProfiles)
+        }
+        return true
+    }
+}
+
+enum ActiveVoiceProfileLifecycle {
+    static func reconcile(
+        activeProfileID: UUID?,
+        newProfiles: [VoiceProfile],
+        provider: RealtimeVoiceProvider?
+    ) -> UUID? {
+        guard let activeProfileID,
+              newProfiles.contains(where: { $0.id == activeProfileID }) == false else {
+            return activeProfileID
+        }
+
+        provider?.stopVoice()
+        return nil
+    }
+}
+
 final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private static let hotKeyDebounceInterval: TimeInterval = 0.25
     private static let hasOpenedSettingsKey = "HasOpenedSettings.v1"
@@ -218,25 +262,24 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         installHotKeyMonitors()
 
         for profile in profiles where profile.hotKey != nil {
-            registerHotKey(for: profile.id)
+            registerHotKey(for: profile)
         }
     }
 
     @discardableResult
-    private func registerHotKey(for profileID: UUID) -> Bool {
-        hotKeys[profileID] = nil
-        carbonRegisteredProfileIDs.remove(profileID)
+    private func registerHotKey(for profile: VoiceProfile) -> Bool {
+        hotKeys[profile.id] = nil
+        carbonRegisteredProfileIDs.remove(profile.id)
 
-        guard let profile = profiles.first(where: { $0.id == profileID }),
-              let configuration = profile.hotKey else {
+        guard let configuration = profile.hotKey else {
             return false
         }
 
         guard let globalHotKey = GlobalHotKey(
-            id: carbonHotKeyID(for: profileID),
+            id: carbonHotKeyID(for: profile.id),
             configuration: configuration,
             handler: { [weak self] in
-                self?.triggerHotKey(for: profileID)
+                self?.triggerHotKey(for: profile.id)
             }
         ) else {
             recordProviderEvent(.diagnostic(
@@ -245,8 +288,8 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             return false
         }
 
-        hotKeys[profileID] = globalHotKey
-        carbonRegisteredProfileIDs.insert(profileID)
+        hotKeys[profile.id] = globalHotKey
+        carbonRegisteredProfileIDs.insert(profile.id)
         return true
     }
 
@@ -265,7 +308,9 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
     private func installHotKeyMonitors() {
         localHotKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, let profileID = self.profileID(matchingKeyEvent: event) else {
+            guard let self,
+                  self.settingsWindowController?.window?.isKeyWindow != true,
+                  let profileID = self.profileID(matchingKeyEvent: event) else {
                 return event
             }
             self.triggerHotKey(for: profileID)
@@ -611,12 +656,13 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
 extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
     func settingsController(_ controller: SettingsWindowController, didUpdateProfiles newProfiles: [VoiceProfile]) {
+        activeProfileID = ActiveVoiceProfileLifecycle.reconcile(
+            activeProfileID: activeProfileID,
+            newProfiles: newProfiles,
+            provider: voiceProvider
+        )
+
         profiles = newProfiles
-
-        if let activeProfileID, newProfiles.contains(where: { $0.id == activeProfileID }) == false {
-            self.activeProfileID = nil
-        }
-
         registerAllHotKeys()
         rebuildMenu()
 
@@ -631,22 +677,24 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
     func settingsController(
         _ controller: SettingsWindowController,
         didRecordHotKey hotKey: HotKeyConfiguration,
-        forProfileID id: UUID
+        for profile: VoiceProfile
     ) -> Bool {
-        guard let index = profiles.firstIndex(where: { $0.id == id }) else { return false }
-
-        let previousHotKey = profiles[index].hotKey
-        profiles[index].hotKey = hotKey
-
-        guard registerHotKey(for: id) else {
-            profiles[index].hotKey = previousHotKey
-            _ = registerHotKey(for: id)
-            rebuildMenu()
-            return false
-        }
-
-        VoiceProfileStore.save(profiles)
+        var updatedProfiles = profiles
+        let accepted = HotKeyRecordingLifecycle.record(
+            hotKey,
+            for: profile,
+            savedProfiles: &updatedProfiles,
+            register: { [weak self] profile in
+                self?.registerHotKey(for: profile) == true
+            },
+            save: { VoiceProfileStore.save($0) }
+        )
+        profiles = updatedProfiles
         rebuildMenu()
-        return true
+        return accepted
+    }
+
+    func settingsControllerDidUpdateCredentials(_ controller: SettingsWindowController) {
+        updateMenuContent()
     }
 }

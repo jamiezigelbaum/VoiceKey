@@ -57,7 +57,7 @@ final class VoiceProfileStoreTests: XCTestCase {
         XCTAssertEqual(profile.hotKey?.keyCode, UInt32(kVK_F16))
         XCTAssertEqual(profile.model, VoiceProviderID.openAIRealtime.defaultModel)
         XCTAssertEqual(profile.voice, VoiceProviderID.openAIRealtime.defaultVoice)
-        XCTAssertEqual(profile.instructions, "")
+        XCTAssertEqual(profile.instructions, VoiceSessionConfiguration.defaultInstructions)
         XCTAssertEqual(profile.endpointURL, "")
 
         // Loading must not persist anything; the install stays fresh until a save.
