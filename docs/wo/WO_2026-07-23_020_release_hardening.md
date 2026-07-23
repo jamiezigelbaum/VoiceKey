@@ -488,3 +488,79 @@ wiring for finding #2, but do not modify its tool-call/handshake code.
   (inject a throwing stub if feasible); log retention deletes old files.
 - `swift test` and `swift build` green. If a test needs CoreAudio and the
   sandbox lacks it, exclude only that test and flag it.
+
+## WO-G: Speak the answer after a server-side MCP call completes
+
+Fixes the "web search runs, then the model goes mute" release blocker.
+
+### Verified facts (do not re-investigate)
+
+All of this was ground-truthed live on 2026-07-23 against the real endpoint
+(`wss://api.openai.com/v1/realtime?model=gpt-realtime-2`) with a controlled
+probe (two runs, identical results) plus two in-app reproductions in
+`~/Library/Logs/VoiceKey/session-2026-07-23.log` (19:10:05Z and 19:11:38Z):
+
+1. **An `mcp_call` runs asynchronously relative to its response.** The
+   response that initiates the call reaches `response.done` with
+   `status=completed` while the call item's `output` is still `null`;
+   `response.mcp_call.in_progress` / `.completed` arrive AFTER that
+   `response.done`, and the item's `output` is filled in via a later
+   `response.output_item.done` + `conversation.item.done`.
+2. **The server never auto-continues.** After `response.mcp_call.completed`
+   the probe waited 25s with no client action: zero further responses, zero
+   audio. This is exactly the in-app "mute after search" symptom.
+3. **Sending `{"type":"response.create"}` after the call completes makes the
+   model consume the tool output.** Observed: the follow-up response may
+   itself contain ANOTHER `mcp_call` (search → fetch chain, seen both probe
+   runs: `web_search_exa` then `web_fetch_exa`), which again completes
+   asynchronously — so the continuation must LOOP, not fire once.
+4. Client code today: `OpenAIRealtimeEventMapper.actions(from:)` maps all
+   `response.mcp_call.*` to diagnostics only
+   (Sources/VoiceKey/OpenAIRealtimeEventMapper.swift:18-29); nothing reacts
+   to completion. The provider dispatch loop is
+   `handleEventText` (Sources/VoiceKey/OpenAIRealtimeProvider.swift:352-366);
+   outbound frames go through `sendJSON`
+   (OpenAIRealtimeProvider.swift:368). The provider currently has no notion
+   of an active response; mapper maps `response.created`→thinking
+   (mapper line 44) and `response.done`→listening (line 58).
+5. Barge-in: `input_audio_buffer.speech_started` maps to
+   `.stopPlayback` + listening (mapper lines 39-43); VAD has
+   `create_response=true`, so a user turn auto-creates its own response.
+
+### Required behavior
+
+1. The mapper emits distinct actions the provider can act on:
+   response lifecycle start (`response.created`) and end (`response.done`),
+   and MCP call terminal events (`response.mcp_call.completed` and
+   `response.mcp_call.failed`). Keep existing status/diagnostic behavior
+   unchanged (additive actions).
+2. Provider continuation rule: when an MCP call reaches a terminal state and
+   NO response is in flight, send `{"type":"response.create"}`. If a response
+   IS in flight, remember a pending continuation and send it when that
+   response ends (unless the ended response itself contained/was followed by
+   nothing needing it — a simple pending flag cleared on send is fine).
+3. `response.mcp_call.failed` follows the same continuation path so the model
+   verbalizes the failure instead of going mute. (Not observed live; this is
+   defensive client behavior, not an invented wire shape.)
+4. Barge-in / user speech clears any pending continuation
+   (`input_audio_buffer.speech_started`): the VAD-created response will see
+   the tool output in conversation anyway; never double-create.
+5. Loop safety: chained tool calls continue naturally (completed → create →
+   possibly another call → …). Cap consecutive client-initiated
+   continuations without an intervening user turn (reset on
+   `speech_started`) at a small constant (e.g. 8) to bound runaway loops.
+6. Reset all continuation state on stopVoice/disconnect/reconnect.
+
+### Acceptance
+
+- Mapper unit tests: `response.mcp_call.completed` / `.failed` yield the new
+  action (plus the existing diagnostic); `response.created`/`response.done`
+  yield lifecycle actions alongside existing status events.
+- Provider-level tests where feasible without a live socket: continuation
+  sent when idle, deferred when a response is active, cleared on
+  speech_started, capped after N consecutive continuations, state reset on
+  stop.
+- `swift test` and `swift build` green. Two provider-factory tests need
+  CoreAudio and may not run in the Codex sandbox — skip-and-flag, do not
+  chase them.
+- Skip-and-flag standing authority applies.

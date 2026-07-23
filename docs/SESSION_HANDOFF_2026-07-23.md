@@ -190,6 +190,14 @@ is a planned leg).
 - Client observes `mcp_list_tools.*` / `response.mcp_call.*` lifecycle events
   (mapped to diagnostics + "thinking" status in
   `OpenAIRealtimeEventMapper.swift`).
+- **MCP calls are ASYNC relative to the response (probed live 2026-07-23,
+  twice):** the initiating response hits `response.done` (status=completed)
+  while the call's `output` is still null; `response.mcp_call.completed`
+  lands later; the server NEVER auto-continues (25s observed silence). The
+  client MUST send `response.create` after a terminal `response.mcp_call.*`
+  to make the model speak the result — and must loop, because the follow-up
+  response may chain another call (observed: `web_search_exa` →
+  `web_fetch_exa`). Probe: `scripts/dev/probe-mcp-continuation.js`. Fix: WO-G.
 
 ### Exa web-search MCP (the wired web-search provider)
 - `https://mcp.exa.ai/mcp` — hosted streamable-HTTP MCP, **anonymous access
