@@ -43,6 +43,9 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     private var inputConverter: AVAudioConverter?
     private var inputConverterSourceFormat: AVAudioFormat?
     private var isInputStreaming = false
+    private var storedInputHandler: ((Data) -> Void)?
+    private var storedActivityHandler: ((RealtimeAudioInputActivity) -> Void)?
+    private var configurationObservers: [NSObjectProtocol] = []
 
     private let realtimeFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
@@ -54,6 +57,56 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     init() {
         outputEngine.attach(playerNode)
         outputEngine.connect(playerNode, to: outputEngine.mainMixerNode, format: realtimeFormat)
+
+        for engine in [inputEngine, outputEngine] {
+            let observer = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange,
+                object: engine,
+                queue: nil
+            ) { [weak self] _ in
+                self?.handleConfigurationChange()
+            }
+            configurationObservers.append(observer)
+        }
+    }
+
+    deinit {
+        for observer in configurationObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    // A device switch (e.g. connecting AirPods) invalidates the engines'
+    // cached formats mid-session; restart capture against the new route
+    // instead of letting the next tap install throw an ObjC exception.
+    private func handleConfigurationChange() {
+        queue.async { [weak self] in
+            guard let self else { return }
+
+            self.stateLock.lock()
+            let wasStreaming = self.isInputStreaming
+            let inputHandler = self.storedInputHandler
+            let activityHandler = self.storedActivityHandler
+            self.stateLock.unlock()
+
+            self.inputEngine.inputNode.removeTap(onBus: 0)
+            self.inputEngine.stop()
+            self.outputEngine.stop()
+            self.inputConverter = nil
+            self.inputConverterSourceFormat = nil
+
+            guard wasStreaming, let inputHandler, let activityHandler else { return }
+            do {
+                try self.startInput(
+                    inputHandler: inputHandler,
+                    activityHandler: activityHandler
+                )
+            } catch {
+                self.stateLock.lock()
+                self.isInputStreaming = false
+                self.stateLock.unlock()
+            }
+        }
     }
 
     func requestMicrophoneAccess(_ completion: @escaping (Bool) -> Void) {
@@ -79,6 +132,8 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
             return
         }
         isInputStreaming = true
+        storedInputHandler = inputHandler
+        storedActivityHandler = activityHandler
         stateLock.unlock()
 
         do {
@@ -99,6 +154,10 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
         activityHandler: @escaping (RealtimeAudioInputActivity) -> Void
     ) throws {
         try startOutputIfNeeded()
+
+        if inputEngine.isRunning == false {
+            inputEngine.reset()
+        }
 
         let inputNode = inputEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
@@ -130,6 +189,8 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     func stop() {
         stateLock.lock()
         isInputStreaming = false
+        storedInputHandler = nil
+        storedActivityHandler = nil
         stateLock.unlock()
 
         inputEngine.inputNode.removeTap(onBus: 0)
