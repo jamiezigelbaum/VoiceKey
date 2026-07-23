@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import Foundation
 import VoiceKeyObjCShield
 
@@ -24,6 +25,9 @@ enum RealtimeAudioEngineError: LocalizedError {
 
 protocol RealtimeAudioEngineProtocol: AnyObject {
     func setFatalFailureHandler(_ handler: (() -> Void)?)
+    func setStateChangeHandler(_ handler: ((RealtimeAudioEngineState) -> Void)?)
+    func refreshOutputRoute()
+    func stateSnapshot() -> RealtimeAudioEngineState
     func requestMicrophoneAccess(_ completion: @escaping (Bool) -> Void)
     func start(
         inputHandler: @escaping (Data) -> Void,
@@ -31,16 +35,35 @@ protocol RealtimeAudioEngineProtocol: AnyObject {
     ) throws
     func stop()
     func stopPlayback()
+    func beginAssistantAudioTurn()
     func playPCM16(_ data: Data)
 }
 
 extension RealtimeAudioEngineProtocol {
     func setFatalFailureHandler(_ handler: (() -> Void)?) {}
+    func setStateChangeHandler(_ handler: ((RealtimeAudioEngineState) -> Void)?) {}
+    func refreshOutputRoute() {}
+    func stateSnapshot() -> RealtimeAudioEngineState {
+        RealtimeAudioEngineState(
+            outputRoute: .headphones,
+            isEchoCancellationActive: true,
+            isPlaybackActive: false,
+            currentAssistantPlayedDurationMilliseconds: 0
+        )
+    }
+    func beginAssistantAudioTurn() {}
 }
 
 struct RealtimeAudioInputActivity: Equatable {
     var rms: Float
     var peak: Float
+}
+
+struct RealtimeAudioEngineState: Equatable {
+    var outputRoute: RealtimeAudioOutputRoute
+    var isEchoCancellationActive: Bool
+    var isPlaybackActive: Bool
+    var currentAssistantPlayedDurationMilliseconds: Int
 }
 
 /// Capture and playback share ONE AVAudioEngine so that Apple's voice
@@ -64,7 +87,16 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     private var rebuildWorkItem: DispatchWorkItem?
     private var rebuildAttempts = 0
     private var onFatalFailure: (() -> Void)?
+    private var onStateChange: ((RealtimeAudioEngineState) -> Void)?
     private(set) var isEchoCancellationActive = false
+    private var outputRoute = RealtimeAudioOutputRoute.unknown
+    private var pendingPlaybackBufferCount = 0
+    private var playbackGeneration = 0
+    private var assistantTurnGeneration = 0
+    private var currentTurnScheduledFrameCount: Int64 = 0
+    private var currentTurnCompletedFrameCount: Int64 = 0
+    private var currentSegmentBasePlayedFrameCount: Int64 = 0
+    private var currentSegmentStartPlayerSampleTime: AVAudioFramePosition?
 
     private static let rebuildDebounce: TimeInterval = 0.4
     private static let maxRebuildAttempts = 3
@@ -92,6 +124,24 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     func setFatalFailureHandler(_ handler: (() -> Void)?) {
         onQueue {
             self.onFatalFailure = handler
+        }
+    }
+
+    func setStateChangeHandler(_ handler: ((RealtimeAudioEngineState) -> Void)?) {
+        onQueue {
+            self.onStateChange = handler
+        }
+    }
+
+    func stateSnapshot() -> RealtimeAudioEngineState {
+        onQueue {
+            self.makeStateSnapshot()
+        }
+    }
+
+    func refreshOutputRoute() {
+        onQueue {
+            self.refreshOutputRouteOnQueue()
         }
     }
 
@@ -143,9 +193,22 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     func stopPlayback() {
         queue.async { [weak self] in
             guard let self else { return }
+            self.clearPlaybackTracking()
             _ = VKCatchObjCException {
                 self.playerNode.stop()
             }
+        }
+    }
+
+    func beginAssistantAudioTurn() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.assistantTurnGeneration += 1
+            self.currentTurnScheduledFrameCount = 0
+            self.currentTurnCompletedFrameCount = 0
+            self.currentSegmentBasePlayedFrameCount = 0
+            self.currentSegmentStartPlayerSampleTime = nil
+            self.notifyStateChange()
         }
     }
 
@@ -158,10 +221,46 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
             do {
                 try self.startEngineIfNeeded()
                 try self.shielded("schedule playback") {
+                    if self.pendingPlaybackBufferCount == 0 {
+                        self.currentSegmentBasePlayedFrameCount =
+                            self.currentTurnCompletedFrameCount
+                        self.currentSegmentStartPlayerSampleTime =
+                            self.currentPlayerSampleTime() ?? 0
+                    }
                     if self.playerNode.isPlaying == false {
                         self.playerNode.play()
                     }
-                    self.playerNode.scheduleBuffer(buffer, completionHandler: nil)
+                    let generation = self.playbackGeneration
+                    let turnGeneration = self.assistantTurnGeneration
+                    let scheduledFrameCount = Int64(buffer.frameLength)
+                    self.playerNode.scheduleBuffer(
+                        buffer,
+                        completionCallbackType: .dataPlayedBack
+                    ) { [weak self] _ in
+                        self?.queue.async { [weak self] in
+                            guard let self,
+                                  self.playbackGeneration == generation else {
+                                return
+                            }
+                            self.pendingPlaybackBufferCount = max(
+                                0,
+                                self.pendingPlaybackBufferCount - 1
+                            )
+                            if self.assistantTurnGeneration == turnGeneration {
+                                self.currentTurnCompletedFrameCount +=
+                                    scheduledFrameCount
+                            }
+                            if self.pendingPlaybackBufferCount == 0 {
+                                self.currentSegmentBasePlayedFrameCount =
+                                    self.currentTurnCompletedFrameCount
+                                self.currentSegmentStartPlayerSampleTime = nil
+                            }
+                            self.notifyStateChange()
+                        }
+                    }
+                    self.pendingPlaybackBufferCount += 1
+                    self.currentTurnScheduledFrameCount += scheduledFrameCount
+                    self.notifyStateChange()
                 }
             } catch {
                 // Playback is best-effort; a route change mid-schedule will
@@ -188,6 +287,7 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
         }
         try configureVoiceProcessing()
         observeConfigurationChanges(of: engine)
+        refreshOutputRouteOnQueue()
     }
 
     private func configureVoiceProcessing() throws {
@@ -285,6 +385,7 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     }
 
     private func teardownEngine() {
+        clearPlaybackTracking()
         Self.performTeardown(
             removeTap: {
                 self.engine.inputNode.removeTap(onBus: 0)
@@ -361,17 +462,229 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
         }
     }
 
-    // MARK: - Queue and exception plumbing
+    // MARK: - Route and playback state (queue-confined)
 
-    private func onQueue(_ action: () -> Void) {
-        if DispatchQueue.getSpecific(key: queueKey) != nil {
-            action()
+    private func refreshOutputRouteOnQueue() {
+        outputRoute = Self.readCurrentOutputRoute()
+        notifyStateChange()
+    }
+
+    private func clearPlaybackTracking() {
+        playbackGeneration += 1
+        pendingPlaybackBufferCount = 0
+        currentTurnScheduledFrameCount = 0
+        currentTurnCompletedFrameCount = 0
+        currentSegmentBasePlayedFrameCount = 0
+        currentSegmentStartPlayerSampleTime = nil
+        notifyStateChange()
+    }
+
+    private func notifyStateChange() {
+        onStateChange?(makeStateSnapshot())
+    }
+
+    private func makeStateSnapshot() -> RealtimeAudioEngineState {
+        RealtimeAudioEngineState(
+            outputRoute: outputRoute,
+            isEchoCancellationActive: isEchoCancellationActive,
+            isPlaybackActive: pendingPlaybackBufferCount > 0,
+            currentAssistantPlayedDurationMilliseconds:
+                currentAssistantPlayedDurationMilliseconds()
+        )
+    }
+
+    private func currentAssistantPlayedDurationMilliseconds() -> Int {
+        let renderedFrames: Int64?
+        if pendingPlaybackBufferCount == 0 {
+            renderedFrames = currentTurnCompletedFrameCount
+        } else if let start = currentSegmentStartPlayerSampleTime,
+           let current = currentPlayerSampleTime() {
+            renderedFrames = currentSegmentBasePlayedFrameCount
+                + Int64(max(0, current - start))
         } else {
-            queue.sync(execute: action)
+            renderedFrames = nil
+        }
+        return Self.playedDurationMilliseconds(
+            renderedFrameCount: renderedFrames,
+            scheduledFrameCount: currentTurnScheduledFrameCount,
+            sampleRate: realtimeFormat.sampleRate
+        )
+    }
+
+    private func currentPlayerSampleTime() -> AVAudioFramePosition? {
+        guard playerNode.isPlaying,
+              let nodeTime = playerNode.lastRenderTime,
+              let playerTime = playerNode.playerTime(forNodeTime: nodeTime) else {
+            return nil
+        }
+        return playerTime.sampleTime
+    }
+
+    static func playedDurationMilliseconds(
+        renderedFrameCount: Int64?,
+        scheduledFrameCount: Int64,
+        sampleRate: Double = 24_000
+    ) -> Int {
+        guard scheduledFrameCount > 0, sampleRate > 0 else { return 0 }
+        // playerTime is preferred, but it keeps advancing while the player
+        // node renders silence. Clamp it to bytes actually scheduled for the
+        // current assistant item so truncate can never exceed played audio.
+        let playedFrames = min(
+            max(0, renderedFrameCount ?? scheduledFrameCount),
+            scheduledFrameCount
+        )
+        return Int((Double(playedFrames) / sampleRate * 1_000).rounded(.down))
+    }
+
+    private static func readCurrentOutputRoute() -> RealtimeAudioOutputRoute {
+        var defaultOutputDevice = AudioDeviceID(kAudioObjectUnknown)
+        var deviceSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var defaultOutputAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &defaultOutputAddress,
+            0,
+            nil,
+            &deviceSize,
+            &defaultOutputDevice
+        ) == noErr,
+        defaultOutputDevice != kAudioObjectUnknown else {
+            return .unknown
+        }
+
+        let transportValue = readUInt32(
+            objectID: defaultOutputDevice,
+            selector: kAudioDevicePropertyTransportType,
+            scope: kAudioObjectPropertyScopeGlobal
+        )
+        let transport: RealtimeAudioOutputTransport
+        switch transportValue {
+        case kAudioDeviceTransportTypeBuiltIn:
+            transport = .builtIn
+        case kAudioDeviceTransportTypeBluetooth:
+            transport = .bluetooth
+        case kAudioDeviceTransportTypeBluetoothLE:
+            transport = .bluetoothLE
+        case kAudioDeviceTransportTypeDisplayPort:
+            transport = .displayPort
+        case kAudioDeviceTransportTypeHDMI:
+            transport = .hdmi
+        case kAudioDeviceTransportTypeUSB:
+            transport = .usb
+        case kAudioDeviceTransportTypeAirPlay:
+            transport = .airPlay
+        case kAudioDeviceTransportTypeVirtual:
+            transport = .virtual
+        default:
+            transport = .other
+        }
+
+        let dataSource: RealtimeAudioOutputDataSource
+        if let sourceID = readUInt32(
+            objectID: defaultOutputDevice,
+            selector: kAudioDevicePropertyDataSource,
+            scope: kAudioObjectPropertyScopeOutput
+        ) ?? readUInt32(
+            objectID: defaultOutputDevice,
+            selector: kAudioDevicePropertyDataSource,
+            scope: kAudioObjectPropertyScopeGlobal
+        ),
+        (dataSourceKind(
+            sourceID: sourceID,
+            deviceID: defaultOutputDevice,
+            scope: kAudioObjectPropertyScopeOutput
+        ) ?? dataSourceKind(
+            sourceID: sourceID,
+            deviceID: defaultOutputDevice,
+            scope: kAudioObjectPropertyScopeGlobal
+        )) == kAudioStreamTerminalTypeHeadphones {
+            dataSource = .headphones
+        } else {
+            dataSource = .other
+        }
+        return RealtimeAudioOutputRoute(
+            transport: transport,
+            dataSource: dataSource
+        )
+    }
+
+    private static func readUInt32(
+        objectID: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope
+    ) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(objectID, &address) else { return nil }
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(
+            objectID,
+            &address,
+            0,
+            nil,
+            &size,
+            &value
+        ) == noErr else {
+            return nil
+        }
+        return value
+    }
+
+    private static func dataSourceKind(
+        sourceID: UInt32,
+        deviceID: AudioDeviceID,
+        scope: AudioObjectPropertyScope
+    ) -> UInt32? {
+        var sourceID = sourceID
+        var kind: UInt32 = 0
+        return withUnsafeMutablePointer(to: &sourceID) { sourcePointer in
+            withUnsafeMutablePointer(to: &kind) { kindPointer in
+                var translation = AudioValueTranslation(
+                    mInputData: sourcePointer,
+                    mInputDataSize: UInt32(MemoryLayout<UInt32>.size),
+                    mOutputData: kindPointer,
+                    mOutputDataSize: UInt32(MemoryLayout<UInt32>.size)
+                )
+                var address = AudioObjectPropertyAddress(
+                    mSelector: kAudioDevicePropertyDataSourceKindForID,
+                    mScope: scope,
+                    mElement: kAudioObjectPropertyElementMain
+                )
+                var size = UInt32(MemoryLayout<AudioValueTranslation>.size)
+                guard AudioObjectGetPropertyData(
+                    deviceID,
+                    &address,
+                    0,
+                    nil,
+                    &size,
+                    &translation
+                ) == noErr else {
+                    return nil
+                }
+                return kindPointer.pointee
+            }
         }
     }
 
-    private func onQueueSync(_ action: () -> Void) {
+    // MARK: - Queue and exception plumbing
+
+    private func onQueue<T>(_ action: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            return action()
+        } else {
+            return queue.sync(execute: action)
+        }
+    }
+
+    private func onQueueSync<T>(_ action: () -> T) -> T {
         onQueue(action)
     }
 

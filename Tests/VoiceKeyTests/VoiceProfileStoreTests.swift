@@ -27,7 +27,8 @@ final class VoiceProfileStoreTests: XCTestCase {
                         urlString: "https://mcp.example.com/calendar",
                         allowedTools: ["search_events", "create_event"]
                     )
-                ]
+                ],
+                speakerModePreference: .alwaysOn
             ),
             VoiceProfile(
                 name: "Self-hosted",
@@ -73,6 +74,7 @@ final class VoiceProfileStoreTests: XCTestCase {
         XCTAssertEqual(profiles.count, 1)
         XCTAssertEqual(profiles[0].id, profileID)
         XCTAssertEqual(profiles[0].mcpServers, [])
+        XCTAssertEqual(profiles[0].speakerModePreference, .automatic)
     }
 
     func testFreshInstallSeedsDefaultOpenAIProfile() throws {
@@ -96,6 +98,7 @@ final class VoiceProfileStoreTests: XCTestCase {
         XCTAssertEqual(profile.voice, VoiceProviderID.openAIRealtime.defaultVoice)
         XCTAssertEqual(profile.instructions, VoiceSessionConfiguration.defaultInstructions)
         XCTAssertEqual(profile.endpointURL, "")
+        XCTAssertEqual(profile.speakerModePreference, .automatic)
 
         // Loading must not persist anything; the install stays fresh until a save.
         XCTAssertTrue(VoiceProfileStore.isFreshInstall(defaults: defaults))

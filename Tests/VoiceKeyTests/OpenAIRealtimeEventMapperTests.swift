@@ -47,6 +47,27 @@ final class OpenAIRealtimeEventMapperTests: XCTestCase {
         )
     }
 
+    func testAssistantMessageItemMapsItsIDWithoutAddingMapperState() {
+        XCTAssertEqual(
+            OpenAIRealtimeEventMapper.actions(
+                from: #"{"type":"response.output_item.added","item":{"type":"message","id":"item-42"}}"#
+            ),
+            [
+                .assistantMessageStarted(itemID: "item-42"),
+                .providerEvent(.diagnostic("response.output_item.added"))
+            ]
+        )
+    }
+
+    func testNonMessageOutputItemDoesNotStartAssistantAudioTurn() {
+        XCTAssertEqual(
+            OpenAIRealtimeEventMapper.actions(
+                from: #"{"type":"response.output_item.added","item":{"type":"mcp_call","id":"call-1"}}"#
+            ),
+            [.providerEvent(.diagnostic("response.output_item.added"))]
+        )
+    }
+
     func testAudioDeltaMapsToAudioPlaybackAndSpeaking() {
         let audio = Data([0, 1, 2, 3])
         let event = #"{"type":"response.output_audio.delta","delta":"\#(audio.base64EncodedString())"}"#
