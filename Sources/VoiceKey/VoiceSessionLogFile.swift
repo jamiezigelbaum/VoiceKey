@@ -6,6 +6,7 @@ import Foundation
 /// as deltas, uncoalesced); never contains credentials.
 final class VoiceSessionLogFile {
     private let directory: URL
+    private let retentionDays: Int
     private let queue = DispatchQueue(label: "VoiceKey.VoiceSessionLogFile", qos: .utility)
 
     private static let timestampFormatter: ISO8601DateFormatter = {
@@ -17,14 +18,17 @@ final class VoiceSessionLogFile {
     private static let dayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
         formatter.timeZone = TimeZone(identifier: "UTC")
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter
     }()
 
     init(directory: URL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/VoiceKey", isDirectory: true)) {
+        .appendingPathComponent("Library/Logs/VoiceKey", isDirectory: true),
+         retentionDays: Int = 14) {
         self.directory = directory
+        self.retentionDays = retentionDays
     }
 
     func append(_ event: VoiceProviderEvent, provider: VoiceProviderID, timestamp: Date = Date()) {
@@ -49,9 +53,15 @@ final class VoiceSessionLogFile {
             "session-\(Self.dayFormatter.string(from: timestamp)).log"
         )
 
-        queue.async { [directory] in
+        queue.async { [directory, retentionDays] in
             let fileManager = FileManager.default
             try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            Self.pruneExpiredLogs(
+                in: directory,
+                retentionDays: retentionDays,
+                referenceDate: timestamp,
+                fileManager: fileManager
+            )
             if fileManager.fileExists(atPath: fileURL.path) == false {
                 fileManager.createFile(atPath: fileURL.path, contents: nil)
             }
@@ -59,6 +69,41 @@ final class VoiceSessionLogFile {
             defer { try? handle.close() }
             _ = try? handle.seekToEnd()
             try? handle.write(contentsOf: Data(line.utf8))
+        }
+    }
+
+    func waitForPendingWrites() {
+        queue.sync {}
+    }
+
+    private static func pruneExpiredLogs(
+        in directory: URL,
+        retentionDays: Int,
+        referenceDate: Date,
+        fileManager: FileManager
+    ) {
+        guard retentionDays >= 0 else { return }
+        let expirationDate = referenceDate.addingTimeInterval(
+            -TimeInterval(retentionDays) * 24 * 60 * 60
+        )
+        let files = (try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        for file in files {
+            let name = file.lastPathComponent
+            guard name.hasPrefix("session-"), name.hasSuffix(".log"),
+                  let values = try? file.resourceValues(
+                    forKeys: [.contentModificationDateKey, .isRegularFileKey]
+                  ),
+                  values.isRegularFile == true,
+                  let modificationDate = values.contentModificationDate,
+                  modificationDate < expirationDate else {
+                continue
+            }
+            try? fileManager.removeItem(at: file)
         }
     }
 }

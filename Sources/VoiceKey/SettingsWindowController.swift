@@ -112,6 +112,7 @@ final class SettingsWindowController: NSWindowController {
         window.center()
 
         super.init(window: window)
+        window.delegate = self
 
         buildContent()
         rebuildProfilePopup()
@@ -140,6 +141,14 @@ final class SettingsWindowController: NSWindowController {
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    func beginHotKeyRecording() {
+        recorderView.beginRecording()
+    }
+
+    func cancelHotKeyRecording() {
+        recorderView.cancelRecording()
     }
 
     // MARK: - Layout
@@ -1148,6 +1157,16 @@ extension SettingsWindowController: NSTextFieldDelegate {
     }
 }
 
+extension SettingsWindowController: NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        cancelHotKeyRecording()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        cancelHotKeyRecording()
+    }
+}
+
 final class HotKeyRecorderView: NSView {
     var profileID: UUID?
 
@@ -1160,7 +1179,7 @@ final class HotKeyRecorderView: NSView {
     var onHotKeyRecorded: ((UUID, HotKeyConfiguration) -> Void)?
     var onRecordingStateChanged: ((Bool) -> Void)?
 
-    private var isRecording = false {
+    private(set) var isRecording = false {
         didSet {
             needsDisplay = true
             if isRecording != oldValue {
@@ -1185,17 +1204,25 @@ final class HotKeyRecorderView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        isRecording = true
+        beginRecording()
     }
 
     override func resignFirstResponder() -> Bool {
-        isRecording = false
+        cancelRecording()
         return super.resignFirstResponder()
+    }
+
+    func beginRecording() {
+        isRecording = true
+    }
+
+    func cancelRecording() {
+        isRecording = false
     }
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == UInt16(kVK_Escape) {
-            isRecording = false
+            cancelRecording()
             return
         }
 
@@ -1208,7 +1235,7 @@ final class HotKeyRecorderView: NSView {
             return
         }
 
-        isRecording = false
+        cancelRecording()
         hotKey = recordedHotKey
         guard let profileID = profileID else { return }
         onHotKeyRecorded?(profileID, recordedHotKey)

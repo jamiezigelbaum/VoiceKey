@@ -134,6 +134,56 @@ final class VoiceProfileRuntimeLifecycleTests: XCTestCase {
     }
 }
 
+final class SettingsHotKeyRecordingLifecycleTests: XCTestCase {
+    func testWindowCloseEndsRecordingAndRequestsHotKeyReregistration() {
+        let controller = SettingsWindowController(profiles: [VoiceProfile.defaultOpenAI()])
+        let delegate = RecordingSettingsDelegate()
+        controller.delegate = delegate
+
+        controller.beginHotKeyRecording()
+        controller.windowWillClose(Notification(name: NSWindow.willCloseNotification))
+
+        XCTAssertEqual(delegate.recordingStates, [true, false])
+    }
+
+    func testWindowResignKeyEndsRecordingAndRequestsHotKeyReregistration() {
+        let controller = SettingsWindowController(profiles: [VoiceProfile.defaultOpenAI()])
+        let delegate = RecordingSettingsDelegate()
+        controller.delegate = delegate
+
+        controller.beginHotKeyRecording()
+        controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification))
+
+        XCTAssertEqual(delegate.recordingStates, [true, false])
+    }
+}
+
+private final class RecordingSettingsDelegate: SettingsWindowControllerDelegate {
+    private(set) var recordingStates: [Bool] = []
+
+    func settingsController(
+        _ controller: SettingsWindowController,
+        didUpdateProfiles profiles: [VoiceProfile]
+    ) {}
+
+    func settingsController(
+        _ controller: SettingsWindowController,
+        didRecordHotKey hotKey: HotKeyConfiguration,
+        for profile: VoiceProfile
+    ) -> Bool {
+        true
+    }
+
+    func settingsControllerDidUpdateCredentials(_ controller: SettingsWindowController) {}
+
+    func settingsController(
+        _ controller: SettingsWindowController,
+        isRecordingHotKey: Bool
+    ) {
+        recordingStates.append(isRecordingHotKey)
+    }
+}
+
 private final class FakeRealtimeVoiceProvider: RealtimeVoiceProvider {
     enum Operation: Equatable {
         case stop

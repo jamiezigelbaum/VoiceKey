@@ -530,6 +530,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSettings() {
+        registerAllHotKeys()
         let controller = settingsWindowController ?? SettingsWindowController(profiles: profiles)
         controller.delegate = self
         controller.profiles = profiles
