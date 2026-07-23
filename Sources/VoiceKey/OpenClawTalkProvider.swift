@@ -940,11 +940,18 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
                 self?.handleFatalAudioFailure()
             }
         }
+        engine.setStateChangeHandler { [weak self] state in
+            self?.performOnStateQueue { [weak self] in
+                self?.adoptAudioEngineState(state)
+            }
+        }
+        audioEngineState = engine.stateSnapshot()
         instantiatedAudioEngine = engine
         return engine
     }
     private let webSocketFactory: OpenClawTalkWebSocketFactory
     private let watchdogScheduler: OpenClawTalkWatchdogScheduler
+    private let gateNow: () -> Date
     private var webSocket: OpenClawTalkWebSocket?
     private var handshakeWatchdog: OpenClawTalkWatchdogCancellation?
     private var handshakeWatchdogGeneration = 0
@@ -961,6 +968,9 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     private var isStopping = false
     private var isSpeaking = false
     private var hasCancelledOutput = false
+    private var audioEngineState: RealtimeAudioEngineState?
+    private var speakerGate = OpenAIRealtimeSpeakerGate()
+    private var hasReportedAECFallback = false
     private var hasReportedMicrophoneAudio = false
     private var hasReportedMicrophoneSignal = false
     private var endpointCandidates: [String] = []
@@ -998,7 +1008,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
                 execute: workItem
             )
             return workItem
-        }
+        },
+        gateNow: @escaping () -> Date = Date.init
     ) {
         self.configuration = configuration
         self.tokenProvider = tokenProvider
@@ -1006,6 +1017,7 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         self.deviceCredentialsProvider = deviceCredentialsProvider
         self.webSocketFactory = webSocketFactory
         self.watchdogScheduler = watchdogScheduler
+        self.gateNow = gateNow
         super.init()
         stateQueue.setSpecific(key: stateQueueKey, value: ())
     }
@@ -1037,7 +1049,10 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         withStateSync {
             self.configuration = configuration
             // The gateway owns the live session; endpoint changes apply next session.
-            guard isConnected == false else { return }
+            guard isConnected == false else {
+                refreshAudioEngineState()
+                return
+            }
             if isStarting || isConnecting {
                 emit(.status(.starting))
             } else {
@@ -1146,6 +1161,7 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
               isStarting,
               isStopping == false else { return }
 
+        resetSpeakerModeState()
         gatewayToken = token
         deviceCredentials = deviceCredentialsProvider()
         requestedScopesOverride = nil
@@ -1209,6 +1225,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         guard isAudioStreaming == false else { return }
         isAudioStreaming = true
         pendingAudio = Data()
+        audioEngine.refreshOutputRoute()
+        refreshAudioEngineState()
         do {
             try audioEngine.start(
                 inputHandler: { [weak self] audio in
@@ -1236,6 +1254,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
 
     private func queueMicrophoneAudio(_ audio: Data) {
         guard let sessionID, hasConnectedToGateway else { return }
+        refreshAudioEngineState()
+        guard speakerGate.isGateClosed(at: gateNow()) == false else { return }
         pendingAudio.append(audio)
         while pendingAudio.count >= Self.audioChunkByteCount {
             let chunk = pendingAudio.prefix(Self.audioChunkByteCount)
@@ -1259,18 +1279,24 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
             emit(.diagnostic(String(format: "Microphone input detected (peak %.3f).", activity.peak)))
         }
 
-        // Barge-in: local speech while the assistant is playing cancels gateway
-        // output. The gateway answers with a "clear" envelope, which flushes playback.
-        if isSpeaking,
-           hasCancelledOutput == false,
-           activity.peak >= 0.02,
-           let sessionID {
-            hasCancelledOutput = true
-            sendJSON(OpenClawTalkRequestBuilder.cancelOutputFrame(
-                id: nextRequestID(),
-                sessionID: sessionID
-            ))
-            emit(.diagnostic("User interrupted; cancelling OpenClaw output."))
+        refreshAudioEngineState()
+        if speakerGate.isSpeakerMode {
+            guard speakerGate.observe(activity, at: gateNow()) else { return }
+            interruptSpeakerModePlaybackIfNeeded()
+        } else {
+            speakerGate.resetActivity()
+            // Headphones keep the existing immediate barge-in behavior.
+            if isSpeaking,
+               hasCancelledOutput == false,
+               activity.peak >= 0.02,
+               let sessionID {
+                hasCancelledOutput = true
+                sendJSON(OpenClawTalkRequestBuilder.cancelOutputFrame(
+                    id: nextRequestID(),
+                    sessionID: sessionID
+                ))
+                emit(.diagnostic("User interrupted; cancelling OpenClaw output."))
+            }
         }
     }
 
@@ -1346,6 +1372,11 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
             case .sessionReady:
                 startAudioStreaming()
             case let .audio(audio):
+                if isSpeaking == false {
+                    hasCancelledOutput = false
+                    speakerGate.beginAssistantTurn()
+                    audioEngine.beginAssistantAudioTurn()
+                }
                 isSpeaking = true
                 audioEngine.playPCM16(audio)
             case .assistantTurnEnded:
@@ -1830,6 +1861,59 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         deviceCredentials = nil
         requestedScopesOverride = nil
         hasRetriedWithApprovedScopes = false
+        resetSpeakerModeState()
+    }
+
+    private func refreshAudioEngineState() {
+        adoptAudioEngineState(audioEngine.stateSnapshot())
+    }
+
+    private func adoptAudioEngineState(_ state: RealtimeAudioEngineState) {
+        audioEngineState = state
+        speakerGate.setSpeakerMode(effectiveSpeakerMode())
+        speakerGate.updatePlayback(isActive: state.isPlaybackActive, at: gateNow())
+
+        if state.isEchoCancellationActive {
+            hasReportedAECFallback = false
+        } else if hasReportedAECFallback == false {
+            hasReportedAECFallback = true
+            emit(.diagnostic(
+                "Echo cancellation is inactive; forcing speaker-mode microphone gating."
+            ))
+        }
+    }
+
+    private func effectiveSpeakerMode() -> Bool {
+        let state = audioEngineState ?? audioEngine.stateSnapshot()
+        return OpenAIRealtimeSpeakerModePolicy.isSpeakerMode(
+            route: state.outputRoute,
+            preference: configuration.speakerModePreference,
+            isEchoCancellationActive: state.isEchoCancellationActive
+        )
+    }
+
+    private func interruptSpeakerModePlaybackIfNeeded() {
+        // The gate also trips on assertive speech during the post-playback
+        // hangover. Once playback has drained, opening the mic is sufficient;
+        // asking the gateway to cancel would target output the user already heard.
+        guard audioEngineState?.isPlaybackActive == true,
+              hasCancelledOutput == false,
+              let sessionID else {
+            return
+        }
+        hasCancelledOutput = true
+        audioEngine.stopPlayback()
+        sendJSON(OpenClawTalkRequestBuilder.cancelOutputFrame(
+            id: nextRequestID(),
+            sessionID: sessionID
+        ))
+        emit(.diagnostic("User interrupted; cancelling OpenClaw output."))
+    }
+
+    private func resetSpeakerModeState() {
+        audioEngineState = nil
+        speakerGate = OpenAIRealtimeSpeakerGate()
+        hasReportedAECFallback = false
     }
 
     private func nextRequestID() -> String {
