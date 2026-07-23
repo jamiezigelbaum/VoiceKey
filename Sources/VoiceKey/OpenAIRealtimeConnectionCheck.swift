@@ -54,6 +54,7 @@ final class OpenAIRealtimeConnectionCheck: NSObject {
         self.completion = completion
 
         guard let request = OpenAIRealtimeRequestBuilder.webSocketRequest(
+            baseURL: OpenAIRealtimeRequestBuilder.normalizedBaseURL(for: configuration.endpointURL),
             apiKey: apiKey,
             configuration: configuration
         ) else {

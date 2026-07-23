@@ -1,7 +1,19 @@
 import Foundation
 
+/// Pure decision behind `toggleVoice()`: any live session state — including a
+/// session that is only streaming audio — must toggle to a full stop, never to
+/// a second start that would abandon the running audio engine.
+enum VoiceToggleDecision: Equatable {
+    case start
+    case stop
+
+    static func decide(isStarting: Bool, isConnecting: Bool, isConnected: Bool, isAudioStreaming: Bool) -> VoiceToggleDecision {
+        isStarting || isConnecting || isConnected || isAudioStreaming ? .stop : .start
+    }
+}
+
 final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
-    let id: VoiceProviderID = .openAIRealtime
+    var id: VoiceProviderID { configuration.providerID }
     let capabilities = VoiceProviderCapabilities(
         supportsSpeechToSpeech: true,
         supportsTextInput: true,
@@ -40,7 +52,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     }
 
     func prepare() {
-        guard apiKeyProvider()?.isEmpty == false else {
+        guard requiresAPIKey == false || apiKeyProvider()?.isEmpty == false else {
             emit(.status(.needsAttention("Add an OpenAI API key in Settings.")))
             return
         }
@@ -59,9 +71,15 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     }
 
     func toggleVoice() {
-        if isStarting || isConnecting || isConnected {
+        switch VoiceToggleDecision.decide(
+            isStarting: isStarting,
+            isConnecting: isConnecting,
+            isConnected: isConnected,
+            isAudioStreaming: isAudioStreaming
+        ) {
+        case .stop:
             stopVoice()
-        } else {
+        case .start:
             startVoice()
         }
     }
@@ -88,7 +106,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     }
 
     private func startVoice() {
-        guard let apiKey = apiKeyProvider(), apiKey.isEmpty == false else {
+        let apiKey = apiKeyProvider() ?? ""
+        guard requiresAPIKey == false || apiKey.isEmpty == false else {
             emit(.status(.needsAttention("Add an OpenAI API key in Settings.")))
             return
         }
@@ -113,12 +132,17 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         }
     }
 
+    private var requiresAPIKey: Bool {
+        configuration.providerID.requiresAPIKey
+    }
+
     private func connect(apiKey: String, generation: Int) {
         guard startGeneration == generation,
               isStarting,
               isStopping == false else { return }
 
         guard let request = OpenAIRealtimeRequestBuilder.webSocketRequest(
+            baseURL: OpenAIRealtimeRequestBuilder.normalizedBaseURL(for: configuration.endpointURL),
             apiKey: apiKey,
             configuration: configuration
         ) else {
@@ -147,6 +171,15 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
                     self?.handleInputActivity(activity)
                 }
             )
+            // stopVoice() runs on the main thread while this runs on the URLSession
+            // delegate queue. If a stop landed while the engine was starting, the
+            // engine may be running for a session that no longer exists — tear it
+            // down instead of leaking the microphone.
+            guard isConnected, isStopping == false else {
+                isAudioStreaming = false
+                audioEngine.stop()
+                return
+            }
             emit(.status(.listening))
         } catch {
             audioEngine.stop()
@@ -252,7 +285,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
 
 extension OpenAIRealtimeProvider: VoiceProviderConnectionChecking {
     func checkConnection() {
-        guard let apiKey = apiKeyProvider(), apiKey.isEmpty == false else {
+        let apiKey = apiKeyProvider() ?? ""
+        guard requiresAPIKey == false || apiKey.isEmpty == false else {
             emit(.status(.needsAttention("Add an OpenAI API key in Settings.")))
             return
         }

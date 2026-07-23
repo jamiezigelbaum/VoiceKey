@@ -1,15 +1,45 @@
 import Foundation
 
 enum OpenAIRealtimeRequestBuilder {
-    static func webSocketRequest(apiKey: String, configuration: VoiceSessionConfiguration) -> URLRequest? {
-        var components = URLComponents(string: "wss://api.openai.com/v1/realtime")
-        components?.queryItems = [
+    static let defaultBaseURL = "wss://api.openai.com/v1/realtime"
+
+    static func normalizedBaseURL(for endpointURL: String) -> String {
+        let trimmed = endpointURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return defaultBaseURL }
+
+        var normalized = trimmed
+        let lowercased = normalized.lowercased()
+        if lowercased.hasPrefix("https://") {
+            normalized = "wss://" + normalized.dropFirst("https://".count)
+        } else if lowercased.hasPrefix("http://") {
+            normalized = "ws://" + normalized.dropFirst("http://".count)
+        }
+
+        if var components = URLComponents(string: normalized),
+           components.path.isEmpty || components.path == "/" {
+            components.path = "/v1/realtime"
+            normalized = components.string ?? normalized
+        }
+
+        return normalized
+    }
+
+    static func webSocketRequest(
+        baseURL: String = defaultBaseURL,
+        apiKey: String,
+        configuration: VoiceSessionConfiguration
+    ) -> URLRequest? {
+        var components = URLComponents(string: baseURL)
+        let existingQueryItems = components?.queryItems ?? []
+        components?.queryItems = existingQueryItems + [
             URLQueryItem(name: "model", value: configuration.model)
         ]
         guard let url = components?.url else { return nil }
 
         var request = URLRequest(url: url)
-        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if apiKey.isEmpty == false {
+            request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.timeoutInterval = 30
         return request
     }

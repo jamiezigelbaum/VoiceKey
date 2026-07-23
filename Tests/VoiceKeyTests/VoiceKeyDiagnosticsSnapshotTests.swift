@@ -13,8 +13,7 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
             provider: .openAIRealtime,
             configuration: configuration,
             readiness: .ready,
-            hotKey: .defaultVoiceToggle,
-            hotKeyRegistrationStatus: "Carbon registered; event monitor fallback active",
+            hotKeys: ["OpenAI: F16 (Carbon registered)"],
             currentStatus: .listening,
             hasAPIKey: true,
             supportsProviderInterface: false,
@@ -33,8 +32,7 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
             API key: stored
             Model: gpt-realtime-2
             Voice: marin
-            Hotkey: F16
-            Hotkey registration: Carbon registered; event monitor fallback active
+            Hotkey: OpenAI: F16 (Carbon registered)
             Status: Listening
             Provider window: no
             Connection check: yes
@@ -50,8 +48,7 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
             provider: .openAIRealtime,
             configuration: VoiceProviderID.openAIRealtime.defaultConfiguration,
             readiness: .needsAPIKey("OpenAI API key required."),
-            hotKey: .defaultVoiceToggle,
-            hotKeyRegistrationStatus: "Carbon registered; event monitor fallback active",
+            hotKeys: ["OpenAI: F16 (Carbon registered)"],
             currentStatus: .needsAttention("OpenAI API key required."),
             hasAPIKey: false,
             supportsProviderInterface: false,
@@ -69,8 +66,7 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
             provider: .chatGPTWeb,
             configuration: VoiceProviderID.chatGPTWeb.defaultConfiguration,
             readiness: .providerSignIn("Uses provider sign-in."),
-            hotKey: .defaultVoiceToggle,
-            hotKeyRegistrationStatus: "Carbon registered; event monitor fallback active",
+            hotKeys: ["OpenAI: F16 (Carbon registered)"],
             currentStatus: .ready,
             hasAPIKey: false,
             supportsProviderInterface: true,

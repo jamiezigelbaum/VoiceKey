@@ -4,8 +4,7 @@ struct VoiceKeyDiagnosticsSnapshot {
     var provider: VoiceProviderID
     var configuration: VoiceSessionConfiguration
     var readiness: VoiceProviderReadiness
-    var hotKey: HotKeyConfiguration
-    var hotKeyRegistrationStatus: String
+    var hotKeys: [String]
     var currentStatus: ProviderStatus
     var hasAPIKey: Bool
     var supportsProviderInterface: Bool
@@ -13,7 +12,7 @@ struct VoiceKeyDiagnosticsSnapshot {
     var hasSessionLog: Bool
 
     var displayText: String {
-        [
+        var lines = [
             "VoiceKey Diagnostics",
             "Provider: \(provider.displayName)",
             "Provider ID: \(provider.rawValue)",
@@ -21,14 +20,23 @@ struct VoiceKeyDiagnosticsSnapshot {
             "Readiness: \(readinessTitle)",
             "API key: \(apiKeyStatus)",
             "Model: \(configuration.model)",
-            "Voice: \(configuration.voice)",
-            "Hotkey: \(hotKey.displayName)",
-            "Hotkey registration: \(hotKeyRegistrationStatus)",
+            "Voice: \(configuration.voice)"
+        ]
+        if configuration.endpointURL.isEmpty == false {
+            lines.append("Endpoint: \(configuration.endpointURL)")
+        }
+        if hotKeys.isEmpty {
+            lines.append("Hotkeys: none")
+        } else {
+            lines += hotKeys.map { "Hotkey: \($0)" }
+        }
+        lines += [
             "Status: \(statusTitle)",
             "Provider window: \(yesNo(supportsProviderInterface))",
             "Connection check: \(yesNo(supportsConnectionCheck))",
             "Session log has entries: \(yesNo(hasSessionLog))"
-        ].joined(separator: "\n")
+        ]
+        return lines.joined(separator: "\n")
     }
 
     private var readinessTitle: String {

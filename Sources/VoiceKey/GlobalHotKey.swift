@@ -10,12 +10,12 @@ final class GlobalHotKey {
     private var eventHandler: EventHandlerRef?
     private let callback: () -> Void
 
-    init(keyCode: UInt32, modifiers: UInt32, callback: @escaping () -> Void) throws {
-        self.callback = callback
+    init?(id: UInt32, configuration: HotKeyConfiguration, handler: @escaping () -> Void) {
+        self.callback = handler
 
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let selfPointer = Unmanaged.passUnretained(self).toOpaque()
-        let handler: EventHandlerUPP = { _, event, userData in
+        let eventHandlerCallback: EventHandlerUPP = { _, event, userData in
             guard let userData else { return noErr }
             let hotKey = Unmanaged<GlobalHotKey>.fromOpaque(userData).takeUnretainedValue()
             DispatchQueue.main.async {
@@ -26,28 +26,28 @@ final class GlobalHotKey {
 
         let handlerStatus = InstallEventHandler(
             GetApplicationEventTarget(),
-            handler,
+            eventHandlerCallback,
             1,
             &eventType,
             selfPointer,
             &eventHandler
         )
         guard handlerStatus == noErr else {
-            throw HotKeyError.registrationFailed(handlerStatus)
+            return nil
         }
 
         let signature = FourCharCode("VKEY")
-        let hotKeyID = EventHotKeyID(signature: signature, id: 1)
+        let hotKeyID = EventHotKeyID(signature: signature, id: id)
         let hotKeyStatus = RegisterEventHotKey(
-            keyCode,
-            modifiers,
+            configuration.keyCode,
+            configuration.carbonModifiers,
             hotKeyID,
             GetApplicationEventTarget(),
             0,
             &hotKeyRef
         )
         guard hotKeyStatus == noErr else {
-            throw HotKeyError.registrationFailed(hotKeyStatus)
+            return nil
         }
     }
 

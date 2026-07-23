@@ -11,6 +11,20 @@ enum VoiceProviderFactory {
                 configuration: configuration,
                 apiKeyProvider: { apiKeyStore.apiKey(for: .openAIRealtime) }
             )
+        case .custom:
+            return OpenAIRealtimeProvider(
+                configuration: configuration,
+                apiKeyProvider: { apiKeyStore.apiKey(for: .custom) }
+            )
+        case .openClaw:
+            return OpenClawTalkProvider(
+                configuration: configuration,
+                tokenProvider: {
+                    OpenClawTokenResolver.resolveGatewayToken(
+                        apiKeyProvider: { apiKeyStore.apiKey(for: .openClaw) }
+                    )
+                }
+            )
         case .chatGPTWeb:
             return ChatGPTWebProvider()
         case .geminiLive:

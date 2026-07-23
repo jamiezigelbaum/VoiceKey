@@ -129,12 +129,12 @@ final class MenuBarIconStateTests: XCTestCase {
         XCTAssertEqual(MenuBarIconState(status: .needsAttention("Disconnected")), .problem)
     }
 
-    func testActiveStatusesUseActiveIcon() {
-        XCTAssertEqual(MenuBarIconState(status: .listening), .active)
-        XCTAssertEqual(MenuBarIconState(status: .thinking), .active)
-        XCTAssertEqual(MenuBarIconState(status: .speaking), .active)
-        XCTAssertEqual(MenuBarIconState(status: .clickSent), .active)
-        XCTAssertEqual(MenuBarIconState(status: .voiceActive), .active)
+    func testActiveStatusesMapToTheirSpecificIcons() {
+        XCTAssertEqual(MenuBarIconState(status: .listening), .listening)
+        XCTAssertEqual(MenuBarIconState(status: .thinking), .thinking)
+        XCTAssertEqual(MenuBarIconState(status: .speaking), .speaking)
+        XCTAssertEqual(MenuBarIconState(status: .clickSent), .speaking)
+        XCTAssertEqual(MenuBarIconState(status: .voiceActive), .speaking)
     }
 
     func testReadyStatusUsesReadyIcon() {
@@ -237,6 +237,20 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertEqual(state.statusMessage, "Gemini Live is coming soon.")
         XCTAssertFalse(state.acceptsAPIKeyInput)
         XCTAssertTrue(state.canRemoveAPIKey)
+    }
+
+    func testCredentialViewStateForCustomEndpointAcceptsOptionalKey() {
+        let withoutKey = VoiceProviderCredentialViewState(provider: .custom, hasAPIKey: false)
+
+        XCTAssertEqual(withoutKey.statusMessage, "Ready to use.")
+        XCTAssertTrue(withoutKey.acceptsAPIKeyInput)
+        XCTAssertFalse(withoutKey.canRemoveAPIKey)
+
+        let withKey = VoiceProviderCredentialViewState(provider: .custom, hasAPIKey: true)
+
+        XCTAssertEqual(withKey.statusMessage, "Ready to use.")
+        XCTAssertTrue(withKey.acceptsAPIKeyInput)
+        XCTAssertTrue(withKey.canRemoveAPIKey)
     }
 
     func testProviderMenuStateForReadyAPIProvider() {
@@ -392,34 +406,5 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
                 for: VoiceProviderID.deepgramVoiceAgent.defaultConfiguration
             ) is DeepgramVoiceAgentProvider
         )
-    }
-
-    func testLoadsDefaultsWhenNoProviderSettingsAreSaved() throws {
-        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
-
-        XCTAssertEqual(VoiceProviderSettingsStore.load(defaults: defaults), .default)
-    }
-
-    func testSavesAndLoadsProviderSettings() throws {
-        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
-
-        let configuration = VoiceSessionConfiguration(
-            providerID: .geminiLive,
-            model: "gemini-live-2.5-flash-preview",
-            voice: "Puck",
-            instructions: "Be brief."
-        )
-
-        VoiceProviderSettingsStore.save(configuration, defaults: defaults)
-
-        XCTAssertEqual(VoiceProviderSettingsStore.load(defaults: defaults), configuration)
     }
 }

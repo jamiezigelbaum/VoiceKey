@@ -1,7 +1,7 @@
 import AppKit
 import Carbon
 
-struct HotKeyConfiguration {
+struct HotKeyConfiguration: Equatable, Codable {
     let keyCode: UInt32
     let carbonModifiers: UInt32
     let menuKeyEquivalent: String
@@ -104,6 +104,37 @@ struct HotKeyConfiguration {
             displayName: "\(modifierDisplayName)\(keyDescription.mainKeyDisplayName)",
             mainKeyDisplayName: keyDescription.mainKeyDisplayName
         )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case keyCode
+        case carbonModifiers
+        case menuKeyEquivalent
+        case menuModifierMask
+        case displayName
+        case mainKeyDisplayName
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            keyCode: try container.decode(UInt32.self, forKey: .keyCode),
+            carbonModifiers: try container.decode(UInt32.self, forKey: .carbonModifiers),
+            menuKeyEquivalent: try container.decode(String.self, forKey: .menuKeyEquivalent),
+            menuModifierMask: NSEvent.ModifierFlags(rawValue: try container.decode(UInt.self, forKey: .menuModifierMask)),
+            displayName: try container.decode(String.self, forKey: .displayName),
+            mainKeyDisplayName: try container.decode(String.self, forKey: .mainKeyDisplayName)
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(keyCode, forKey: .keyCode)
+        try container.encode(carbonModifiers, forKey: .carbonModifiers)
+        try container.encode(menuKeyEquivalent, forKey: .menuKeyEquivalent)
+        try container.encode(menuModifierMask.rawValue, forKey: .menuModifierMask)
+        try container.encode(displayName, forKey: .displayName)
+        try container.encode(mainKeyDisplayName, forKey: .mainKeyDisplayName)
     }
 
     var iconDisplayName: String {

@@ -22,7 +22,10 @@ final class APIKeyStore {
     }
 
     func apiKey(for provider: VoiceProviderID) -> String? {
-        guard provider.requiresAPIKey else { return nil }
+        // ChatGPT Web authenticates through the provider's web sign-in and never uses a
+        // stored key. Every other provider — including custom endpoints, where the key
+        // is an optional bearer token — reads its key from the Keychain.
+        guard provider != .chatGPTWeb else { return nil }
 
         var query = baseQuery(for: provider)
         query[kSecReturnData as String] = true

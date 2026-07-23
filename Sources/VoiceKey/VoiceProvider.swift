@@ -1,10 +1,12 @@
 import Foundation
 
-enum VoiceProviderID: String, CaseIterable, Equatable {
+enum VoiceProviderID: String, CaseIterable, Codable, Equatable {
     case openAIRealtime = "openai-realtime"
     case chatGPTWeb = "chatgpt-web"
     case geminiLive = "gemini-live"
     case deepgramVoiceAgent = "deepgram-voice-agent"
+    case custom = "custom"
+    case openClaw = "openClaw"
 
     var displayName: String {
         switch self {
@@ -16,12 +18,16 @@ enum VoiceProviderID: String, CaseIterable, Equatable {
             return "Gemini Live"
         case .deepgramVoiceAgent:
             return "Deepgram Voice Agent"
+        case .custom:
+            return "Custom Realtime Endpoint"
+        case .openClaw:
+            return "OpenClaw Talk"
         }
     }
 
     var isImplemented: Bool {
         switch self {
-        case .openAIRealtime, .chatGPTWeb:
+        case .openAIRealtime, .chatGPTWeb, .custom, .openClaw:
             return true
         case .geminiLive, .deepgramVoiceAgent:
             return false
@@ -32,7 +38,7 @@ enum VoiceProviderID: String, CaseIterable, Equatable {
         switch self {
         case .openAIRealtime, .geminiLive, .deepgramVoiceAgent:
             return true
-        case .chatGPTWeb:
+        case .chatGPTWeb, .custom, .openClaw:
             return false
         }
     }
@@ -47,24 +53,60 @@ enum VoiceProviderID: String, CaseIterable, Equatable {
             return "Gemini API key"
         case .deepgramVoiceAgent:
             return "Deepgram API key"
+        case .custom:
+            return "API Key (optional)"
+        case .openClaw:
+            return "Gateway Token (optional)"
         }
     }
 
     var credentialPlaceholder: String {
-        requiresAPIKey ? "Stored in macOS Keychain" : "Use Show Provider to sign in"
+        switch self {
+        case .chatGPTWeb:
+            return "Use Show Provider to sign in"
+        case .openAIRealtime, .geminiLive, .deepgramVoiceAgent, .custom, .openClaw:
+            return "Stored in macOS Keychain"
+        }
     }
 
     var supportsModelSetting: Bool {
-        self != .chatGPTWeb
+        self != .chatGPTWeb && self != .openClaw
     }
 
     var supportsVoiceSetting: Bool {
-        self != .chatGPTWeb
+        self != .chatGPTWeb && self != .openClaw
+    }
+
+    var supportsEndpointSetting: Bool {
+        switch self {
+        case .openAIRealtime, .custom, .openClaw:
+            return true
+        case .chatGPTWeb, .geminiLive, .deepgramVoiceAgent:
+            return false
+        }
+    }
+
+    var endpointPlaceholder: String {
+        switch self {
+        case .openClaw:
+            return "ws://127.0.0.1:18790 (auto)"
+        case .openAIRealtime, .chatGPTWeb, .geminiLive, .deepgramVoiceAgent, .custom:
+            return "wss://localhost:8080"
+        }
+    }
+
+    var usesRealtimeWebSocket: Bool {
+        switch self {
+        case .openAIRealtime, .custom:
+            return true
+        case .chatGPTWeb, .geminiLive, .deepgramVoiceAgent, .openClaw:
+            return false
+        }
     }
 
     var defaultModel: String {
         switch self {
-        case .openAIRealtime:
+        case .openAIRealtime, .custom:
             return "gpt-realtime-2"
         case .chatGPTWeb:
             return "chatgpt.com"
@@ -72,12 +114,15 @@ enum VoiceProviderID: String, CaseIterable, Equatable {
             return "gemini-live-2.5-flash-preview"
         case .deepgramVoiceAgent:
             return "deepgram-voice-agent"
+        case .openClaw:
+            // The gateway owns model configuration.
+            return ""
         }
     }
 
     var defaultVoice: String {
         switch self {
-        case .openAIRealtime:
+        case .openAIRealtime, .custom:
             return "marin"
         case .chatGPTWeb:
             return "Configured in ChatGPT"
@@ -85,6 +130,9 @@ enum VoiceProviderID: String, CaseIterable, Equatable {
             return "Puck"
         case .deepgramVoiceAgent:
             return "aura-2-thalia-en"
+        case .openClaw:
+            // The gateway owns voice configuration.
+            return ""
         }
     }
 
@@ -98,6 +146,8 @@ enum VoiceProviderID: String, CaseIterable, Equatable {
             return ["Puck"]
         case .deepgramVoiceAgent:
             return ["aura-2-thalia-en"]
+        case .custom, .openClaw:
+            return []
         }
     }
 
@@ -113,6 +163,11 @@ enum VoiceProviderID: String, CaseIterable, Equatable {
     func readiness(hasAPIKey: Bool) -> VoiceProviderReadiness {
         guard isImplemented else {
             return .unavailable("\(displayName) is coming soon.")
+        }
+        // Custom endpoints and OpenClaw resolve credentials at connect time (optional
+        // key, plus gateway token file discovery for OpenClaw), so they always pass.
+        guard self != .custom, self != .openClaw else {
+            return .ready
         }
         guard requiresAPIKey else {
             return .providerSignIn("Uses provider sign-in.")
@@ -178,8 +233,10 @@ struct VoiceProviderCredentialViewState: Equatable {
 
     init(provider: VoiceProviderID, hasAPIKey: Bool) {
         statusMessage = provider.readiness(hasAPIKey: hasAPIKey).settingsMessage
-        acceptsAPIKeyInput = provider.requiresAPIKey && provider.isImplemented
-        canRemoveAPIKey = provider.requiresAPIKey && hasAPIKey
+        // ChatGPT Web signs in through the provider's web UI. All other providers can
+        // edit a stored key; for custom endpoints the key is optional.
+        acceptsAPIKeyInput = provider.isImplemented && provider != .chatGPTWeb
+        canRemoveAPIKey = provider != .chatGPTWeb && hasAPIKey
     }
 }
 
@@ -268,6 +325,7 @@ struct VoiceSessionConfiguration: Equatable {
     var model: String
     var voice: String
     var instructions: String
+    var endpointURL: String = ""
 
     static let defaultInstructions = "You are VoiceKey, a concise and helpful voice assistant. Speak naturally and keep answers brief unless the user asks for detail."
 
@@ -302,38 +360,4 @@ protocol VoiceProviderConnectionChecking: AnyObject {
 extension RealtimeVoiceProvider {
     func showProviderInterface() {}
     func reloadProviderInterface() {}
-}
-
-enum VoiceProviderSettingsStore {
-    private static let providerKey = "VoiceProvider.providerID"
-    private static let modelKey = "VoiceProvider.model"
-    private static let voiceKey = "VoiceProvider.voice"
-    private static let instructionsKey = "VoiceProvider.instructions"
-
-    static func load(defaults: UserDefaults = .standard) -> VoiceSessionConfiguration {
-        var configuration = VoiceSessionConfiguration.default
-
-        if let rawProvider = defaults.string(forKey: providerKey),
-           let provider = VoiceProviderID(rawValue: rawProvider) {
-            configuration.providerID = provider
-        }
-        if let model = defaults.string(forKey: modelKey), model.isEmpty == false {
-            configuration.model = model
-        }
-        if let voice = defaults.string(forKey: voiceKey), voice.isEmpty == false {
-            configuration.voice = voice
-        }
-        if let instructions = defaults.string(forKey: instructionsKey), instructions.isEmpty == false {
-            configuration.instructions = instructions
-        }
-
-        return configuration
-    }
-
-    static func save(_ configuration: VoiceSessionConfiguration, defaults: UserDefaults = .standard) {
-        defaults.set(configuration.providerID.rawValue, forKey: providerKey)
-        defaults.set(configuration.model, forKey: modelKey)
-        defaults.set(configuration.voice, forKey: voiceKey)
-        defaults.set(configuration.instructions, forKey: instructionsKey)
-    }
 }
