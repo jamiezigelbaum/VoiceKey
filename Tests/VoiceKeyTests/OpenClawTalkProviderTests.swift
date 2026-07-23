@@ -122,6 +122,48 @@ final class OpenClawTalkProviderTests: XCTestCase {
         XCTAssertEqual(params["reason"] as? String, "user-interrupted")
     }
 
+    func testClientToolCallFrameMatchesGatewayContract() throws {
+        let frame = try XCTUnwrap(OpenClawTalkRequestBuilder.clientToolCallFrame(
+            id: "9",
+            relaySessionID: "relay-1",
+            toolCall: OpenClawTalkToolCall(
+                name: "openclaw_agent_consult",
+                callID: "call-1",
+                argumentsJSON: #"{"question":"What now?"}"#
+            )
+        ))
+
+        XCTAssertEqual(frame["type"] as? String, "req")
+        XCTAssertEqual(frame["id"] as? String, "9")
+        XCTAssertEqual(frame["method"] as? String, "talk.client.toolCall")
+        let params = try dictionary(frame["params"])
+        XCTAssertEqual(params["sessionKey"] as? String, "agent:main:voicekey")
+        XCTAssertEqual(params["voiceSessionId"] as? String, "relay-1")
+        XCTAssertEqual(params["relaySessionId"] as? String, "relay-1")
+        XCTAssertEqual(params["callId"] as? String, "call-1")
+        XCTAssertEqual(params["name"] as? String, "openclaw_agent_consult")
+        XCTAssertEqual(try dictionary(params["args"])["question"] as? String, "What now?")
+    }
+
+    func testSubmitToolResultFrameMatchesGatewayContract() throws {
+        let frame = OpenClawTalkRequestBuilder.submitToolResultFrame(
+            id: "10",
+            sessionID: "session-1",
+            callID: "call-1",
+            result: ["result": "All systems green."],
+            options: ["willContinue": true]
+        )
+
+        XCTAssertEqual(frame["type"] as? String, "req")
+        XCTAssertEqual(frame["id"] as? String, "10")
+        XCTAssertEqual(frame["method"] as? String, "talk.session.submitToolResult")
+        let params = try dictionary(frame["params"])
+        XCTAssertEqual(params["sessionId"] as? String, "session-1")
+        XCTAssertEqual(params["callId"] as? String, "call-1")
+        XCTAssertEqual(try dictionary(params["result"])["result"] as? String, "All systems green.")
+        XCTAssertEqual(try dictionary(params["options"])["willContinue"] as? Bool, true)
+    }
+
     func testCloseFrameShape() throws {
         let frame = OpenClawTalkRequestBuilder.closeFrame(id: "9", sessionID: "session-1")
 
@@ -219,17 +261,20 @@ final class OpenClawTalkProviderTests: XCTestCase {
         )
     }
 
-    func testAppendAudioAckIsIgnored() {
+    func testRequestAckMapsForPendingRequestCorrelation() {
         let frame = #"{"type":"res","id":"7","ok":true,"payload":{"ok":true}}"#
-        XCTAssertEqual(OpenClawTalkEventMapper.actions(from: frame, sessionID: "session-1"), [])
+        XCTAssertEqual(
+            OpenClawTalkEventMapper.actions(from: frame, sessionID: "session-1"),
+            [.requestSucceeded(id: "7", runID: nil)]
+        )
     }
 
-    func testAppendAudioErrorMapsToDiagnostic() {
+    func testRequestErrorMapsForPendingRequestCorrelation() {
         let frame = #"{"type":"res","id":"7","ok":false,"error":{"code":"bad-audio","message":"Audio rejected."}}"#
 
         XCTAssertEqual(
             OpenClawTalkEventMapper.actions(from: frame, sessionID: "session-1"),
-            [.providerEvent(.diagnostic("OpenClaw request 7 failed: Audio rejected."))]
+            [.requestFailed(id: "7", message: "Audio rejected.")]
         )
     }
 
@@ -357,17 +402,56 @@ final class OpenClawTalkProviderTests: XCTestCase {
         )
     }
 
-    func testToolEnvelopesMapToDiagnostic() {
-        let frame = talkEventFrame(#"{"relaySessionId":"session-1","type":"toolCall","talkEvent":{"type":"tool.call","payload":{"name":"search"}}}"#)
+    func testToolEnvelopeMapsFullToolCallAndNamedDiagnostic() {
+        let frame = talkEventFrame(#"{"relaySessionId":"session-1","type":"toolCall","callId":"call-1","name":"openclaw_agent_consult","args":"{\"question\":\"status?\"}","talkEvent":{"type":"tool.call","payload":{}}}"#)
 
         XCTAssertEqual(
             OpenClawTalkEventMapper.actions(from: frame, sessionID: "session-1"),
-            [.providerEvent(.diagnostic("talk.event.toolCall"))]
+            [
+                .toolCall(OpenClawTalkToolCall(
+                    name: "openclaw_agent_consult",
+                    callID: "call-1",
+                    argumentsJSON: #"{"question":"status?"}"#
+                )),
+                .providerEvent(.diagnostic(
+                    "OpenClaw tool call 'openclaw_agent_consult' received."
+                ))
+            ]
+        )
+    }
+
+    func testMalformedToolEnvelopeMapsToSecretFreeDiagnosticAction() {
+        let frame = talkEventFrame(#"{"relaySessionId":"session-1","type":"toolCall","name":"openclaw_agent_consult","args":{"token":"must-not-appear"}}"#)
+
+        XCTAssertEqual(
+            OpenClawTalkEventMapper.actions(from: frame, sessionID: "session-1"),
+            [
+                .malformedToolCall(
+                    callID: nil,
+                    reason: "OpenClaw tool call 'openclaw_agent_consult' omitted its call id."
+                )
+            ]
+        )
+    }
+
+    func testChatLifecycleMapsRunConclusion() {
+        let frame = #"{"type":"event","event":"chat","payload":{"runId":"run-1","state":"final","message":{"content":[{"type":"text","text":"All systems green."}]}}}"#
+
+        XCTAssertEqual(
+            OpenClawTalkEventMapper.actions(from: frame, sessionID: "session-1"),
+            [
+                .chatLifecycle(
+                    runID: "run-1",
+                    state: "final",
+                    text: "All systems green.",
+                    errorMessage: nil
+                )
+            ]
         )
     }
 
     func testNonTalkEventFramesAreIgnored() {
-        for event in ["health", "tick", "agent", "chat", "heartbeat"] {
+        for event in ["health", "tick", "agent", "heartbeat"] {
             let frame = #"{"type":"event","event":"\#(event)","payload":{}}"#
             XCTAssertEqual(OpenClawTalkEventMapper.actions(from: frame, sessionID: "session-1"), [])
         }

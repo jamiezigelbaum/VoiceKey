@@ -226,6 +226,378 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
         XCTAssertEqual(socket.sentMethodCount("talk.session.cancelOutput"), 2)
     }
 
+    func testConsultHappyPathRoundTripKeepsSessionLive() throws {
+        let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
+        let audioEngine = LifecycleAudioEngine()
+        let watchdogs = ManualWatchdogScheduler()
+        let provider = makeProvider(
+            audioEngine: audioEngine,
+            sockets: [socket],
+            watchdogs: watchdogs
+        )
+
+        let ready = expectation(description: "session ready")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            ready.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [ready], timeout: 1)
+
+        let thinking = expectation(description: "consult thinking")
+        provider.onEvent = { event in
+            guard case .status(.thinking) = event else { return }
+            thinking.fulfill()
+        }
+        socket.push(text: toolCallEnvelope(
+            callID: "call-1",
+            arguments: #"{"question":"status?"}"#
+        ))
+        wait(for: [thinking], timeout: 1)
+        waitForStateQueue()
+
+        let clientFrame = try XCTUnwrap(socket.sentFrames.last {
+            $0["method"] as? String == "talk.client.toolCall"
+        })
+        let clientParams = try XCTUnwrap(clientFrame["params"] as? [String: Any])
+        XCTAssertEqual(clientParams["sessionKey"] as? String, "agent:main:voicekey")
+        XCTAssertEqual(clientParams["voiceSessionId"] as? String, "relay-1")
+        XCTAssertEqual(clientParams["relaySessionId"] as? String, "relay-1")
+        XCTAssertEqual(clientParams["callId"] as? String, "call-1")
+        XCTAssertEqual(clientParams["name"] as? String, "openclaw_agent_consult")
+        XCTAssertEqual(
+            (clientParams["args"] as? [String: Any])?["question"] as? String,
+            "status?"
+        )
+
+        let clientRequestID = try XCTUnwrap(clientFrame["id"] as? String)
+        socket.push(text: successfulResponse(id: clientRequestID, payload: #"{"runId":"run-1"}"#))
+        waitForStateQueue()
+
+        let submitted = expectation(description: "tool result submitted")
+        socket.onSentMethod = { method, count in
+            if method == "talk.session.submitToolResult", count == 1 {
+                submitted.fulfill()
+            }
+        }
+        socket.push(text: chatLifecycle(
+            runID: "run-1",
+            state: "final",
+            message: #"{"text":"All systems green."}"#
+        ))
+        wait(for: [submitted], timeout: 1)
+
+        let submitFrame = try XCTUnwrap(socket.sentFrames.last {
+            $0["method"] as? String == "talk.session.submitToolResult"
+        })
+        let submitParams = try XCTUnwrap(submitFrame["params"] as? [String: Any])
+        XCTAssertEqual(submitParams["sessionId"] as? String, "session-1")
+        XCTAssertEqual(submitParams["callId"] as? String, "call-1")
+        XCTAssertEqual(
+            (submitParams["result"] as? [String: Any])?["result"] as? String,
+            "All systems green."
+        )
+
+        let listening = expectation(description: "listening after submit resolves")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            listening.fulfill()
+        }
+        let submitRequestID = try XCTUnwrap(submitFrame["id"] as? String)
+        socket.push(text: successfulResponse(id: submitRequestID))
+        wait(for: [listening], timeout: 1)
+
+        let speaking = expectation(description: "session remains live")
+        provider.onEvent = { event in
+            guard case .status(.speaking) = event else { return }
+            speaking.fulfill()
+        }
+        socket.push(text: audioEnvelope(byte: 0x04))
+        wait(for: [speaking], timeout: 1)
+        XCTAssertEqual(socket.cancelCount, 0)
+        XCTAssertEqual(socket.invalidateCount, 0)
+        XCTAssertEqual(audioEngine.startCount, 1)
+    }
+
+    func testConsultTimeoutSubmitsFailureWithoutNeedsAttention() throws {
+        let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
+        let watchdogs = ManualWatchdogScheduler()
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            sockets: [socket],
+            watchdogs: watchdogs
+        )
+
+        let ready = expectation(description: "session ready")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            ready.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [ready], timeout: 1)
+
+        let clientRequest = expectation(description: "consult request sent")
+        socket.onSentMethod = { method, count in
+            if method == "talk.client.toolCall", count == 1 {
+                clientRequest.fulfill()
+            }
+        }
+        socket.push(text: toolCallEnvelope(callID: "call-timeout"))
+        wait(for: [clientRequest], timeout: 1)
+
+        let clientFrame = try XCTUnwrap(socket.sentFrames.last {
+            $0["method"] as? String == "talk.client.toolCall"
+        })
+        socket.push(text: successfulResponse(
+            id: try XCTUnwrap(clientFrame["id"] as? String),
+            payload: #"{"runId":"run-timeout"}"#
+        ))
+        waitForStateQueue()
+        XCTAssertEqual(watchdogs.scheduledDelays.last, 60)
+
+        let timedOut = expectation(description: "timeout diagnostic")
+        let submitted = expectation(description: "timeout result submitted")
+        let unexpectedAttention = expectation(description: "no attention status")
+        unexpectedAttention.isInverted = true
+        provider.onEvent = { event in
+            switch event {
+            case let .diagnostic(message) where message.contains("consult timed out"):
+                timedOut.fulfill()
+            case .status(.needsAttention):
+                unexpectedAttention.fulfill()
+            default:
+                break
+            }
+        }
+        socket.onSentMethod = { method, count in
+            if method == "talk.session.submitToolResult", count == 1 {
+                submitted.fulfill()
+            }
+        }
+        XCTAssertTrue(watchdogs.fireNextActive())
+        wait(for: [timedOut, submitted], timeout: 1)
+
+        let submitFrame = try XCTUnwrap(socket.sentFrames.last {
+            $0["method"] as? String == "talk.session.submitToolResult"
+        })
+        let submitParams = try XCTUnwrap(submitFrame["params"] as? [String: Any])
+        XCTAssertEqual(submitParams["sessionId"] as? String, "session-1")
+        XCTAssertEqual(submitParams["callId"] as? String, "call-timeout")
+        XCTAssertEqual(
+            (submitParams["result"] as? [String: Any])?["error"] as? String,
+            "OpenClaw consult timed out."
+        )
+
+        let listening = expectation(description: "listening after timeout result resolves")
+        provider.onEvent = { event in
+            switch event {
+            case .status(.listening):
+                listening.fulfill()
+            case .status(.needsAttention):
+                unexpectedAttention.fulfill()
+            default:
+                break
+            }
+        }
+        socket.push(text: successfulResponse(id: try XCTUnwrap(submitFrame["id"] as? String)))
+        wait(for: [listening], timeout: 1)
+        wait(for: [unexpectedAttention], timeout: 0.1)
+        XCTAssertEqual(socket.cancelCount, 0)
+    }
+
+    func testMalformedToolCallEmitsDiagnosticAndKeepsSessionLive() {
+        let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            sockets: [socket],
+            watchdogs: ManualWatchdogScheduler()
+        )
+
+        let ready = expectation(description: "session ready")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            ready.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [ready], timeout: 1)
+
+        let malformed = expectation(description: "malformed diagnostic")
+        let unexpectedAttention = expectation(description: "no attention status")
+        unexpectedAttention.isInverted = true
+        provider.onEvent = { event in
+            switch event {
+            case let .diagnostic(message) where message.contains("omitted its call id"):
+                XCTAssertFalse(message.contains("must-not-appear"))
+                malformed.fulfill()
+            case .status(.needsAttention):
+                unexpectedAttention.fulfill()
+            default:
+                break
+            }
+        }
+        socket.push(text: """
+            {"type":"event","event":"talk.event","payload":{"relaySessionId":"relay-1",\
+            "type":"toolCall","name":"openclaw_agent_consult",\
+            "args":{"token":"must-not-appear"}}}
+            """)
+        wait(for: [malformed], timeout: 1)
+        wait(for: [unexpectedAttention], timeout: 0.1)
+
+        XCTAssertEqual(socket.sentMethodCount("talk.client.toolCall"), 0)
+        XCTAssertEqual(socket.sentMethodCount("talk.session.submitToolResult"), 0)
+        XCTAssertEqual(socket.cancelCount, 0)
+        XCTAssertEqual(socket.invalidateCount, 0)
+    }
+
+    func testOverlappingToolCallIsRejectedWithoutCorruptingActiveConsult() throws {
+        let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            sockets: [socket],
+            watchdogs: ManualWatchdogScheduler()
+        )
+
+        let ready = expectation(description: "session ready")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            ready.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [ready], timeout: 1)
+
+        socket.push(text: toolCallEnvelope(callID: "call-1"))
+        waitForStateQueue()
+        let firstClientFrame = try XCTUnwrap(socket.sentFrames.last {
+            $0["method"] as? String == "talk.client.toolCall"
+        })
+        socket.push(text: successfulResponse(
+            id: try XCTUnwrap(firstClientFrame["id"] as? String),
+            payload: #"{"runId":"run-1"}"#
+        ))
+        waitForStateQueue()
+
+        let rejected = expectation(description: "overlap rejected")
+        let rejectionSubmitted = expectation(description: "overlap result submitted")
+        provider.onEvent = { event in
+            guard case let .diagnostic(message) = event,
+                  message.contains("overlapping") else { return }
+            rejected.fulfill()
+        }
+        socket.onSentMethod = { method, count in
+            if method == "talk.session.submitToolResult", count == 1 {
+                rejectionSubmitted.fulfill()
+            }
+        }
+        socket.push(text: toolCallEnvelope(callID: "call-2"))
+        wait(for: [rejected, rejectionSubmitted], timeout: 1)
+
+        XCTAssertEqual(socket.sentMethodCount("talk.client.toolCall"), 1)
+        let rejectionFrame = try XCTUnwrap(socket.sentFrames.last {
+            $0["method"] as? String == "talk.session.submitToolResult"
+        })
+        let rejectionParams = try XCTUnwrap(rejectionFrame["params"] as? [String: Any])
+        XCTAssertEqual(rejectionParams["callId"] as? String, "call-2")
+        XCTAssertEqual(
+            (rejectionParams["result"] as? [String: Any])?["error"] as? String,
+            "Another OpenClaw consult is already in progress."
+        )
+        socket.push(text: successfulResponse(
+            id: try XCTUnwrap(rejectionFrame["id"] as? String)
+        ))
+        waitForStateQueue()
+
+        let firstSubmitted = expectation(description: "original consult result submitted")
+        socket.onSentMethod = { method, count in
+            if method == "talk.session.submitToolResult", count == 2 {
+                firstSubmitted.fulfill()
+            }
+        }
+        socket.push(text: chatLifecycle(
+            runID: "run-1",
+            state: "final",
+            message: #"{"text":"Original consult completed."}"#
+        ))
+        wait(for: [firstSubmitted], timeout: 1)
+
+        let firstSubmitFrame = try XCTUnwrap(socket.sentFrames.last {
+            $0["method"] as? String == "talk.session.submitToolResult"
+        })
+        let firstSubmitParams = try XCTUnwrap(firstSubmitFrame["params"] as? [String: Any])
+        XCTAssertEqual(firstSubmitParams["callId"] as? String, "call-1")
+        XCTAssertEqual(
+            (firstSubmitParams["result"] as? [String: Any])?["result"] as? String,
+            "Original consult completed."
+        )
+
+        let listening = expectation(description: "original consult completes")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            listening.fulfill()
+        }
+        socket.push(text: successfulResponse(
+            id: try XCTUnwrap(firstSubmitFrame["id"] as? String)
+        ))
+        wait(for: [listening], timeout: 1)
+        XCTAssertEqual(socket.cancelCount, 0)
+    }
+
+    func testVoiceConfirmationMarkerRelaysToTranscriptAndProviderResult() throws {
+        let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            sockets: [socket],
+            watchdogs: ManualWatchdogScheduler()
+        )
+
+        let ready = expectation(description: "session ready")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            ready.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [ready], timeout: 1)
+
+        socket.push(text: toolCallEnvelope(callID: "call-confirm"))
+        waitForStateQueue()
+        let clientFrame = try XCTUnwrap(socket.sentFrames.last {
+            $0["method"] as? String == "talk.client.toolCall"
+        })
+        socket.push(text: successfulResponse(
+            id: try XCTUnwrap(clientFrame["id"] as? String),
+            payload: #"{"runId":"run-confirm"}"#
+        ))
+        waitForStateQueue()
+
+        let transcript = expectation(description: "confirmation transcript")
+        let diagnostic = expectation(description: "confirmation diagnostic")
+        provider.onEvent = { event in
+            switch event {
+            case .transcript("VOICE_CONFIRMATION_REQUIRED:confirm-123"):
+                transcript.fulfill()
+            case let .diagnostic(message) where message.contains("requires voice confirmation"):
+                diagnostic.fulfill()
+            default:
+                break
+            }
+        }
+        socket.push(text: chatLifecycle(
+            runID: "run-confirm",
+            state: "final",
+            message: #"{"text":"VOICE_CONFIRMATION_REQUIRED:confirm-123"}"#
+        ))
+        wait(for: [transcript, diagnostic], timeout: 1)
+        waitForStateQueue()
+
+        let submitFrame = try XCTUnwrap(socket.sentFrames.last {
+            $0["method"] as? String == "talk.session.submitToolResult"
+        })
+        let submitParams = try XCTUnwrap(submitFrame["params"] as? [String: Any])
+        XCTAssertEqual(
+            (submitParams["result"] as? [String: Any])?["result"] as? String,
+            "VOICE_CONFIRMATION_REQUIRED:confirm-123"
+        )
+    }
+
     private func makeProvider(
         audioEngine: LifecycleAudioEngine,
         sockets: [ScriptedOpenClawWebSocket],
@@ -304,6 +676,29 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
         {"type":"event","event":"talk.event","payload":{"relaySessionId":"relay-1",\
         "type":"audioDone"}}
         """
+    }
+
+    private func toolCallEnvelope(
+        callID: String,
+        arguments: String = #"{"question":"What now?"}"#
+    ) -> String {
+        """
+        {"type":"event","event":"talk.event","payload":{"relaySessionId":"relay-1",\
+        "type":"toolCall","callId":"\(callID)","name":"openclaw_agent_consult",\
+        "args":\(arguments)}}
+        """
+    }
+
+    private func successfulResponse(id: String, payload: String = #"{"ok":true}"#) -> String {
+        #"{"type":"res","id":"\#(id)","ok":true,"payload":\#(payload)}"#
+    }
+
+    private func chatLifecycle(runID: String, state: String, message: String? = nil) -> String {
+        let messageField = message.map { #","message":\#($0)"# } ?? ""
+        return """
+            {"type":"event","event":"chat","payload":{"runId":"\(runID)",\
+            "state":"\(state)"\(messageField)}}
+            """
     }
 
     private func waitForStateQueue() {
@@ -515,6 +910,11 @@ private final class LifecycleAudioEngine: RealtimeAudioEngineProtocol {
 private final class ManualWatchdogScheduler {
     private let lock = NSLock()
     private var tasks: [ManualWatchdogTask] = []
+    private var delays: [TimeInterval] = []
+
+    var scheduledDelays: [TimeInterval] {
+        lock.withLock { delays }
+    }
 
     func schedule(
         after delay: TimeInterval,
@@ -523,6 +923,7 @@ private final class ManualWatchdogScheduler {
         let task = ManualWatchdogTask(action: action)
         lock.withLock {
             tasks.append(task)
+            delays.append(delay)
         }
         return task
     }
