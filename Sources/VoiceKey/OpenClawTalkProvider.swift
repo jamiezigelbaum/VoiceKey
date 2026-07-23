@@ -930,6 +930,11 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
             return instantiatedAudioEngine
         }
         let engine = audioEngineFactory()
+        engine.setFatalFailureHandler { [weak self] in
+            self?.performOnStateQueue { [weak self] in
+                self?.handleFatalAudioFailure()
+            }
+        }
         instantiatedAudioEngine = engine
         return engine
     }
@@ -967,6 +972,9 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     /// for the reconnect (requesting more re-triggers the pairing prompt).
     private var requestedScopesOverride: [String]?
     private var hasRetriedWithApprovedScopes = false
+
+    private static let fatalAudioFailureMessage =
+        "Microphone audio stopped after repeated audio device failures. Start the voice session again."
 
     init(
         configuration: VoiceSessionConfiguration,
@@ -1259,6 +1267,13 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
             ))
             emit(.diagnostic("User interrupted; cancelling OpenClaw output."))
         }
+    }
+
+    private func handleFatalAudioFailure() {
+        guard isAudioStreaming else { return }
+        isAudioStreaming = false
+        teardownConnection()
+        emit(.status(.needsAttention(Self.fatalAudioFailureMessage)))
     }
 
     // MARK: - Receiving

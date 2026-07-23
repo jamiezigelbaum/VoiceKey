@@ -68,3 +68,46 @@ final class VoiceSessionLogTests: XCTestCase {
         XCTAssertTrue(log.isEmpty)
     }
 }
+
+final class VoiceSessionLogFileTests: XCTestCase {
+    func testAppendDeletesOnlyExpiredSessionLogFiles() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VoiceSessionLogFileTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let referenceDate = Date(timeIntervalSince1970: 1_800_000_000)
+        let expiredLog = directory.appendingPathComponent("session-expired.log")
+        let retainedLog = directory.appendingPathComponent("session-recent.log")
+        let unrelatedFile = directory.appendingPathComponent("diagnostics.log")
+        try Data("old session".utf8).write(to: expiredLog)
+        try Data("recent session".utf8).write(to: retainedLog)
+        try Data("unrelated".utf8).write(to: unrelatedFile)
+        try FileManager.default.setAttributes(
+            [.modificationDate: referenceDate.addingTimeInterval(-15 * 24 * 60 * 60)],
+            ofItemAtPath: expiredLog.path
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: referenceDate.addingTimeInterval(-13 * 24 * 60 * 60)],
+            ofItemAtPath: retainedLog.path
+        )
+        try FileManager.default.setAttributes(
+            [.modificationDate: referenceDate.addingTimeInterval(-30 * 24 * 60 * 60)],
+            ofItemAtPath: unrelatedFile.path
+        )
+
+        let logFile = VoiceSessionLogFile(directory: directory, retentionDays: 14)
+        logFile.append(
+            .diagnostic("retention check"),
+            provider: .openAIRealtime,
+            timestamp: referenceDate
+        )
+        logFile.waitForPendingWrites()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: expiredLog.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: retainedLog.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelatedFile.path))
+    }
+}

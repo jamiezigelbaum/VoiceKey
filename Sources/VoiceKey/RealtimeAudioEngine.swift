@@ -23,6 +23,7 @@ enum RealtimeAudioEngineError: LocalizedError {
 }
 
 protocol RealtimeAudioEngineProtocol: AnyObject {
+    func setFatalFailureHandler(_ handler: (() -> Void)?)
     func requestMicrophoneAccess(_ completion: @escaping (Bool) -> Void)
     func start(
         inputHandler: @escaping (Data) -> Void,
@@ -31,6 +32,10 @@ protocol RealtimeAudioEngineProtocol: AnyObject {
     func stop()
     func stopPlayback()
     func playPCM16(_ data: Data)
+}
+
+extension RealtimeAudioEngineProtocol {
+    func setFatalFailureHandler(_ handler: (() -> Void)?) {}
 }
 
 struct RealtimeAudioInputActivity: Equatable {
@@ -58,6 +63,7 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     private var configurationObserver: NSObjectProtocol?
     private var rebuildWorkItem: DispatchWorkItem?
     private var rebuildAttempts = 0
+    private var onFatalFailure: (() -> Void)?
     private(set) var isEchoCancellationActive = false
 
     private static let rebuildDebounce: TimeInterval = 0.4
@@ -73,13 +79,19 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     init() {
         queue.setSpecific(key: queueKey, value: ())
         onQueue {
-            self.buildEngine()
+            try? self.buildEngine()
         }
     }
 
     deinit {
         if let configurationObserver {
             NotificationCenter.default.removeObserver(configurationObserver)
+        }
+    }
+
+    func setFatalFailureHandler(_ handler: (() -> Void)?) {
+        onQueue {
+            self.onFatalFailure = handler
         }
     }
 
@@ -165,16 +177,31 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     // enabling VP first fails engine start with kAUInitialize (-10875) —
     // and the input tap must be installed BEFORE the engine starts or the
     // tap can deliver silence.
-    private func buildEngine() {
-        engine.attach(playerNode)
-        engine.connect(playerNode, to: engine.mainMixerNode, format: realtimeFormat)
-        configureVoiceProcessing()
+    private func buildEngine() throws {
+        try shielded("build playback graph") {
+            self.engine.attach(self.playerNode)
+            self.engine.connect(
+                self.playerNode,
+                to: self.engine.mainMixerNode,
+                format: self.realtimeFormat
+            )
+        }
+        try configureVoiceProcessing()
         observeConfigurationChanges(of: engine)
     }
 
-    private func configureVoiceProcessing() {
-        let inputNode = engine.inputNode
-        let outputNode = engine.outputNode
+    private func configureVoiceProcessing() throws {
+        var inputNode: AVAudioInputNode?
+        var outputNode: AVAudioOutputNode?
+        try shielded("acquire voice processing nodes") {
+            inputNode = self.engine.inputNode
+            outputNode = self.engine.outputNode
+        }
+        guard let inputNode, let outputNode else {
+            throw RealtimeAudioEngineError.audioSystemFailure(
+                "acquire voice processing nodes: unavailable"
+            )
+        }
         do {
             try shielded("enable voice processing") {
                 try inputNode.setVoiceProcessingEnabled(true)
@@ -207,8 +234,16 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     }
 
     private func startCapture() throws {
-        let inputNode = engine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
+        var inputNode: AVAudioInputNode?
+        var inputFormat: AVAudioFormat?
+        try shielded("read microphone format") {
+            let node = self.engine.inputNode
+            inputNode = node
+            inputFormat = node.outputFormat(forBus: 0)
+        }
+        guard let inputNode, let inputFormat else {
+            throw RealtimeAudioEngineError.missingInputFormat
+        }
         guard inputFormat.channelCount > 0, inputFormat.sampleRate > 0 else {
             throw RealtimeAudioEngineError.missingInputFormat
         }
@@ -250,13 +285,37 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     }
 
     private func teardownEngine() {
-        _ = VKCatchObjCException {
-            self.engine.inputNode.removeTap(onBus: 0)
-            self.playerNode.stop()
-            self.engine.stop()
-        }
+        Self.performTeardown(
+            removeTap: {
+                self.engine.inputNode.removeTap(onBus: 0)
+            },
+            stopPlayback: {
+                self.playerNode.stop()
+            },
+            stopEngine: {
+                self.engine.stop()
+            },
+            shield: shielded
+        )
         inputConverter = nil
         inputConverterSourceFormat = nil
+    }
+
+    static func performTeardown(
+        removeTap: @escaping () throws -> Void,
+        stopPlayback: @escaping () throws -> Void,
+        stopEngine: @escaping () throws -> Void,
+        shield: (String, () throws -> Void) throws -> Void
+    ) {
+        try? shield("remove microphone tap") {
+            try removeTap()
+        }
+        try? shield("stop audio playback") {
+            try stopPlayback()
+        }
+        try? shield("stop audio engine") {
+            try stopEngine()
+        }
     }
 
     /// A device switch (e.g. connecting AirPods) invalidates the engine's
@@ -283,9 +342,8 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
 
         engine = AVAudioEngine()
         playerNode = AVAudioPlayerNode()
-        buildEngine()
-
         do {
+            try buildEngine()
             try startCapture()
             rebuildAttempts = 0
         } catch {
@@ -297,6 +355,8 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
                 isInputStreaming = false
                 storedInputHandler = nil
                 storedActivityHandler = nil
+                teardownEngine()
+                onFatalFailure?()
             }
         }
     }

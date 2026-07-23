@@ -33,6 +33,39 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
         XCTAssertEqual(auth["deviceToken"] as? String, "device-token")
     }
 
+    func testFatalAudioFailureStopsSessionAndSurfacesNeedsAttention() {
+        let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
+        let audioEngine = LifecycleAudioEngine()
+        let watchdogs = ManualWatchdogScheduler()
+        let provider = makeProvider(
+            audioEngine: audioEngine,
+            sockets: [socket],
+            watchdogs: watchdogs
+        )
+        let listening = expectation(description: "session ready")
+        let failure = expectation(description: "fatal audio failure surfaced")
+        provider.onEvent = { event in
+            switch event {
+            case .status(.listening):
+                listening.fulfill()
+            case let .status(.needsAttention(message))
+                where message.contains("Microphone audio stopped"):
+                failure.fulfill()
+            default:
+                break
+            }
+        }
+
+        provider.toggleVoice()
+        wait(for: [listening], timeout: 1)
+        audioEngine.triggerFatalFailure()
+
+        wait(for: [failure], timeout: 1)
+        XCTAssertEqual(audioEngine.stopCount, 1)
+        XCTAssertEqual(socket.cancelCount, 1)
+        XCTAssertEqual(socket.invalidateCount, 1)
+    }
+
     func testSilentCandidateWatchdogFallsBackToNextEndpoint() {
         let silentSocket = ScriptedOpenClawWebSocket()
         let fallbackSocket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
@@ -865,6 +898,7 @@ private final class ScriptedOpenClawWebSocket: OpenClawTalkWebSocket {
 private final class LifecycleAudioEngine: RealtimeAudioEngineProtocol {
     private let lock = NSLock()
     private var activityHandler: ((RealtimeAudioInputActivity) -> Void)?
+    private var fatalFailureHandler: (() -> Void)?
     private var _startCount = 0
     private var _stopCount = 0
 
@@ -874,6 +908,12 @@ private final class LifecycleAudioEngine: RealtimeAudioEngineProtocol {
 
     var stopCount: Int {
         lock.withLock { _stopCount }
+    }
+
+    func setFatalFailureHandler(_ handler: (() -> Void)?) {
+        lock.withLock {
+            fatalFailureHandler = handler
+        }
     }
 
     func requestMicrophoneAccess(_ completion: @escaping (Bool) -> Void) {
@@ -904,6 +944,11 @@ private final class LifecycleAudioEngine: RealtimeAudioEngineProtocol {
     func emitActivity(peak: Float) {
         let handler = lock.withLock { activityHandler }
         handler?(RealtimeAudioInputActivity(rms: peak, peak: peak))
+    }
+
+    func triggerFatalFailure() {
+        let handler = lock.withLock { fatalFailureHandler }
+        handler?()
     }
 }
 

@@ -45,8 +45,17 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     private var configuration: VoiceSessionConfiguration
     private let apiKeyProvider: () -> String?
     private let audioEngineProvider: () -> RealtimeAudioEngineProtocol
-    private lazy var audioEngine = audioEngineProvider()
+    private lazy var audioEngine: RealtimeAudioEngineProtocol = {
+        let engine = audioEngineProvider()
+        engine.setFatalFailureHandler { [weak self] in
+            self?.asyncOnStateQueue { [weak self] in
+                self?.handleFatalAudioFailure()
+            }
+        }
+        return engine
+    }()
     private let webSocketTaskFactory: ((URLRequest) -> OpenAIRealtimeWebSocketTaskProtocol)?
+    private let now: () -> Date
     private let stateQueue = DispatchQueue(label: "VoiceKey.OpenAIRealtimeProvider")
     private let stateQueueKey = DispatchSpecificKey<UInt8>()
     private lazy var urlSession = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
@@ -61,12 +70,17 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     private var isStopping = false
     private var hasReportedMicrophoneAudio = false
     private var hasReportedMicrophoneSignal = false
+    private var sessionStart: Date?
+
+    private static let fatalAudioFailureMessage =
+        "Microphone audio stopped after repeated audio device failures. Start the voice session again."
 
     init(
         configuration: VoiceSessionConfiguration,
         apiKeyProvider: @escaping () -> String?,
         audioEngine: RealtimeAudioEngineProtocol? = nil,
-        webSocketTaskFactory: ((URLRequest) -> OpenAIRealtimeWebSocketTaskProtocol)? = nil
+        webSocketTaskFactory: ((URLRequest) -> OpenAIRealtimeWebSocketTaskProtocol)? = nil,
+        now: @escaping () -> Date = Date.init
     ) {
         self.configuration = configuration
         self.apiKeyProvider = apiKeyProvider
@@ -76,6 +90,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             self.audioEngineProvider = { RealtimeAudioEngine() }
         }
         self.webSocketTaskFactory = webSocketTaskFactory
+        self.now = now
         super.init()
         stateQueue.setSpecific(key: stateQueueKey, value: 1)
     }
@@ -145,6 +160,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         self.webSocketTask = nil
         activeModel = nil
+        sessionStart = nil
         isStarting = false
         isConnecting = false
         isConnected = false
@@ -206,6 +222,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         let task = webSocketTaskFactory?(request) ?? urlSession.webSocketTask(with: request)
         webSocketTask = task
         activeModel = configuration.model
+        sessionStart = now()
         isStarting = false
         isConnecting = true
         task.resume()
@@ -239,6 +256,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             webSocketTask?.cancel(with: .normalClosure, reason: nil)
             webSocketTask = nil
             activeModel = nil
+            sessionStart = nil
             isConnecting = false
             isConnected = false
             isAudioStreaming = false
@@ -258,6 +276,13 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         }
     }
 
+    private func handleFatalAudioFailure() {
+        guard isAudioStreaming else { return }
+        isAudioStreaming = false
+        stopVoiceOnStateQueue()
+        emit(.status(.needsAttention(Self.fatalAudioFailureMessage)))
+    }
+
     private func sendSessionUpdate(includeModel: Bool = true) {
         var sessionConfiguration = configuration
         if includeModel, let activeModel {
@@ -265,7 +290,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         }
         sendJSON(OpenAIRealtimeRequestBuilder.sessionUpdateEvent(
             configuration: sessionConfiguration,
-            includeModel: includeModel
+            includeModel: includeModel,
+            sessionStart: sessionStart ?? now()
         ))
     }
 
@@ -291,6 +317,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
                 case let .failure(error):
                     self.webSocketTask = nil
                     self.activeModel = nil
+                    self.sessionStart = nil
                     self.isConnecting = false
                     self.isConnected = false
                     self.isAudioStreaming = false
@@ -446,6 +473,7 @@ extension OpenAIRealtimeProvider: URLSessionWebSocketDelegate {
                   isStopping == false else { return }
             self.webSocketTask = nil
             activeModel = nil
+            sessionStart = nil
             isConnecting = false
             isConnected = false
             isAudioStreaming = false

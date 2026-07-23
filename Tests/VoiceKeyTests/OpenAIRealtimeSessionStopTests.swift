@@ -211,6 +211,78 @@ final class OpenAIRealtimeSessionStopTests: XCTestCase {
         XCTAssertEqual(nextModel, "next-session-model")
     }
 
+    func testLiveConfigurationUpdateKeepsOriginalSessionStart() throws {
+        let audioEngine = FakeRealtimeAudioEngine(grantsMicrophoneAccess: true)
+        let task = FakeRealtimeWebSocketTask()
+        let startDate = Date(timeIntervalSince1970: 1_790_000_000)
+        var nowCallCount = 0
+        let provider = OpenAIRealtimeProvider(
+            configuration: testConfiguration,
+            apiKeyProvider: { "test-api-key" },
+            audioEngine: audioEngine,
+            webSocketTaskFactory: { _ in task },
+            now: {
+                nowCallCount += 1
+                return startDate.addingTimeInterval(TimeInterval(nowCallCount - 1) * 3_600)
+            }
+        )
+
+        provider.toggleVoice()
+        provider.webSocketDidOpen(task)
+        provider.update(configuration: VoiceSessionConfiguration(
+            providerID: .openAIRealtime,
+            model: "unchanged-until-next-session",
+            voice: "updated-voice",
+            instructions: "Updated instructions."
+        ))
+
+        let initialSession = try sessionDictionary(from: task.sentText(at: 0))
+        let updatedSession = try sessionDictionary(from: task.sentText(at: 1))
+        let initialInstructions = try XCTUnwrap(initialSession["instructions"] as? String)
+        let updatedInstructions = try XCTUnwrap(updatedSession["instructions"] as? String)
+        let initialStamp = try XCTUnwrap(initialInstructions.components(separatedBy: "\n\n").last)
+        let updatedStamp = try XCTUnwrap(updatedInstructions.components(separatedBy: "\n\n").last)
+
+        XCTAssertEqual(initialStamp, updatedStamp)
+        XCTAssertEqual(nowCallCount, 1)
+    }
+
+    func testFatalAudioFailureStopsSessionAndSurfacesNeedsAttention() {
+        let audioEngine = FakeRealtimeAudioEngine(grantsMicrophoneAccess: true)
+        let task = FakeRealtimeWebSocketTask()
+        let provider = OpenAIRealtimeProvider(
+            configuration: testConfiguration,
+            apiKeyProvider: { "test-api-key" },
+            audioEngine: audioEngine,
+            webSocketTaskFactory: { _ in task }
+        )
+        let listening = expectation(description: "Audio streaming started")
+        let failure = expectation(description: "Fatal audio failure surfaced")
+        provider.onEvent = { event in
+            switch event {
+            case .status(.listening):
+                listening.fulfill()
+            case let .status(.needsAttention(message))
+                where message.contains("Microphone audio stopped"):
+                failure.fulfill()
+            default:
+                break
+            }
+        }
+
+        provider.toggleVoice()
+        provider.webSocketDidOpen(task)
+        task.completeReceive(.success(.string(#"{"type":"session.updated"}"#)))
+        wait(for: [listening], timeout: 1)
+        XCTAssertEqual(audioEngine.startCount, 1)
+
+        audioEngine.triggerFatalFailure()
+
+        wait(for: [failure], timeout: 1)
+        XCTAssertEqual(audioEngine.stopCount, 1)
+        XCTAssertEqual(task.cancelCount, 1)
+    }
+
     private func makeProvider(audioEngine: FakeRealtimeAudioEngine) -> OpenAIRealtimeProvider {
         OpenAIRealtimeProvider(
             configuration: testConfiguration,
@@ -240,9 +312,14 @@ private final class FakeRealtimeAudioEngine: RealtimeAudioEngineProtocol {
     private(set) var microphoneAccessRequestCount = 0
     private(set) var stopCount = 0
     private(set) var startCount = 0
+    private var fatalFailureHandler: (() -> Void)?
 
     init(grantsMicrophoneAccess: Bool = false) {
         self.grantsMicrophoneAccess = grantsMicrophoneAccess
+    }
+
+    func setFatalFailureHandler(_ handler: (() -> Void)?) {
+        fatalFailureHandler = handler
     }
 
     func requestMicrophoneAccess(_ completion: @escaping (Bool) -> Void) {
@@ -266,6 +343,10 @@ private final class FakeRealtimeAudioEngine: RealtimeAudioEngineProtocol {
     func stopPlayback() {}
 
     func playPCM16(_ data: Data) {}
+
+    func triggerFatalFailure() {
+        fatalFailureHandler?()
+    }
 }
 
 private final class FakeRealtimeWebSocketTask: OpenAIRealtimeWebSocketTaskProtocol {
