@@ -91,6 +91,46 @@ final class OpenAIRealtimeEventMapperTests: XCTestCase {
         )
     }
 
+    func testMCPListToolsCompletedMapsToServerAndToolDiagnostic() {
+        let event = #"{"type":"mcp_list_tools.completed","server_label":"calendar","tools":[{"name":"search_events"}],"authorization":"must-not-log"}"#
+
+        XCTAssertEqual(
+            OpenAIRealtimeEventMapper.actions(from: event),
+            [
+                .providerEvent(.diagnostic(
+                    "MCP mcp_list_tools.completed — server: calendar; tool: search_events."
+                ))
+            ]
+        )
+    }
+
+    func testMCPCallInProgressMapsToDiagnosticAndThinking() {
+        let event = #"{"type":"response.mcp_call.in_progress","item":{"server_label":"calendar","name":"create_event","authorization":"must-not-log"}}"#
+
+        XCTAssertEqual(
+            OpenAIRealtimeEventMapper.actions(from: event),
+            [
+                .providerEvent(.diagnostic(
+                    "MCP response.mcp_call.in_progress — server: calendar; tool: create_event."
+                )),
+                .providerEvent(.status(.thinking))
+            ]
+        )
+    }
+
+    func testMCPCallCompletedMapsToDiagnosticOnly() {
+        let event = #"{"type":"response.mcp_call.completed","server_label":"calendar","tool_name":"create_event"}"#
+
+        XCTAssertEqual(
+            OpenAIRealtimeEventMapper.actions(from: event),
+            [
+                .providerEvent(.diagnostic(
+                    "MCP response.mcp_call.completed — server: calendar; tool: create_event."
+                ))
+            ]
+        )
+    }
+
     func testUnknownEventMapsToDiagnostic() {
         XCTAssertEqual(
             OpenAIRealtimeEventMapper.actions(from: #"{"type":"rate_limits.updated"}"#),

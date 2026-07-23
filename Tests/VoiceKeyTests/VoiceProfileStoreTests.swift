@@ -19,7 +19,15 @@ final class VoiceProfileStoreTests: XCTestCase {
                 model: "gpt-realtime-2",
                 voice: "marin",
                 instructions: "Be brief.",
-                endpointURL: ""
+                endpointURL: "",
+                mcpServers: [
+                    MCPServerConfiguration(
+                        id: UUID(uuidString: "B7E32B7D-1B12-497A-9F2C-C7837D5E758A")!,
+                        label: "calendar",
+                        urlString: "https://mcp.example.com/calendar",
+                        allowedTools: ["search_events", "create_event"]
+                    )
+                ]
             ),
             VoiceProfile(
                 name: "Self-hosted",
@@ -36,6 +44,35 @@ final class VoiceProfileStoreTests: XCTestCase {
 
         XCTAssertEqual(VoiceProfileStore.load(defaults: defaults), profiles)
         XCTAssertFalse(VoiceProfileStore.isFreshInstall(defaults: defaults))
+    }
+
+    func testLegacySavedProfileWithoutMCPServersDecodesWithEmptyList() throws {
+        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let profileID = UUID()
+        let legacyProfile: [[String: Any]] = [[
+            "id": profileID.uuidString,
+            "name": "Legacy",
+            "providerID": VoiceProviderID.openAIRealtime.rawValue,
+            "model": "gpt-realtime-2",
+            "voice": "marin",
+            "instructions": "Be brief.",
+            "endpointURL": ""
+        ]]
+        defaults.set(
+            try JSONSerialization.data(withJSONObject: legacyProfile),
+            forKey: "VoiceProfiles.v1"
+        )
+
+        let profiles = VoiceProfileStore.load(defaults: defaults)
+
+        XCTAssertEqual(profiles.count, 1)
+        XCTAssertEqual(profiles[0].id, profileID)
+        XCTAssertEqual(profiles[0].mcpServers, [])
     }
 
     func testFreshInstallSeedsDefaultOpenAIProfile() throws {

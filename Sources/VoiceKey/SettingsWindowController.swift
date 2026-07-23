@@ -48,6 +48,8 @@ final class SettingsWindowController: NSWindowController {
     private var workingProfiles: [VoiceProfile]
     private var selectedProfileID: UUID
     private var providerSettingsCache: VoiceProfileProviderSettingsCache
+    private var pendingMCPAuthorizationValues: [UUID: String] = [:]
+    private var pendingMCPAuthorizationDeletions: Set<UUID> = []
 
     /// The profiles under edit. The app delegate pushes its authoritative list whenever the
     /// settings window opens; setting this replaces the working copy and refreshes the form.
@@ -77,6 +79,11 @@ final class SettingsWindowController: NSWindowController {
     private let apiKeyField = NSSecureTextField()
     private let removeAPIKeyButton = NSButton(title: "Remove Key", target: nil, action: nil)
     private let credentialStatusLabel = NSTextField(labelWithString: "")
+    private let mcpServerPopup = NSPopUpButton()
+    private let addMCPServerButton = NSButton(title: "Add", target: nil, action: nil)
+    private let editMCPServerButton = NSButton(title: "Edit", target: nil, action: nil)
+    private let removeMCPServerButton = NSButton(title: "Remove", target: nil, action: nil)
+    private var mcpSectionViews: [NSView] = []
     private let instructionsScrollView = NSScrollView()
     private let instructionsTextView = NSTextView()
     private let tipLabel = NSTextField(wrappingLabelWithString: "If the voice hears phrases you did not say, use headphones — speaker audio feeding back into the microphone causes phantom turns.")
@@ -164,6 +171,7 @@ final class SettingsWindowController: NSWindowController {
         configureProviderPopup()
         configureInstructionsEditor()
         configureStaticControls()
+        configureMCPServerControls()
 
         // Profile: picker with add/remove/duplicate, plus the display name.
         addSection("Profile")
@@ -228,6 +236,25 @@ final class SettingsWindowController: NSWindowController {
         addArranged(credentialHintRow)
         endSection(after: credentialHintRow)
 
+        // MCP tools are declared to OpenAI-protocol channels and executed there.
+        let mcpHeader = sectionLabel("MCP Servers")
+        let mcpSeparator = makeSeparator()
+        let mcpRow = makeControlRow(
+            views: [
+                mcpServerPopup,
+                addMCPServerButton,
+                editMCPServerButton,
+                removeMCPServerButton
+            ],
+            stretching: mcpServerPopup
+        )
+        mcpSectionViews = [mcpHeader, mcpSeparator, mcpRow]
+        addArranged(mcpHeader)
+        formStackView.setCustomSpacing(4, after: mcpHeader)
+        addArranged(mcpSeparator)
+        addArranged(mcpRow)
+        endSection(after: mcpRow)
+
         // Instructions: system prompt for the selected profile.
         addSection("Instructions")
         addArranged(instructionsScrollView)
@@ -284,6 +311,26 @@ final class SettingsWindowController: NSWindowController {
         }
         providerPopup.target = self
         providerPopup.action = #selector(providerChanged)
+    }
+
+    private func configureMCPServerControls() {
+        mcpServerPopup.translatesAutoresizingMaskIntoConstraints = false
+        mcpServerPopup.setContentHuggingPriority(
+            NSLayoutConstraint.Priority(1),
+            for: .horizontal
+        )
+        mcpServerPopup.target = self
+        mcpServerPopup.action = #selector(mcpServerSelectionChanged)
+
+        for button in [addMCPServerButton, editMCPServerButton, removeMCPServerButton] {
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.target = self
+        }
+        addMCPServerButton.action = #selector(addMCPServer)
+        editMCPServerButton.action = #selector(editMCPServer)
+        removeMCPServerButton.action = #selector(removeMCPServer)
     }
 
     private func configureInstructionsEditor() {
@@ -437,6 +484,8 @@ final class SettingsWindowController: NSWindowController {
         let nextProfiles = newValue.isEmpty ? [Self.makeDefaultProfile()] : newValue
         workingProfiles = nextProfiles
         providerSettingsCache = VoiceProfileProviderSettingsCache(profiles: nextProfiles)
+        pendingMCPAuthorizationValues.removeAll()
+        pendingMCPAuthorizationDeletions.removeAll()
         if nextProfiles.contains(where: { $0.id == selectedProfileID }) == false {
             selectedProfileID = nextProfiles[0].id
         }
@@ -511,8 +560,45 @@ final class SettingsWindowController: NSWindowController {
         apiCredentialLabel.stringValue = provider.credentialLabel
         apiKeyField.stringValue = ""
         syncCredentialStatus(for: provider)
+        syncMCPServerControls(for: profile)
 
         clearFormStatus()
+    }
+
+    private func syncMCPServerControls(for profile: VoiceProfile) {
+        let supportsMCP = [.openAIRealtime, .custom].contains(profile.providerID)
+        for view in mcpSectionViews {
+            view.isHidden = supportsMCP == false
+        }
+        guard supportsMCP else { return }
+
+        let selectedID = mcpServerPopup.selectedItem?.representedObject as? String
+        mcpServerPopup.removeAllItems()
+        if profile.mcpServers.isEmpty {
+            mcpServerPopup.addItem(withTitle: "No servers configured")
+            mcpServerPopup.lastItem?.isEnabled = false
+        } else {
+            for server in profile.mcpServers {
+                mcpServerPopup.addItem(
+                    withTitle: "\(server.label) — \(server.urlString)"
+                )
+                mcpServerPopup.lastItem?.representedObject = server.id.uuidString
+            }
+            if let selectedID,
+               let index = mcpServerPopup.itemArray.firstIndex(where: {
+                   ($0.representedObject as? String) == selectedID
+               }) {
+                mcpServerPopup.selectItem(at: index)
+            }
+        }
+        updateMCPServerButtons()
+    }
+
+    private func updateMCPServerButtons() {
+        guard let index = selectedProfileIndex else { return }
+        let hasServers = workingProfiles[index].mcpServers.isEmpty == false
+        editMCPServerButton.isEnabled = hasServers
+        removeMCPServerButton.isEnabled = hasServers
     }
 
     private func syncCredentialStatus(for provider: VoiceProviderID) {
@@ -598,6 +684,17 @@ final class SettingsWindowController: NSWindowController {
         copy.id = UUID()
         copy.name = uniqueProfileName(base: "\(displayName(for: source)) Copy")
         copy.hotKey = nil
+        copy.mcpServers = source.mcpServers.map { server in
+            let copiedServer = MCPServerConfiguration(
+                label: server.label,
+                urlString: server.urlString,
+                allowedTools: server.allowedTools
+            )
+            if let token = effectiveMCPAuthorization(for: server.id) {
+                pendingMCPAuthorizationValues[copiedServer.id] = token
+            }
+            return copiedServer
+        }
         workingProfiles.insert(copy, at: sourceIndex + 1)
         providerSettingsCache.remember(copy)
         selectProfile(id: copy.id)
@@ -616,13 +713,169 @@ final class SettingsWindowController: NSWindowController {
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        let removedProfileID = workingProfiles[index].id
+        let removedProfile = workingProfiles[index]
+        let removedProfileID = removedProfile.id
+        for server in removedProfile.mcpServers {
+            scheduleMCPAuthorizationDeletion(for: server.id)
+        }
         workingProfiles.remove(at: index)
         providerSettingsCache.remove(profileID: removedProfileID)
         selectedProfileID = workingProfiles[min(index, workingProfiles.count - 1)].id
         rebuildProfilePopup()
         syncFormFromSelectedProfile()
         updateProfileButtons()
+    }
+
+    // MARK: - MCP server actions
+
+    @objc private func mcpServerSelectionChanged() {
+        updateMCPServerButtons()
+    }
+
+    @objc private func addMCPServer() {
+        guard let index = selectedProfileIndex,
+              [.openAIRealtime, .custom].contains(workingProfiles[index].providerID),
+              let result = editMCPServerConfiguration(nil) else {
+            return
+        }
+        workingProfiles[index].mcpServers.append(result.configuration)
+        stageMCPAuthorization(
+            result.authorization,
+            for: result.configuration.id
+        )
+        syncMCPServerControls(for: workingProfiles[index])
+        mcpServerPopup.selectItem(at: workingProfiles[index].mcpServers.count - 1)
+        updateMCPServerButtons()
+    }
+
+    @objc private func editMCPServer() {
+        guard let profileIndex = selectedProfileIndex,
+              let serverIndex = selectedMCPServerIndex(for: workingProfiles[profileIndex]),
+              let result = editMCPServerConfiguration(
+                  workingProfiles[profileIndex].mcpServers[serverIndex]
+              ) else {
+            return
+        }
+        workingProfiles[profileIndex].mcpServers[serverIndex] = result.configuration
+        stageMCPAuthorization(
+            result.authorization,
+            for: result.configuration.id
+        )
+        syncMCPServerControls(for: workingProfiles[profileIndex])
+        mcpServerPopup.selectItem(at: serverIndex)
+        updateMCPServerButtons()
+    }
+
+    @objc private func removeMCPServer() {
+        guard let profileIndex = selectedProfileIndex,
+              let serverIndex = selectedMCPServerIndex(for: workingProfiles[profileIndex]) else {
+            return
+        }
+        let server = workingProfiles[profileIndex].mcpServers.remove(at: serverIndex)
+        scheduleMCPAuthorizationDeletion(for: server.id)
+        syncMCPServerControls(for: workingProfiles[profileIndex])
+    }
+
+    private func selectedMCPServerIndex(for profile: VoiceProfile) -> Int? {
+        guard let rawID = mcpServerPopup.selectedItem?.representedObject as? String,
+              let id = UUID(uuidString: rawID) else {
+            return nil
+        }
+        return profile.mcpServers.firstIndex(where: { $0.id == id })
+    }
+
+    private struct MCPServerEditorResult {
+        var configuration: MCPServerConfiguration
+        var authorization: String?
+    }
+
+    private func editMCPServerConfiguration(
+        _ existing: MCPServerConfiguration?
+    ) -> MCPServerEditorResult? {
+        let labelField = NSTextField(string: existing?.label ?? "")
+        labelField.placeholderString = "calendar"
+        let urlField = NSTextField(string: existing?.urlString ?? "")
+        urlField.placeholderString = "https://mcp.example.com"
+        let allowedToolsField = NSTextField(
+            string: existing?.allowedTools?.joined(separator: ", ") ?? ""
+        )
+        allowedToolsField.placeholderString = "search, create_event (optional)"
+        let authorizationField = NSSecureTextField(
+            string: existing.flatMap {
+                effectiveMCPAuthorization(for: $0.id)
+            } ?? ""
+        )
+        authorizationField.placeholderString = "Optional bearer token"
+
+        let editor = NSGridView(views: [
+            [NSTextField(labelWithString: "Label"), labelField],
+            [NSTextField(labelWithString: "URL"), urlField],
+            [NSTextField(labelWithString: "Allowed tools"), allowedToolsField],
+            [NSTextField(labelWithString: "Authorization"), authorizationField]
+        ])
+        editor.rowSpacing = 8
+        editor.columnSpacing = 12
+        editor.column(at: 0).xPlacement = .trailing
+        editor.column(at: 1).width = 320
+
+        let alert = NSAlert()
+        alert.messageText = existing == nil ? "Add MCP Server" : "Edit MCP Server"
+        alert.informativeText = "VoiceKey declares this server to the realtime channel. The channel executes its tools."
+        alert.accessoryView = editor
+        alert.addButton(withTitle: existing == nil ? "Add" : "Save")
+        alert.addButton(withTitle: "Cancel")
+        window?.makeFirstResponder(labelField)
+
+        while alert.runModal() == .alertFirstButtonReturn {
+            let label = labelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let urlString = urlField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if label.isEmpty {
+                alert.informativeText = "Enter a server label."
+                continue
+            }
+            if isValidMCPServerURL(urlString) == false {
+                alert.informativeText = "Enter an http:// or https:// URL with a host."
+                continue
+            }
+
+            let allowedTools = allowedToolsField.stringValue
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.isEmpty == false }
+            return MCPServerEditorResult(
+                configuration: MCPServerConfiguration(
+                    id: existing?.id ?? UUID(),
+                    label: label,
+                    urlString: urlString,
+                    allowedTools: allowedTools.isEmpty ? nil : allowedTools
+                ),
+                authorization: authorizationField.stringValue
+            )
+        }
+        return nil
+    }
+
+    private func effectiveMCPAuthorization(for id: UUID) -> String? {
+        if pendingMCPAuthorizationDeletions.contains(id) {
+            return nil
+        }
+        return pendingMCPAuthorizationValues[id]
+            ?? APIKeyStore.shared.authorizationToken(forMCPServer: id)
+    }
+
+    private func stageMCPAuthorization(_ authorization: String?, for id: UUID) {
+        let trimmed = authorization?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty {
+            scheduleMCPAuthorizationDeletion(for: id)
+        } else {
+            pendingMCPAuthorizationDeletions.remove(id)
+            pendingMCPAuthorizationValues[id] = trimmed
+        }
+    }
+
+    private func scheduleMCPAuthorizationDeletion(for id: UUID) {
+        pendingMCPAuthorizationValues[id] = nil
+        pendingMCPAuthorizationDeletions.insert(id)
     }
 
     // MARK: - Provider / hotkey actions
@@ -705,10 +958,26 @@ final class SettingsWindowController: NSWindowController {
                 showFormError(message)
                 return
             }
+            if let message = mcpValidationError(for: profile) {
+                workingProfiles = normalized
+                selectProfile(id: profile.id)
+                if profile.id == previouslySelectedID {
+                    apiKeyField.stringValue = typedAPIKey
+                }
+                showFormError(message)
+                return
+            }
         }
         workingProfiles = normalized
         for profile in normalized {
             providerSettingsCache.remember(profile)
+        }
+
+        do {
+            try savePendingMCPAuthorizations()
+        } catch {
+            showFormError("Couldn’t save an MCP authorization token: \(error.localizedDescription)")
+            return
         }
         VoiceProfileStore.save(normalized)
 
@@ -771,6 +1040,17 @@ final class SettingsWindowController: NSWindowController {
                 : VoiceSessionConfiguration.defaultInstructions
 
             normalized.endpointURL = profile.endpointURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            normalized.mcpServers = profile.mcpServers.map { server in
+                let allowedTools = server.allowedTools?
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { $0.isEmpty == false }
+                return MCPServerConfiguration(
+                    id: server.id,
+                    label: server.label.trimmingCharacters(in: .whitespacesAndNewlines),
+                    urlString: server.urlString.trimmingCharacters(in: .whitespacesAndNewlines),
+                    allowedTools: allowedTools?.isEmpty == false ? allowedTools : nil
+                )
+            }
             return normalized
         }
     }
@@ -786,6 +1066,40 @@ final class SettingsWindowController: NSWindowController {
             return "The endpoint URL for “\(displayName(for: profile))” must start with ws://, wss://, http://, or https:// and include a host."
         }
         return nil
+    }
+
+    private func mcpValidationError(for profile: VoiceProfile) -> String? {
+        for server in profile.mcpServers {
+            if server.label.isEmpty {
+                return "An MCP server in “\(displayName(for: profile))” needs a label."
+            }
+            if isValidMCPServerURL(server.urlString) == false {
+                return "The MCP server URL for “\(server.label)” must start with http:// or https:// and include a host."
+            }
+        }
+        return nil
+    }
+
+    private func isValidMCPServerURL(_ string: String) -> Bool {
+        guard let components = URLComponents(string: string),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              let host = components.host,
+              host.isEmpty == false else {
+            return false
+        }
+        return true
+    }
+
+    private func savePendingMCPAuthorizations() throws {
+        for (id, token) in pendingMCPAuthorizationValues {
+            try APIKeyStore.shared.setAuthorizationToken(token, forMCPServer: id)
+        }
+        for id in pendingMCPAuthorizationDeletions {
+            try APIKeyStore.shared.deleteAuthorizationToken(forMCPServer: id)
+        }
+        pendingMCPAuthorizationValues.removeAll()
+        pendingMCPAuthorizationDeletions.removeAll()
     }
 
     private func isValidEndpointURL(_ string: String) -> Bool {

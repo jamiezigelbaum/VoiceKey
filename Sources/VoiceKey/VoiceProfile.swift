@@ -1,5 +1,24 @@
 import Foundation
 
+struct MCPServerConfiguration: Codable, Equatable, Identifiable {
+    var id: UUID
+    var label: String
+    var urlString: String
+    var allowedTools: [String]?
+
+    init(
+        id: UUID = UUID(),
+        label: String,
+        urlString: String,
+        allowedTools: [String]? = nil
+    ) {
+        self.id = id
+        self.label = label
+        self.urlString = urlString
+        self.allowedTools = allowedTools
+    }
+}
+
 struct VoiceProfile: Codable, Equatable, Identifiable {
     var id: UUID
     var name: String
@@ -9,6 +28,7 @@ struct VoiceProfile: Codable, Equatable, Identifiable {
     var voice: String
     var instructions: String
     var endpointURL: String
+    var mcpServers: [MCPServerConfiguration]
 
     init(
         id: UUID = UUID(),
@@ -18,7 +38,8 @@ struct VoiceProfile: Codable, Equatable, Identifiable {
         model: String,
         voice: String,
         instructions: String = "",
-        endpointURL: String = ""
+        endpointURL: String = "",
+        mcpServers: [MCPServerConfiguration] = []
     ) {
         self.id = id
         self.name = name
@@ -28,6 +49,35 @@ struct VoiceProfile: Codable, Equatable, Identifiable {
         self.voice = voice
         self.instructions = instructions
         self.endpointURL = endpointURL
+        self.mcpServers = mcpServers
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case providerID
+        case hotKey
+        case model
+        case voice
+        case instructions
+        case endpointURL
+        case mcpServers
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        providerID = try container.decode(VoiceProviderID.self, forKey: .providerID)
+        hotKey = try container.decodeIfPresent(HotKeyConfiguration.self, forKey: .hotKey)
+        model = try container.decode(String.self, forKey: .model)
+        voice = try container.decode(String.self, forKey: .voice)
+        instructions = try container.decode(String.self, forKey: .instructions)
+        endpointURL = try container.decode(String.self, forKey: .endpointURL)
+        mcpServers = try container.decodeIfPresent(
+            [MCPServerConfiguration].self,
+            forKey: .mcpServers
+        ) ?? []
     }
 
     static func defaultOpenAI(name: String = "OpenAI") -> VoiceProfile {
