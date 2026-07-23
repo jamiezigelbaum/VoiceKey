@@ -332,3 +332,69 @@ Endpoint profiles provider-side tools with zero VoiceKey execution.
   and omission; no `tools` key when list empty; profile persistence
   round-trip incl. legacy decode; MCP lifecycle event mapping.
 - `swift test` and `swift build` green.
+
+---
+
+## WO-E: OpenClaw Talk consult tool-call round-trip
+
+Added 2026-07-23 evening. Release-gating: Castor voice is silent under
+the gateway's `force-agent-consult` routing because VoiceKey drops the
+relayed tool call.
+
+### Verified facts (do not re-investigate)
+
+- Live session log evidence (2026-07-23 16:15Z): connect, session
+  create, ready, and user transcripts all work; after each finalized
+  utterance the gateway relays a `talk.event` tool-call envelope
+  (VoiceKey's mapper logs it as the diagnostic "talk.event.toolCall")
+  and VoiceKey takes no further action; no audio ever returns.
+- Gateway contract (docs.openclaw.ai/gateway/protocol): the client must
+  (1) receive the relayed provider tool call (first supported tool:
+  `openclaw_agent_consult`), (2) send a `talk.client.toolCall` request
+  and receive a run id, (3) wait for the agent run's normal chat
+  lifecycle events to conclude, then (4) send
+  `talk.session.submitToolResult` with the `sessionId`, the result
+  content, and optional flags (`willContinue`, `suppressResponse`).
+  The submit request resolves only after the provider bridge's
+  asynchronous completion signal.
+- A `VOICE_CONFIRMATION_REQUIRED:<id>` marker can appear for actions
+  needing spoken confirmation.
+- Sources/VoiceKey/OpenClawTalkProvider.swift already has: a serial
+  state queue, an injectable WebSocket abstraction with scripted
+  lifecycle tests (Tests/VoiceKeyTests/OpenClawTalkLifecycleTests.swift),
+  envelope mapping (see `talk.event` handling around the mapper), and
+  request-ID plumbing. Extend these; do not restructure them.
+- Surface: OpenClawTalkProvider.swift and OpenClawTalk* tests ONLY.
+
+### Required behavior
+
+1. Parse the relayed tool-call envelope fully (tool name, call id,
+   arguments); keep a diagnostic that names the tool.
+2. Drive the round-trip on the state queue: `talk.client.toolCall`
+   request → hold the run id → observe the run's lifecycle events →
+   `talk.session.submitToolResult` with the session id and the result
+   the contract expects. Match the exact frame shapes defensively:
+   unknown/missing fields produce a secret-free diagnostic, never a
+   crash or a silent drop.
+3. Surface consult progress as the existing "thinking" status so the
+   menu bar animates while the agent works; return to listening after
+   the submit resolves.
+4. Timeout: if the run produces no conclusion within a bounded window
+   (60 s default), submit a failure/expired tool result if the
+   contract allows, emit a needsAttention-free diagnostic (the session
+   itself stays alive and listening), and reset consult state.
+5. `VOICE_CONFIRMATION_REQUIRED:<id>`: minimal viable handling — relay
+   the marker text into the transcript/diagnostic stream so the user
+   hears/sees the confirmation request; full confirmation UX may be
+   skip-and-flagged with a written plan.
+6. Multiple queued utterances: a second tool call arriving while one
+   consult is in flight must not corrupt state (serialize or reject
+   the newer one with a diagnostic — pick one, document it).
+
+### Acceptance
+
+- Scripted lifecycle tests: full happy-path round-trip (toolCall event
+  → client.toolCall → lifecycle events → submitToolResult → session
+  still live); timeout path; malformed envelope path; overlapping
+  tool-call path.
+- `swift test` and `swift build` green.
