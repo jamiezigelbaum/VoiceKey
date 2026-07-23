@@ -71,9 +71,13 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     private var hasReportedMicrophoneAudio = false
     private var hasReportedMicrophoneSignal = false
     private var sessionStart: Date?
+    private var isResponseInFlight = false
+    private var isMCPContinuationPending = false
+    private var consecutiveMCPContinuationCount = 0
 
     private static let fatalAudioFailureMessage =
         "Microphone audio stopped after repeated audio device failures. Start the voice session again."
+    private static let maximumConsecutiveMCPContinuations = 8
 
     init(
         configuration: VoiceSessionConfiguration,
@@ -168,6 +172,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         isStopping = false
         hasReportedMicrophoneAudio = false
         hasReportedMicrophoneSignal = false
+        resetMCPContinuationState()
         emit(.status(.ready))
     }
 
@@ -209,6 +214,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
               isStarting,
               isStopping == false else { return }
 
+        resetMCPContinuationState()
         guard let request = OpenAIRealtimeRequestBuilder.webSocketRequest(
             baseURL: OpenAIRealtimeRequestBuilder.normalizedBaseURL(for: configuration.endpointURL),
             apiKey: apiKey,
@@ -260,6 +266,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             isConnecting = false
             isConnected = false
             isAudioStreaming = false
+            resetMCPContinuationState()
             emit(.status(.needsAttention(error.localizedDescription)))
         }
     }
@@ -321,6 +328,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
                     self.isConnecting = false
                     self.isConnected = false
                     self.isAudioStreaming = false
+                    self.resetMCPContinuationState()
                     self.audioEngine.stop()
                     self.emit(.status(.needsAttention(error.localizedDescription)))
                 }
@@ -357,12 +365,49 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             case .sessionUpdated:
                 guard isConnected else { break }
                 startAudioStreaming()
+            case .responseStarted:
+                isResponseInFlight = true
+            case .responseEnded:
+                isResponseInFlight = false
+                sendPendingMCPContinuationIfNeeded()
+            case .mcpCallTerminated:
+                handleMCPCallTermination()
             case .stopPlayback:
+                isMCPContinuationPending = false
+                consecutiveMCPContinuationCount = 0
                 audioEngine.stopPlayback()
             case let .providerEvent(event):
                 emit(event)
             }
         }
+    }
+
+    private func handleMCPCallTermination() {
+        guard isResponseInFlight == false else {
+            isMCPContinuationPending = true
+            return
+        }
+        sendMCPContinuation()
+    }
+
+    private func sendPendingMCPContinuationIfNeeded() {
+        guard isMCPContinuationPending else { return }
+        sendMCPContinuation()
+    }
+
+    private func sendMCPContinuation() {
+        isMCPContinuationPending = false
+        guard consecutiveMCPContinuationCount < Self.maximumConsecutiveMCPContinuations else {
+            return
+        }
+        consecutiveMCPContinuationCount += 1
+        sendJSON(["type": "response.create"])
+    }
+
+    private func resetMCPContinuationState() {
+        isResponseInFlight = false
+        isMCPContinuationPending = false
+        consecutiveMCPContinuationCount = 0
     }
 
     private func sendJSON(_ object: [String: Any]) {
@@ -478,6 +523,7 @@ extension OpenAIRealtimeProvider: URLSessionWebSocketDelegate {
             isConnected = false
             isAudioStreaming = false
             isStarting = false
+            resetMCPContinuationState()
             audioEngine.stop()
             emit(.status(OpenAIRealtimeConnectionDiagnostics.closeStatus(code: closeCode, reason: reason)))
         }
