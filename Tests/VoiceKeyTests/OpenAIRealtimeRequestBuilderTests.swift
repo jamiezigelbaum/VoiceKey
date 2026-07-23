@@ -27,7 +27,9 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         let session = try dictionary(event["session"])
         XCTAssertEqual(session["type"] as? String, "realtime")
         XCTAssertEqual(session["model"] as? String, "gpt-realtime-2-test")
-        XCTAssertEqual(session["instructions"] as? String, "Keep it concise.")
+        let instructions = try XCTUnwrap(session["instructions"] as? String)
+        XCTAssertTrue(instructions.hasPrefix("Keep it concise."))
+        XCTAssertTrue(instructions.contains("Session started"))
         XCTAssertEqual(session["output_modalities"] as? [String], ["audio"])
 
         let audio = try dictionary(session["audio"])
@@ -57,7 +59,9 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
 
         let session = try dictionary(event["session"])
         XCTAssertNil(session["model"])
-        XCTAssertEqual(session["instructions"] as? String, "Keep it concise.")
+        let instructions = try XCTUnwrap(session["instructions"] as? String)
+        XCTAssertTrue(instructions.hasPrefix("Keep it concise."))
+        XCTAssertTrue(instructions.contains("Session started"))
     }
 
     func testInputAudioAppendEventBase64EncodesPCMBytes() {

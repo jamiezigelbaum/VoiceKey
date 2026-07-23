@@ -47,9 +47,24 @@ enum OpenAIRealtimeRequestBuilder {
         return request
     }
 
+    // The realtime model has no clock; stamping the session start into the
+    // instructions lets it answer "what time is it" without any tools.
+    static func instructionsWithSessionContext(
+        _ instructions: String,
+        sessionStart: Date
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .full
+        formatter.timeStyle = .short
+        let stamp = "Session started \(formatter.string(from: sessionStart)) (\(TimeZone.current.identifier))."
+        guard instructions.isEmpty == false else { return stamp }
+        return "\(instructions)\n\n\(stamp)"
+    }
+
     static func sessionUpdateEvent(
         configuration: VoiceSessionConfiguration,
-        includeModel: Bool = true
+        includeModel: Bool = true,
+        sessionStart: Date = Date()
     ) -> [String: Any] {
         var session: [String: Any] = [
             "type": "realtime",
@@ -69,7 +84,10 @@ enum OpenAIRealtimeRequestBuilder {
                     "voice": configuration.voice
                 ]
             ],
-            "instructions": configuration.instructions
+            "instructions": instructionsWithSessionContext(
+                configuration.instructions,
+                sessionStart: sessionStart
+            )
         ]
         if includeModel {
             session["model"] = configuration.model
