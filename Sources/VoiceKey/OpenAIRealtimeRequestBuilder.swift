@@ -54,6 +54,10 @@ enum OpenAIRealtimeRequestBuilder {
         sessionStart: Date
     ) -> String {
         let formatter = DateFormatter()
+        // Pin locale/calendar so non-Gregorian regions do not report a
+        // mis-stated year (e.g. Buddhist 2569) to the model.
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
         formatter.dateStyle = .full
         formatter.timeStyle = .short
         let stamp = "Session started \(formatter.string(from: sessionStart)) (\(TimeZone.current.identifier))."
@@ -96,11 +100,17 @@ enum OpenAIRealtimeRequestBuilder {
             session["model"] = configuration.model
         }
         // The Realtime API tools array accepts only "function" and "mcp"
-        // (verified live: it rejects "web_search" as an invalid value).
-        // Web search is therefore delivered as an MCP server, not a hosted
-        // tool type; `webSearchEnabled` maps to a web-search MCP entry
-        // upstream rather than a distinct tool here.
-        var tools: [[String: Any]] = configuration.mcpServers.map { server in
+        // (verified live: it rejects "web_search" as an invalid value — that
+        // is a Responses API hosted tool, not a Realtime one). Web search is
+        // therefore delivered as a remote MCP server that the Realtime API
+        // executes server-side; the web-search toggle injects the Exa MCP
+        // endpoint (validated live: anonymous, exposes web_search_exa /
+        // web_fetch_exa), keeping the "tools live in the channel" invariant.
+        var tools: [[String: Any]] = []
+        if configuration.webSearchEnabled {
+            tools.append(Self.exaWebSearchTool)
+        }
+        tools += configuration.mcpServers.map { server in
             var tool: [String: Any] = [
                 "type": "mcp",
                 "server_label": server.label,
@@ -145,6 +155,19 @@ enum OpenAIRealtimeRequestBuilder {
         [
             "type": "audio/pcm",
             "rate": 24_000
+        ]
+    }
+
+    /// Exa's hosted web-search MCP server, executed server-side by the
+    /// Realtime API. Anonymous access is sufficient for basic search.
+    static let exaWebSearchServerURL = "https://mcp.exa.ai/mcp"
+    private static var exaWebSearchTool: [String: Any] {
+        [
+            "type": "mcp",
+            "server_label": "exa",
+            "server_url": exaWebSearchServerURL,
+            "require_approval": "never",
+            "allowed_tools": ["web_search_exa", "web_fetch_exa"]
         ]
     }
 }
