@@ -14,14 +14,19 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>0.2.0</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>2</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
   <true/>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+  </dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>VoiceKey needs microphone access so ChatGPT Voice can hear you.</string>
+  <string>VoiceKey needs microphone access to stream your speech to your selected realtime voice provider.</string>
 </dict>
 </plist>

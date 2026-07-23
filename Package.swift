@@ -11,12 +11,19 @@ let package = Package(
         .executable(name: "VoiceKey", targets: ["VoiceKey"])
     ],
     targets: [
+        .target(
+            name: "VoiceKeyObjCShield"
+        ),
         .executableTarget(
             name: "VoiceKey",
+            dependencies: ["VoiceKeyObjCShield"],
             linkerSettings: [
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("AppKit"),
+                .linkedFramework("AVFoundation"),
                 .linkedFramework("Carbon"),
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("Security"),
                 .linkedFramework("WebKit")
             ]
         ),

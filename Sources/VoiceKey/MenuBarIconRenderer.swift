@@ -3,17 +3,26 @@ import AppKit
 enum MenuBarIconState: Equatable {
     case loading
     case problem
+    case listening
+    case thinking
+    case speaking
+    /// Legacy aggregate of the active family; renders like `.speaking`.
+    /// New code should map statuses to the specific active states above.
     case active
     case ready
 
     init(status: ProviderStatus) {
         switch status {
-        case .loading, .starting, .stopping:
+        case .loading, .checking, .starting, .stopping:
             self = .loading
         case .loginRequired, .needsAttention:
             self = .problem
-        case .clickSent, .voiceActive:
-            self = .active
+        case .listening:
+            self = .listening
+        case .thinking:
+            self = .thinking
+        case .speaking, .clickSent, .voiceActive:
+            self = .speaking
         case .ready:
             self = .ready
         }
@@ -26,18 +35,29 @@ enum MenuBarIconRenderer {
     }
 
     static func image(text: String, state: MenuBarIconState = .ready) -> NSImage {
-        let size = NSSize(width: 144, height: 88)
-        let image = NSImage(size: size)
+        makeImage(state: state, phase: 0, text: text)
+    }
+
+    static func image(state: MenuBarIconState, phase: Double = 0) -> NSImage {
+        makeImage(state: state, phase: phase, text: nil)
+    }
+
+    private static let canvasSize = NSSize(width: 144, height: 88)
+    private static let bubbleRect = NSRect(x: 48, y: 27, width: 66, height: 42)
+    private static let bubbleCenter = NSPoint(x: 81, y: 48)
+
+    private static func makeImage(state: MenuBarIconState, phase: Double, text: String?) -> NSImage {
+        let normalizedPhase = phase - phase.rounded(.down)
+        let image = NSImage(size: canvasSize)
 
         image.lockFocus()
         defer { image.unlockFocus() }
 
         NSColor.clear.setFill()
-        NSRect(origin: .zero, size: size).fill()
+        NSRect(origin: .zero, size: canvasSize).fill()
 
         let isTemplate = state != .problem
-        let bubblePath = NSBezierPath(roundedRect: NSRect(x: 48, y: 27, width: 66, height: 42), xRadius: 17, yRadius: 17)
-        bubblePath.appendTail()
+        let bubblePath = makeBubblePath(scale: bubbleScale(for: state, phase: normalizedPhase))
 
         if isTemplate {
             NSColor.black.setFill()
@@ -54,23 +74,28 @@ enum MenuBarIconRenderer {
             NSGraphicsContext.restoreGraphicsState()
         }
 
-        drawState(state, isTemplate: isTemplate)
-        let label = abbreviatedText(text)
-        let attributes = textAttributes(for: label)
-        let textSize = label.size(withAttributes: attributes)
-        let textRect = NSRect(
-            x: 48 + (66 - textSize.width) / 2,
-            y: 39 + (16 - textSize.height) / 2,
-            width: textSize.width,
-            height: textSize.height
-        )
+        // Decorations drawn inside the bubble are knocked out of its fill, so
+        // they only make sense without a hotkey label occupying the same space.
+        drawState(state, isTemplate: isTemplate, phase: normalizedPhase, drawsInsideBubble: text == nil)
 
-        if isTemplate {
-            NSGraphicsContext.current?.cgContext.setBlendMode(.clear)
-            label.draw(in: textRect, withAttributes: attributes)
-            NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
-        } else {
-            label.draw(in: textRect, withAttributes: attributes)
+        if let text {
+            let label = abbreviatedText(text)
+            let attributes = textAttributes(for: label)
+            let textSize = label.size(withAttributes: attributes)
+            let textRect = NSRect(
+                x: bubbleRect.minX + (bubbleRect.width - textSize.width) / 2,
+                y: 39 + (16 - textSize.height) / 2,
+                width: textSize.width,
+                height: textSize.height
+            )
+
+            if isTemplate {
+                NSGraphicsContext.current?.cgContext.setBlendMode(.clear)
+                label.draw(in: textRect, withAttributes: attributes)
+                NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+            } else {
+                label.draw(in: textRect, withAttributes: attributes)
+            }
         }
 
         image.isTemplate = isTemplate
@@ -78,32 +103,78 @@ enum MenuBarIconRenderer {
         return image
     }
 
-    private static func drawState(_ state: MenuBarIconState, isTemplate: Bool) {
+    private static func makeBubblePath(scale: CGFloat) -> NSBezierPath {
+        let path = NSBezierPath(
+            roundedRect: bubbleRect,
+            xRadius: 17,
+            yRadius: 17
+        )
+        path.appendTail()
+
+        if scale != 1 {
+            var transform = AffineTransform()
+            transform.translate(x: bubbleCenter.x, y: bubbleCenter.y)
+            transform.scale(scale)
+            transform.translate(x: -bubbleCenter.x, y: -bubbleCenter.y)
+            path.transform(using: transform)
+        }
+        return path
+    }
+
+    private static func bubbleScale(for state: MenuBarIconState, phase: Double) -> CGFloat {
         switch state {
-        case .ready:
-            break
-        case .loading:
-            drawLoadingArc()
-        case .problem:
-            drawProblemBadge(isTemplate: isTemplate)
-        case .active:
-            drawActiveBars()
+        case .listening:
+            // Gentle breathing: 1.0 at phase 0, peaking at 1.05 mid-cycle.
+            return 1.025 + 0.025 * sin(2 * .pi * phase - .pi / 2)
+        case .loading, .problem, .thinking, .speaking, .active, .ready:
+            return 1
         }
     }
 
-    private static func drawLoadingArc() {
+    private static func drawState(_ state: MenuBarIconState, isTemplate: Bool, phase: Double, drawsInsideBubble: Bool) {
+        switch state {
+        case .ready, .listening:
+            break
+        case .loading:
+            drawLoadingComet(phase: phase)
+        case .problem:
+            drawProblemBadge(isTemplate: isTemplate)
+        case .thinking:
+            if drawsInsideBubble {
+                drawThinkingDots(phase: phase, isTemplate: isTemplate)
+            }
+        case .speaking, .active:
+            if drawsInsideBubble {
+                drawSpeakingBars(phase: phase, isTemplate: isTemplate)
+            }
+        }
+    }
+
+    // MARK: - Connecting
+
+    /// A comet of three arcs orbiting the glyph: a bright head whose sweep
+    /// breathes slightly, trailed by two shorter arcs of decreasing alpha.
+    private static func drawLoadingComet(phase: Double) {
+        let center = NSPoint(x: 81, y: 44)
+        let radius: CGFloat = 40
+        let rotation = 360 * phase
+        let sweep = 100 + 18 * sin(2 * .pi * phase)
+
+        strokeArc(center: center, radius: radius, startAngle: rotation - 56, endAngle: rotation - 36, alpha: 0.25)
+        strokeArc(center: center, radius: radius, startAngle: rotation - 30, endAngle: rotation - 8, alpha: 0.5)
+        strokeArc(center: center, radius: radius, startAngle: rotation, endAngle: rotation + sweep, alpha: 1)
+    }
+
+    private static func strokeArc(center: NSPoint, radius: CGFloat, startAngle: CGFloat, endAngle: CGFloat, alpha: CGFloat) {
         let path = NSBezierPath()
-        path.appendArc(
-            withCenter: NSPoint(x: 75, y: 48),
-            radius: 46,
-            startAngle: 105,
-            endAngle: 250,
-            clockwise: false
-        )
+        path.appendArc(withCenter: center, radius: radius, startAngle: startAngle, endAngle: endAngle, clockwise: false)
         path.lineWidth = 6
         path.lineCapStyle = .round
+        NSColor.black.withAlphaComponent(alpha).setStroke()
         path.stroke()
     }
+
+    // MARK: - Problem
 
     private static func drawProblemBadge(isTemplate: Bool) {
         if isTemplate {
@@ -112,7 +183,7 @@ enum MenuBarIconRenderer {
             NSColor.systemRed.setFill()
         }
 
-        let badge = NSBezierPath(ovalIn: NSRect(x: 106, y: 56, width: 28, height: 28))
+        let badge = NSBezierPath(ovalIn: NSRect(x: 103, y: 55, width: 24, height: 24))
         badge.fill()
 
         if isTemplate {
@@ -121,9 +192,9 @@ enum MenuBarIconRenderer {
             NSColor.white.setFill()
         }
 
-        let stem = NSBezierPath(roundedRect: NSRect(x: 118, y: 66, width: 4, height: 10), xRadius: 2, yRadius: 2)
+        let stem = NSBezierPath(roundedRect: NSRect(x: 113.4, y: 62, width: 3.2, height: 8.5), xRadius: 1.6, yRadius: 1.6)
         stem.fill()
-        let dot = NSBezierPath(ovalIn: NSRect(x: 117.5, y: 61.5, width: 5, height: 5))
+        let dot = NSBezierPath(ovalIn: NSRect(x: 113.4, y: 58.3, width: 3.2, height: 3.2))
         dot.fill()
 
         if isTemplate {
@@ -131,17 +202,62 @@ enum MenuBarIconRenderer {
         }
     }
 
-    private static func drawActiveBars() {
-        let barRects = [
-            NSRect(x: 29, y: 38, width: 5, height: 20),
-            NSRect(x: 39, y: 31, width: 5, height: 34),
-            NSRect(x: 124, y: 31, width: 5, height: 34),
-            NSRect(x: 134, y: 38, width: 5, height: 20)
-        ]
+    // MARK: - Thinking
 
-        for rect in barRects {
-            let bar = NSBezierPath(roundedRect: rect, xRadius: 2.5, yRadius: 2.5)
-            bar.fill()
+    /// Three dots inside the bubble pulsing in sequence, knocked out of the
+    /// bubble fill so they read in template mode.
+    private static func drawThinkingDots(phase: Double, isTemplate: Bool) {
+        for index in 0 ..< 3 {
+            let wave = 0.5 + 0.5 * sin(2 * .pi * (phase + Double(index) / 3) - .pi / 2)
+            let radius = 3.4 + 1.6 * wave
+            let alpha = 0.45 + 0.55 * wave
+            let x = bubbleCenter.x + CGFloat(index - 1) * 13
+            let dot = NSBezierPath(ovalIn: NSRect(
+                x: x - radius,
+                y: bubbleCenter.y - radius,
+                width: 2 * radius,
+                height: 2 * radius
+            ))
+            eraseFromBubble(alpha: alpha, isTemplate: isTemplate) { dot.fill() }
+        }
+    }
+
+    // MARK: - Speaking
+
+    /// Four rounded waveform bars inside the bubble, knocked out of its fill.
+    /// Per-bar phase offsets plus sqrt easing keep the dance organic, and the
+    /// constant offsets keep every frame periodic over one full phase cycle.
+    private static let speakingBarPhaseOffsets = [0.0, 0.3, 0.6, 0.4]
+
+    private static func drawSpeakingBars(phase: Double, isTemplate: Bool) {
+        let barWidth: CGFloat = 7
+        let barSpacing: CGFloat = 13
+        let firstX = bubbleCenter.x - (3 * barSpacing + barWidth) / 2
+
+        for (index, offset) in speakingBarPhaseOffsets.enumerated() {
+            let wave = 0.5 + 0.5 * sin(2 * .pi * (phase + offset))
+            let height = 7 + 20 * wave.squareRoot()
+            let bar = NSBezierPath(roundedRect: NSRect(
+                x: firstX + CGFloat(index) * barSpacing,
+                y: bubbleCenter.y - height / 2,
+                width: barWidth,
+                height: height
+            ), xRadius: 3.5, yRadius: 3.5)
+            eraseFromBubble(alpha: 1, isTemplate: isTemplate) { bar.fill() }
+        }
+    }
+
+    /// In template mode the bubble is solid black, so interior decorations are
+    /// erased from it; on the white problem bubble they would be painted white.
+    private static func eraseFromBubble(alpha: CGFloat, isTemplate: Bool, draw: () -> Void) {
+        if isTemplate {
+            NSColor.black.withAlphaComponent(alpha).setFill()
+            NSGraphicsContext.current?.cgContext.setBlendMode(.clear)
+            draw()
+            NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+        } else {
+            NSColor.white.withAlphaComponent(alpha).setFill()
+            draw()
         }
     }
 

@@ -5,47 +5,103 @@ enum HotKeyError: Error {
     case registrationFailed(OSStatus)
 }
 
-final class GlobalHotKey {
-    private var hotKeyRef: EventHotKeyRef?
+final class HotKeyDispatchTable {
+    private var handlers: [UInt32: () -> Void] = [:]
+
+    @discardableResult
+    func register(id: UInt32, handler: @escaping () -> Void) -> Bool {
+        guard handlers[id] == nil else { return false }
+        handlers[id] = handler
+        return true
+    }
+
+    func unregister(id: UInt32) {
+        handlers[id] = nil
+    }
+
+    @discardableResult
+    func dispatch(id: UInt32) -> Bool {
+        guard let handler = handlers[id] else { return false }
+        handler()
+        return true
+    }
+}
+
+private final class CarbonHotKeyDispatcher {
+    static let shared = CarbonHotKeyDispatcher()
+    static let signature = FourCharCode("VKEY")
+
+    let registrations = HotKeyDispatchTable()
     private var eventHandler: EventHandlerRef?
-    private let callback: () -> Void
 
-    init(keyCode: UInt32, modifiers: UInt32, callback: @escaping () -> Void) throws {
-        self.callback = callback
+    private init?() {
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        let callback: EventHandlerUPP = { _, event, userData in
+            guard let event, let userData else { return OSStatus(eventNotHandledErr) }
 
-        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        let selfPointer = Unmanaged.passUnretained(self).toOpaque()
-        let handler: EventHandlerUPP = { _, event, userData in
-            guard let userData else { return noErr }
-            let hotKey = Unmanaged<GlobalHotKey>.fromOpaque(userData).takeUnretainedValue()
-            hotKey.callback()
-            return noErr
+            var hotKeyID = EventHotKeyID(signature: 0, id: 0)
+            let status = GetEventParameter(
+                event,
+                EventParamName(kEventParamDirectObject),
+                EventParamType(typeEventHotKeyID),
+                nil,
+                MemoryLayout<EventHotKeyID>.size,
+                nil,
+                &hotKeyID
+            )
+            guard status == noErr, hotKeyID.signature == CarbonHotKeyDispatcher.signature else {
+                return OSStatus(eventNotHandledErr)
+            }
+
+            let dispatcher = Unmanaged<CarbonHotKeyDispatcher>.fromOpaque(userData).takeUnretainedValue()
+            return dispatcher.registrations.dispatch(id: hotKeyID.id)
+                ? noErr
+                : OSStatus(eventNotHandledErr)
         }
 
-        let handlerStatus = InstallEventHandler(
+        let status = InstallEventHandler(
             GetApplicationEventTarget(),
-            handler,
+            callback,
             1,
             &eventType,
-            selfPointer,
+            Unmanaged.passUnretained(self).toOpaque(),
             &eventHandler
         )
-        guard handlerStatus == noErr else {
-            throw HotKeyError.registrationFailed(handlerStatus)
+        guard status == noErr else { return nil }
+    }
+}
+
+final class GlobalHotKey {
+    private let id: UInt32
+    private var hotKeyRef: EventHotKeyRef?
+
+    init?(id: UInt32, configuration: HotKeyConfiguration, handler: @escaping () -> Void) {
+        self.id = id
+
+        guard let dispatcher = CarbonHotKeyDispatcher.shared,
+              dispatcher.registrations.register(id: id, handler: {
+            DispatchQueue.main.async {
+                handler()
+            }
+        }) else {
+            return nil
         }
 
-        let signature = FourCharCode("VKEY")
-        let hotKeyID = EventHotKeyID(signature: signature, id: 1)
+        let hotKeyID = EventHotKeyID(signature: CarbonHotKeyDispatcher.signature, id: id)
         let hotKeyStatus = RegisterEventHotKey(
-            keyCode,
-            modifiers,
+            configuration.keyCode,
+            configuration.carbonModifiers,
             hotKeyID,
             GetApplicationEventTarget(),
             0,
             &hotKeyRef
         )
         guard hotKeyStatus == noErr else {
-            throw HotKeyError.registrationFailed(hotKeyStatus)
+            dispatcher.registrations.unregister(id: id)
+            return nil
         }
     }
 
@@ -53,9 +109,7 @@ final class GlobalHotKey {
         if let hotKeyRef {
             UnregisterEventHotKey(hotKeyRef)
         }
-        if let eventHandler {
-            RemoveEventHandler(eventHandler)
-        }
+        CarbonHotKeyDispatcher.shared?.registrations.unregister(id: id)
     }
 }
 

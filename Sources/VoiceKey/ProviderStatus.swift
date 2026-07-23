@@ -2,9 +2,13 @@ import Foundation
 
 enum ProviderStatus: Equatable {
     case loading
+    case checking
     case loginRequired
     case ready
     case starting
+    case listening
+    case thinking
+    case speaking
     case clickSent
     case voiceActive
     case stopping
@@ -13,13 +17,21 @@ enum ProviderStatus: Equatable {
     var menuTitle: String {
         switch self {
         case .loading:
-            return "Loading ChatGPT"
+            return "Loading provider"
+        case .checking:
+            return "Checking provider"
         case .loginRequired:
             return "Sign in required"
         case .ready:
             return "Ready"
         case .starting:
             return "Starting voice"
+        case .listening:
+            return "Listening"
+        case .thinking:
+            return "Thinking"
+        case .speaking:
+            return "Speaking"
         case .clickSent:
             return "Voice started"
         case .voiceActive:
@@ -35,12 +47,20 @@ enum ProviderStatus: Equatable {
         switch self {
         case .loading:
             return "VK Loading"
+        case .checking:
+            return "VK Checking"
         case .loginRequired:
             return "VK Sign In"
         case .ready:
             return "VK Ready"
         case .starting:
             return "VK Starting"
+        case .listening:
+            return "VK Listening"
+        case .thinking:
+            return "VK Thinking"
+        case .speaking:
+            return "VK Speaking"
         case .clickSent:
             return "VK Voice"
         case .voiceActive:
@@ -50,6 +70,21 @@ enum ProviderStatus: Equatable {
         case .needsAttention:
             return "VK Attention"
         }
+    }
+
+    var voiceToggleTitle: String {
+        switch self {
+        case .starting, .listening, .thinking, .speaking, .clickSent, .voiceActive:
+            return "Stop VoiceKey Voice"
+        case .stopping:
+            return "Stopping VoiceKey Voice"
+        default:
+            return "Start VoiceKey Voice"
+        }
+    }
+
+    var allowsVoiceToggleWhileReady: Bool {
+        self != .stopping
     }
 
     var detail: String? {

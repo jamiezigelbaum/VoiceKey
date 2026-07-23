@@ -4,7 +4,7 @@ cask "voicekey" do
 
   url "https://github.com/jamiezigelbaum/VoiceKey/releases/download/v#{version}/VoiceKey-#{version}-macOS.dmg"
   name "VoiceKey"
-  desc "Menu bar hotkey for ChatGPT Voice"
+  desc "Menu bar voice hotkeys for realtime AI providers"
   homepage "https://github.com/jamiezigelbaum/VoiceKey"
 
   auto_updates false
