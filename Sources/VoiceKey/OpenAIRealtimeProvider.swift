@@ -507,12 +507,23 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
 
     private func interruptAssistantPlayback() {
         guard let itemID = currentAssistantMessageItemID else { return }
+        // A loud reply during the post-playback hangover trips the gate too,
+        // but with playback finished there is nothing to cancel or truncate —
+        // the user heard everything, and a response.cancel with no active
+        // response makes the server emit an error event that would surface
+        // as a spurious needsAttention. The gate latch opening the mic is
+        // the whole interruption in that window.
+        guard audioEngineState?.isPlaybackActive == true else { return }
         let playedMilliseconds =
             audioEngineState?.currentAssistantPlayedDurationMilliseconds ?? 0
         audioEngine.stopPlayback()
         // Live verification on 2026-07-23 confirmed this cancel + truncate
         // sequence and the client_cancelled response.done that follows it.
-        sendJSON(OpenAIRealtimeRequestBuilder.responseCancelEvent)
+        // Cancel targets the in-flight response only; truncate is valid (and
+        // needed) even after response.done while playback is still draining.
+        if isResponseInFlight {
+            sendJSON(OpenAIRealtimeRequestBuilder.responseCancelEvent)
+        }
         sendJSON(OpenAIRealtimeRequestBuilder.conversationItemTruncateEvent(
             itemID: itemID,
             audioEndMilliseconds: playedMilliseconds

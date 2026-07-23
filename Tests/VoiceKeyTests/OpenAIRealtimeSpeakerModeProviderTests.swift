@@ -144,6 +144,52 @@ final class OpenAIRealtimeSpeakerModeProviderTests: XCTestCase {
         withExtendedLifetime(provider) {}
     }
 
+    func testLoudReplyDuringHangoverOpensGateWithoutCancelOrTruncate() throws {
+        let clock = SpeakerModeTestClock()
+        let engine = SpeakerModeFakeAudioEngine(state: speakerState)
+        let task = SpeakerModeFakeWebSocketTask()
+        let provider = makeConnectedProvider(
+            engine: engine,
+            task: task,
+            now: { clock.date }
+        )
+        startAudioAndAssistantTurn(
+            provider: provider,
+            task: task,
+            itemID: "assistant-1"
+        )
+
+        // Playback runs, the response completes, then playback drains: the
+        // common shape of a turn the user heard in full.
+        engine.updateState(speakerState(playbackActive: true, playedMilliseconds: 500))
+        provider.prepare()
+        task.deliver(#"{"type":"response.done"}"#)
+        provider.prepare()
+        engine.updateState(speakerState(playbackActive: false, playedMilliseconds: 500))
+        provider.prepare()
+
+        // A prompt, loud reply inside the hangover window trips the gate
+        // latch, but there is nothing to cancel or truncate — a cancel here
+        // would draw a server error and a spurious needsAttention.
+        clock.advance(milliseconds: 200)
+        for _ in 0..<3 {
+            engine.emitInput(peak: 0.2)
+            provider.prepare()
+        }
+
+        XCTAssertFalse(try task.sentEventTypes().contains("response.cancel"))
+        XCTAssertFalse(
+            try task.sentEventTypes().contains("conversation.item.truncate")
+        )
+        XCTAssertEqual(engine.stopPlaybackCount, 0)
+        // The latch opened the gate: the triggering speech streams on.
+        XCTAssertEqual(
+            try task.sentEventTypes().filter { $0 == "input_audio_buffer.append" }.count,
+            1
+        )
+        withExtendedLifetime(provider) {}
+    }
+
     func testSpeechStartedStopsPlaybackExceptInSpeakerModeDuringPlayback() {
         let engine = SpeakerModeFakeAudioEngine(
             state: speakerState(playbackActive: true)
