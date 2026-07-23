@@ -293,14 +293,21 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
             $0["method"] as? String == "talk.client.toolCall"
         })
         let clientParams = try XCTUnwrap(clientFrame["params"] as? [String: Any])
-        XCTAssertEqual(clientParams["sessionKey"] as? String, "agent:main:voicekey")
-        XCTAssertEqual(clientParams["voiceSessionId"] as? String, "relay-1")
+        XCTAssertEqual(clientParams["sessionKey"] as? String, "agent:main:main")
+        // Schema forbids extra keys; voiceSessionId must NOT be present.
+        XCTAssertNil(clientParams["voiceSessionId"])
         XCTAssertEqual(clientParams["relaySessionId"] as? String, "relay-1")
         XCTAssertEqual(clientParams["callId"] as? String, "call-1")
         XCTAssertEqual(clientParams["name"] as? String, "openclaw_agent_consult")
         XCTAssertEqual(
             (clientParams["args"] as? [String: Any])?["question"] as? String,
             "status?"
+        )
+        // The gateway schema is additionalProperties:false — the params must
+        // contain ONLY these keys, or the request is rejected on the wire.
+        XCTAssertEqual(
+            Set(clientParams.keys),
+            ["sessionKey", "relaySessionId", "callId", "name", "args"]
         )
 
         let clientRequestID = try XCTUnwrap(clientFrame["id"] as? String)
