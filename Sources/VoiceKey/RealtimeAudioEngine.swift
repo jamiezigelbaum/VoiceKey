@@ -54,7 +54,6 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     init() {
         outputEngine.attach(playerNode)
         outputEngine.connect(playerNode, to: outputEngine.mainMixerNode, format: realtimeFormat)
-        enableVoiceProcessingIfAvailable()
     }
 
     func requestMicrophoneAccess(_ completion: @escaping (Bool) -> Void) {
@@ -99,7 +98,6 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
         inputHandler: @escaping (Data) -> Void,
         activityHandler: @escaping (RealtimeAudioInputActivity) -> Void
     ) throws {
-        enableVoiceProcessingIfAvailable()
         try startOutputIfNeeded()
 
         let inputNode = inputEngine.inputNode
@@ -137,6 +135,7 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
         inputEngine.inputNode.removeTap(onBus: 0)
         inputEngine.stop()
         stopPlayback()
+        outputEngine.stop()
     }
 
     func stopPlayback() {
@@ -164,7 +163,6 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     }
 
     private func startOutputIfNeeded() throws {
-        enableVoiceProcessingIfAvailable()
         if outputEngine.isRunning == false {
             outputEngine.prepare()
             try outputEngine.start()
@@ -172,11 +170,6 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
         if playerNode.isPlaying == false {
             playerNode.play()
         }
-    }
-
-    private func enableVoiceProcessingIfAvailable() {
-        try? inputEngine.inputNode.setVoiceProcessingEnabled(true)
-        try? outputEngine.outputNode.setVoiceProcessingEnabled(true)
     }
 
     private func convertInputBuffer(
