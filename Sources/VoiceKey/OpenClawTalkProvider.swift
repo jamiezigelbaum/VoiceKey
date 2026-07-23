@@ -892,7 +892,15 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     /// ~200 ms of PCM16 mono 24 kHz, the chunk size the gateway relay expects.
     private static let audioChunkByteCount = 9_600
     private static let handshakeTimeout: TimeInterval = 3
-    private static let consultTimeout: TimeInterval = 60
+    /// Heavy agent tools (source_answer over the Olympus plugin, deep web
+    /// research) routinely exceed 60s; a 60s ceiling killed a Telegram query
+    /// on 2026-07-23 while the agent was still working. The watchdog exists
+    /// to unstick a dead gateway, not to cap honest work, so it sits well
+    /// above the slowest observed real consult.
+    private static let consultTimeout: TimeInterval = 180
+    /// Emit a reassurance diagnostic when a consult is still running at this
+    /// point, so a long wait is visibly progress rather than a hang.
+    private static let consultProgressInterval: TimeInterval = 45
     private static let agentConsultToolName = "openclaw_agent_consult"
     private static let confirmationMarker = "VOICE_CONFIRMATION_REQUIRED:"
 
@@ -1604,6 +1612,19 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         cancelConsultWatchdog()
         consultWatchdogGeneration += 1
         let watchdogGeneration = consultWatchdogGeneration
+        _ = watchdogScheduler(Self.consultProgressInterval) { [weak self] in
+            self?.performOnStateQueue { [weak self] in
+                guard let self,
+                      self.consultWatchdogGeneration == watchdogGeneration,
+                      self.consultState?.runID == runID,
+                      self.consultState?.submitRequestID == nil,
+                      self.isStopping == false else { return }
+                self.emit(.diagnostic(
+                    "OpenClaw consult still running; waiting up to "
+                        + "\(Int(Self.consultTimeout))s for the agent."
+                ))
+            }
+        }
         consultWatchdog = watchdogScheduler(Self.consultTimeout) { [weak self] in
             self?.performOnStateQueue { [weak self] in
                 guard let self,

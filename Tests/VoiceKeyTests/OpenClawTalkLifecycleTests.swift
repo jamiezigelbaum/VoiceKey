@@ -393,14 +393,19 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
             payload: #"{"runId":"run-timeout"}"#
         ))
         waitForStateQueue()
-        XCTAssertEqual(watchdogs.scheduledDelays.last, 60)
+        // A consult schedules a 45s progress reassurance and the 180s
+        // timeout watchdog (60s killed real source_answer work, 2026-07-23).
+        XCTAssertEqual(Array(watchdogs.scheduledDelays.suffix(2)), [45, 180])
 
+        let stillRunning = expectation(description: "progress diagnostic")
         let timedOut = expectation(description: "timeout diagnostic")
         let submitted = expectation(description: "timeout result submitted")
         let unexpectedAttention = expectation(description: "no attention status")
         unexpectedAttention.isInverted = true
         provider.onEvent = { event in
             switch event {
+            case let .diagnostic(message) where message.contains("consult still running"):
+                stillRunning.fulfill()
             case let .diagnostic(message) where message.contains("consult timed out"):
                 timedOut.fulfill()
             case .status(.needsAttention):
@@ -414,6 +419,8 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
                 submitted.fulfill()
             }
         }
+        XCTAssertTrue(watchdogs.fireNextActive())
+        wait(for: [stillRunning], timeout: 1)
         XCTAssertTrue(watchdogs.fireNextActive())
         wait(for: [timedOut, submitted], timeout: 1)
 
