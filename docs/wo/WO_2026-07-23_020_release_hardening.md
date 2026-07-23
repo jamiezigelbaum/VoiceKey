@@ -272,3 +272,63 @@ Surface: `Sources/VoiceKey/OpenClawTalkProvider.swift` and
 - New lifecycle tests as above; all existing OpenClawTalk tests still
   green (update them where behavior intentionally changed, e.g. scopes).
 - `swift test` and `swift build` green.
+
+---
+
+## WO-D: Per-profile MCP servers for OpenAI-protocol profiles
+
+Added 2026-07-23 afternoon. Gives OpenAI Realtime API and Custom Realtime
+Endpoint profiles provider-side tools with zero VoiceKey execution.
+
+### Verified facts (do not re-investigate)
+
+- The OpenAI Realtime API executes remote MCP tools SERVER-SIDE. The
+  client only declares them in `session.update` (or `response.create`)
+  under the `tools` array: `{"type": "mcp", "server_label": ...,
+  "server_url": ..., "allowed_tools": [...]?, "require_approval":
+  "never", "authorization": <token>?}`. Clients observe lifecycle events
+  (`mcp_list_tools.completed`, `response.mcp_call.in_progress`, ...) but
+  never run tools. Source: developers.openai.com/api/docs/guides/realtime-mcp.
+- Product principle (owner, 2026-07-23): VoiceKey NEVER executes tools.
+  Tools live in the channel. Do not add any local tool executor.
+- `OpenAIRealtimeRequestBuilder.sessionUpdateEvent`
+  (Sources/VoiceKey/OpenAIRealtimeRequestBuilder.swift) currently builds
+  the session dict with audio/instructions/model only, and
+  `instructionsWithSessionContext` stamps session-start time — keep that.
+- `VoiceProfile` (Sources/VoiceKey/VoiceProfile.swift) is Codable,
+  persisted as JSON in UserDefaults key `VoiceProfiles.v1`; adding a new
+  field must decode legacy payloads (decodeIfPresent + default).
+- `APIKeyStore` (Sources/VoiceKey/APIKeyStore.swift) is the Keychain
+  pattern for per-provider credentials.
+- OpenClaw Talk profiles get tools via the gateway agent — MCP config
+  must NOT apply to them (nor to ChatGPT Web).
+
+### Required behavior
+
+1. `VoiceProfile` gains `mcpServers: [MCPServerConfiguration]` (default
+   empty; legacy profiles decode). `MCPServerConfiguration`: `label`
+   (used as `server_label`), `urlString`, optional `allowedTools`
+   (comma-separated in UI), and a stable id used to key an optional
+   authorization token in the Keychain via the APIKeyStore pattern —
+   the token itself never lives in UserDefaults.
+2. `sessionUpdateEvent` declares each configured server as a `tools`
+   entry with `require_approval: "never"`. Empty list → no `tools` key
+   (exactly today's payload, byte-compatible).
+3. Provider event mapping: surface MCP lifecycle events as session-log
+   diagnostics (server label + tool name, never the authorization
+   value), and map an in-progress MCP call to the existing "thinking"
+   status so the menu bar animation reflects tool use.
+4. Settings: for OpenAI Realtime API and Custom Realtime Endpoint
+   profiles only, an "MCP Servers" section listing configured servers
+   with add/edit/remove — fields: label, URL, allowed tools (optional),
+   authorization token (optional, stored in Keychain, shown masked).
+   Keep the UI minimal and consistent with the existing form style.
+5. README: short section explaining tools-via-MCP (the channel owns the
+   tools; VoiceKey never executes them), with one example profile.
+
+### Acceptance
+
+- Unit tests: builder tools-array shape incl. authorization inclusion
+  and omission; no `tools` key when list empty; profile persistence
+  round-trip incl. legacy decode; MCP lifecycle event mapping.
+- `swift test` and `swift build` green.
