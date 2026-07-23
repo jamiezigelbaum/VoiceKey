@@ -283,12 +283,204 @@ final class OpenAIRealtimeSessionStopTests: XCTestCase {
         XCTAssertEqual(task.cancelCount, 1)
     }
 
+    func testMCPCallTerminationSendsContinuationWhenResponseIsIdle() throws {
+        let task = FakeRealtimeWebSocketTask()
+        let provider = makeConnectedProvider(task: task)
+
+        receive(
+            #"{"type":"response.mcp_call.completed"}"#,
+            from: task,
+            provider: provider
+        )
+
+        XCTAssertEqual(task.sendCount, 2)
+        XCTAssertEqual(try eventType(from: task.sentText(at: 1)), "response.create")
+        withExtendedLifetime(provider) {}
+    }
+
+    func testMCPCallFailureUsesTheSameContinuationPath() throws {
+        let task = FakeRealtimeWebSocketTask()
+        let provider = makeConnectedProvider(task: task)
+
+        receive(
+            #"{"type":"response.mcp_call.failed"}"#,
+            from: task,
+            provider: provider
+        )
+
+        XCTAssertEqual(task.sendCount, 2)
+        XCTAssertEqual(try eventType(from: task.sentText(at: 1)), "response.create")
+        withExtendedLifetime(provider) {}
+    }
+
+    func testMCPContinuationWaitsForActiveResponseToEnd() throws {
+        let task = FakeRealtimeWebSocketTask()
+        let provider = makeConnectedProvider(task: task)
+
+        receive(#"{"type":"response.created"}"#, from: task, provider: provider)
+        receive(
+            #"{"type":"response.mcp_call.completed"}"#,
+            at: 1,
+            from: task,
+            provider: provider
+        )
+        XCTAssertEqual(task.sendCount, 1)
+
+        receive(
+            #"{"type":"response.done"}"#,
+            at: 2,
+            from: task,
+            provider: provider
+        )
+
+        XCTAssertEqual(task.sendCount, 2)
+        XCTAssertEqual(try eventType(from: task.sentText(at: 1)), "response.create")
+        withExtendedLifetime(provider) {}
+    }
+
+    func testSpeechStartedClearsPendingMCPContinuation() {
+        let task = FakeRealtimeWebSocketTask()
+        let provider = makeConnectedProvider(task: task)
+
+        receive(#"{"type":"response.created"}"#, from: task, provider: provider)
+        receive(
+            #"{"type":"response.mcp_call.completed"}"#,
+            at: 1,
+            from: task,
+            provider: provider
+        )
+        receive(
+            #"{"type":"input_audio_buffer.speech_started"}"#,
+            at: 2,
+            from: task,
+            provider: provider
+        )
+        receive(
+            #"{"type":"response.done"}"#,
+            at: 3,
+            from: task,
+            provider: provider
+        )
+
+        XCTAssertEqual(task.sendCount, 1)
+        withExtendedLifetime(provider) {}
+    }
+
+    func testMCPContinuationsAreCappedWithoutInterveningSpeech() throws {
+        let task = FakeRealtimeWebSocketTask()
+        let provider = makeConnectedProvider(task: task)
+
+        for index in 0..<9 {
+            receive(
+                #"{"type":"response.mcp_call.completed"}"#,
+                at: index,
+                from: task,
+                provider: provider
+            )
+        }
+
+        XCTAssertEqual(task.sendCount, 9)
+        for index in 1..<task.sendCount {
+            XCTAssertEqual(try eventType(from: task.sentText(at: index)), "response.create")
+        }
+        withExtendedLifetime(provider) {}
+    }
+
+    func testStopClearsPendingMCPContinuation() {
+        let firstTask = FakeRealtimeWebSocketTask()
+        let secondTask = FakeRealtimeWebSocketTask()
+        var tasks = [firstTask, secondTask]
+        let audioEngine = FakeRealtimeAudioEngine(grantsMicrophoneAccess: true)
+        let provider = OpenAIRealtimeProvider(
+            configuration: testConfiguration,
+            apiKeyProvider: { "test-api-key" },
+            audioEngine: audioEngine,
+            webSocketTaskFactory: { _ in tasks.removeFirst() }
+        )
+
+        provider.toggleVoice()
+        provider.webSocketDidOpen(firstTask)
+        receive(
+            #"{"type":"response.created"}"#,
+            from: firstTask,
+            provider: provider
+        )
+        receive(
+            #"{"type":"response.mcp_call.completed"}"#,
+            at: 1,
+            from: firstTask,
+            provider: provider
+        )
+        provider.stopVoice()
+
+        provider.toggleVoice()
+        provider.webSocketDidOpen(secondTask)
+        receive(
+            #"{"type":"response.done"}"#,
+            from: secondTask,
+            provider: provider
+        )
+
+        XCTAssertEqual(secondTask.sendCount, 1)
+    }
+
+    func testStopResetsMCPContinuationCap() throws {
+        let firstTask = FakeRealtimeWebSocketTask()
+        let secondTask = FakeRealtimeWebSocketTask()
+        var tasks = [firstTask, secondTask]
+        let audioEngine = FakeRealtimeAudioEngine(grantsMicrophoneAccess: true)
+        let provider = OpenAIRealtimeProvider(
+            configuration: testConfiguration,
+            apiKeyProvider: { "test-api-key" },
+            audioEngine: audioEngine,
+            webSocketTaskFactory: { _ in tasks.removeFirst() }
+        )
+
+        provider.toggleVoice()
+        provider.webSocketDidOpen(firstTask)
+        for index in 0..<9 {
+            receive(
+                #"{"type":"response.mcp_call.completed"}"#,
+                at: index,
+                from: firstTask,
+                provider: provider
+            )
+        }
+        XCTAssertEqual(firstTask.sendCount, 9)
+        provider.stopVoice()
+
+        provider.toggleVoice()
+        provider.webSocketDidOpen(secondTask)
+        receive(
+            #"{"type":"response.mcp_call.completed"}"#,
+            from: secondTask,
+            provider: provider
+        )
+
+        XCTAssertEqual(secondTask.sendCount, 2)
+        XCTAssertEqual(try eventType(from: secondTask.sentText(at: 1)), "response.create")
+    }
+
     private func makeProvider(audioEngine: FakeRealtimeAudioEngine) -> OpenAIRealtimeProvider {
         OpenAIRealtimeProvider(
             configuration: testConfiguration,
             apiKeyProvider: { "test-api-key" },
             audioEngine: audioEngine
         )
+    }
+
+    private func makeConnectedProvider(
+        task: FakeRealtimeWebSocketTask
+    ) -> OpenAIRealtimeProvider {
+        let provider = OpenAIRealtimeProvider(
+            configuration: testConfiguration,
+            apiKeyProvider: { "test-api-key" },
+            audioEngine: FakeRealtimeAudioEngine(grantsMicrophoneAccess: true),
+            webSocketTaskFactory: { _ in task }
+        )
+        provider.toggleVoice()
+        provider.webSocketDidOpen(task)
+        return provider
     }
 
     private var testConfiguration: VoiceSessionConfiguration {
@@ -304,6 +496,22 @@ final class OpenAIRealtimeSessionStopTests: XCTestCase {
         let data = try XCTUnwrap(text?.data(using: .utf8))
         let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         return try XCTUnwrap(object["session"] as? [String: Any])
+    }
+
+    private func eventType(from text: String?) throws -> String {
+        let data = try XCTUnwrap(text?.data(using: .utf8))
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        return try XCTUnwrap(object["type"] as? String)
+    }
+
+    private func receive(
+        _ text: String,
+        at index: Int = 0,
+        from task: FakeRealtimeWebSocketTask,
+        provider: OpenAIRealtimeProvider
+    ) {
+        task.completeReceive(.success(.string(text)), at: index)
+        provider.prepare()
     }
 }
 

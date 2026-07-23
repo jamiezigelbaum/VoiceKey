@@ -3,6 +3,9 @@ import Foundation
 enum OpenAIRealtimeEventAction: Equatable {
     case providerEvent(VoiceProviderEvent)
     case sessionUpdated
+    case responseStarted
+    case responseEnded
+    case mcpCallTerminated
     case stopPlayback
     case audio(Data)
 }
@@ -25,6 +28,13 @@ enum OpenAIRealtimeEventMapper {
                     .providerEvent(.status(.thinking))
                 ]
             }
+            if type == "response.mcp_call.completed"
+                || type == "response.mcp_call.failed" {
+                return [
+                    .providerEvent(diagnostic),
+                    .mcpCallTerminated
+                ]
+            }
             return [.providerEvent(diagnostic)]
         }
 
@@ -41,8 +51,13 @@ enum OpenAIRealtimeEventMapper {
                 .stopPlayback,
                 .providerEvent(.status(.listening))
             ]
-        case "input_audio_buffer.speech_stopped", "input_audio_buffer.committed", "response.created":
+        case "input_audio_buffer.speech_stopped", "input_audio_buffer.committed":
             return [.providerEvent(.status(.thinking))]
+        case "response.created":
+            return [
+                .providerEvent(.status(.thinking)),
+                .responseStarted
+            ]
         case "response.output_audio.delta", "response.audio.delta":
             guard let delta = object["delta"] as? String,
                   let audio = Data(base64Encoded: delta) else {
@@ -55,8 +70,13 @@ enum OpenAIRealtimeEventMapper {
         case "response.output_audio_transcript.delta", "response.audio_transcript.delta", "response.output_text.delta":
             guard let delta = object["delta"] as? String else { return [] }
             return [.providerEvent(.transcript(delta))]
-        case "response.output_audio.done", "response.audio.done", "response.done":
+        case "response.output_audio.done", "response.audio.done":
             return [.providerEvent(.status(.listening))]
+        case "response.done":
+            return [
+                .providerEvent(.status(.listening)),
+                .responseEnded
+            ]
         case "error":
             let message = ((object["error"] as? [String: Any])?["message"] as? String)
                 ?? "OpenAI Realtime returned an error."

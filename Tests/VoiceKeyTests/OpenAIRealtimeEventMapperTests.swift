@@ -40,7 +40,10 @@ final class OpenAIRealtimeEventMapperTests: XCTestCase {
     func testResponseCreatedMapsToThinking() {
         XCTAssertEqual(
             OpenAIRealtimeEventMapper.actions(from: #"{"type":"response.created"}"#),
-            [.providerEvent(.status(.thinking))]
+            [
+                .providerEvent(.status(.thinking)),
+                .responseStarted
+            ]
         )
     }
 
@@ -80,7 +83,10 @@ final class OpenAIRealtimeEventMapperTests: XCTestCase {
     func testResponseDoneMapsBackToListening() {
         XCTAssertEqual(
             OpenAIRealtimeEventMapper.actions(from: #"{"type":"response.done"}"#),
-            [.providerEvent(.status(.listening))]
+            [
+                .providerEvent(.status(.listening)),
+                .responseEnded
+            ]
         )
     }
 
@@ -118,7 +124,7 @@ final class OpenAIRealtimeEventMapperTests: XCTestCase {
         )
     }
 
-    func testMCPCallCompletedMapsToDiagnosticOnly() {
+    func testMCPCallCompletedMapsToDiagnosticAndTerminalAction() {
         let event = #"{"type":"response.mcp_call.completed","server_label":"calendar","tool_name":"create_event"}"#
 
         XCTAssertEqual(
@@ -126,7 +132,22 @@ final class OpenAIRealtimeEventMapperTests: XCTestCase {
             [
                 .providerEvent(.diagnostic(
                     "MCP response.mcp_call.completed — server: calendar; tool: create_event."
-                ))
+                )),
+                .mcpCallTerminated
+            ]
+        )
+    }
+
+    func testMCPCallFailedMapsToDiagnosticAndTerminalAction() {
+        let event = #"{"type":"response.mcp_call.failed","server_label":"calendar","tool_name":"create_event"}"#
+
+        XCTAssertEqual(
+            OpenAIRealtimeEventMapper.actions(from: event),
+            [
+                .providerEvent(.diagnostic(
+                    "MCP response.mcp_call.failed — server: calendar; tool: create_event."
+                )),
+                .mcpCallTerminated
             ]
         )
     }
