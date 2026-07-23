@@ -398,3 +398,93 @@ relayed tool call.
   still live); timeout path; malformed envelope path; overlapping
   tool-call path.
 - `swift test` and `swift build` green.
+
+---
+
+## WO-F: Confirmed audio/hotkey release blockers
+
+Added 2026-07-23 evening. Findings are from an adversarial multi-agent
+review that VERIFIED each defect against the code (not inferred). Fix
+exactly these; the file:line and fix are precise.
+
+### Verified facts (do not re-investigate)
+
+1. `Sources/VoiceKey/VoiceKeyAppDelegate.swift` settingsController(_:isRecordingHotKey:)
+   (~line 700-712) + recorder wiring in SettingsWindowController.swift:
+   suspending all GlobalHotKey registrations while a recorder captures,
+   then re-registering only when the recorder's end callback fires, means
+   ALL hotkeys die permanently if the user abandons recording by
+   Cmd-Tabbing away or closing Settings (the end callback via
+   resignFirstResponder never fires). Stays dead until a profile Save or
+   app relaunch — disabling the app's core trigger.
+2. `Sources/VoiceKey/RealtimeAudioEngine.swift:~295-300` (performRebuild
+   give-up branch): after maxRebuildAttempts it sets isInputStreaming=false
+   and nils the stored handlers with NO channel to notify the owner. The
+   provider still holds isAudioStreaming==true and shows "listening" — a
+   permanently dead mic with zero diagnostics and no recovery (a later
+   config change bails at `guard isInputStreaming`).
+3. `Sources/VoiceKey/RealtimeAudioEngine.swift:~169-170` buildEngine:
+   engine.attach(playerNode) and engine.connect(playerNode, to:
+   engine.mainMixerNode, format:) run OUTSIDE VKCatchObjCException. On the
+   rebuild path (only reached via .AVAudioEngineConfigurationChange, i.e.
+   a settling route) engine.connect via mainMixerNode is a known ObjC
+   NSException raise site → uncatchable from Swift → SIGABRT. This is the
+   exact crash class commit 7658963/the shield were meant to prevent.
+4. Same invariant, `RealtimeAudioEngine.swift:~176-177` (inputNode/
+   outputNode acquisition in configureVoiceProcessing) and `~210-211`
+   (inputNode + inputNode.outputFormat(forBus:0) in startCapture) are read
+   unshielded before the shield opens (~line 219), all on the rebuild path.
+5. `RealtimeAudioEngine.swift:~250-256` teardownEngine: removeTap +
+   playerNode.stop + engine.stop run in ONE shield block; a raise in the
+   first two skips engine.stop() — the call that actually releases the
+   microphone. Mic can stay hot after stop() (privacy).
+6. Minor — `Sources/VoiceKey/VoiceSessionLogFile.swift`: daily transcript
+   logs under ~/Library/Logs/VoiceKey have no rotation/pruning (cleartext,
+   indefinite). Add bounded retention.
+7. Minor — `Sources/VoiceKey/OpenAIRealtimeProvider.swift:~106`: mid-session
+   profile edits re-stamp "Session started" with the edit time; capture the
+   start Date once at connect and thread it through live updates (or relabel).
+
+Do NOT touch OpenAIRealtimeRequestBuilder.swift (web-search wiring is being
+done separately) or the OpenClaw consult tool-call frame logic (separate
+fix). You MAY add an onFatalFailure hook to OpenClawTalkProvider's engine
+wiring for finding #2, but do not modify its tool-call/handshake code.
+
+### Required behavior
+
+1. Robust hotkey suspend/resume: reset the recorder's isRecording=false
+   on the Settings window's windowWillClose AND windowDidResignKey (and/or
+   applicationDidResignActive), so abandoning recording always re-registers
+   hotkeys. Make showSettings/openSettings call registerAllHotKeys()
+   defensively so a stuck-suspended state self-heals on reopen. Do not rely
+   on resignFirstResponder firing.
+2. Add an out-of-band failure channel to RealtimeAudioEngine (e.g. a
+   stored `onFatalFailure: (() -> Void)?` or an error event). In the
+   performRebuild give-up branch: call teardownEngine(), then invoke the
+   channel. Wire BOTH OpenAIRealtimeProvider and OpenClawTalkProvider to,
+   on that callback, set isAudioStreaming=false, stop, and emit
+   .status(.needsAttention(...)) with a clear message.
+3+4. Wrap EVERY AVAudioEngine graph mutation and hardware-format read on
+   the rebuild path in the existing shielded(...) helper: engine.attach,
+   engine.connect, inputNode/outputNode acquisition, and
+   inputNode.outputFormat(forBus:0). A raise must surface as a thrown
+   RealtimeAudioEngineError feeding the existing retry/backoff, never abort.
+5. In teardownEngine, shield each of removeTap / playerNode.stop /
+   engine.stop independently so engine.stop() always runs.
+6. Add retention to VoiceSessionLogFile: on write (or init), delete
+   session-*.log files older than N days (e.g. 14). Keep it cheap and
+   crash-safe.
+7. Capture the session start Date once at connect in OpenAIRealtimeProvider
+   and reuse it for live session.update stamps (or relabel to "Current
+   time"). Match the POSIX/Gregorian formatter already in VoiceSessionLogFile.
+
+### Acceptance
+
+- New/updated unit tests: hotkey re-registration after simulated
+  window-close/resign-key while recording; engine onFatalFailure invoked
+  on rebuild give-up (drive via the injectable watchdogScheduler already in
+  the engine, or a test hook) and provider surfaces needsAttention;
+  teardown still stops the engine when an earlier shielded call throws
+  (inject a throwing stub if feasible); log retention deletes old files.
+- `swift test` and `swift build` green. If a test needs CoreAudio and the
+  sandbox lacks it, exclude only that test and flag it.
