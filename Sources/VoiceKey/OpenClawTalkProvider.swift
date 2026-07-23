@@ -6,9 +6,10 @@ enum OpenClawTalkEventAction: Equatable {
     case providerEvent(VoiceProviderEvent)
     case connectChallenge
     case connected
-    case sessionCreated(sessionID: String)
+    case sessionCreated(sessionID: String, relaySessionID: String)
     case sessionReady
     case audio(Data)
+    case assistantTurnEnded
     case stopPlayback
     case sessionClosed(reason: String?)
     case handshakeFailed(message: String)
@@ -79,7 +80,7 @@ enum OpenClawTalkRequestBuilder {
                     "mode": clientMode
                 ],
                 "role": role,
-                "scopes": ["operator.admin", "operator.talk", "operator.write", "operator.read"],
+                "scopes": ["operator.talk", "operator.write", "operator.read"],
                 "auth": ["token": token]
             ]
         ]
@@ -449,8 +450,9 @@ enum OpenClawTalkEventMapper {
             guard let sessionID = (payload?["sessionId"] as? String) ?? (payload?["relaySessionId"] as? String) else {
                 return [.handshakeFailed(message: "OpenClaw gateway did not return a talk session id.")]
             }
+            let relaySessionID = (payload?["relaySessionId"] as? String) ?? sessionID
             return [
-                .sessionCreated(sessionID: sessionID),
+                .sessionCreated(sessionID: sessionID, relaySessionID: relaySessionID),
                 .providerEvent(.diagnostic("OpenClaw talk session created."))
             ]
         default:
@@ -507,7 +509,10 @@ enum OpenClawTalkEventMapper {
                 .providerEvent(.status(.speaking))
             ]
         case "audioDone":
-            return [.providerEvent(.status(.listening))]
+            return [
+                .assistantTurnEnded,
+                .providerEvent(.status(.listening))
+            ]
         case "clear":
             // Barge-in side-effect: flush queued playback immediately.
             return [
@@ -564,6 +569,122 @@ enum OpenClawTalkEventMapper {
     }
 }
 
+protocol OpenClawTalkWebSocket: AnyObject {
+    var onOpen: (() -> Void)? { get set }
+    var onClose: ((URLSessionWebSocketTask.CloseCode) -> Void)? { get set }
+
+    func resume()
+    func receive(
+        completionHandler: @escaping (Result<URLSessionWebSocketTask.Message, Error>) -> Void
+    )
+    func send(
+        _ message: URLSessionWebSocketTask.Message,
+        completionHandler: @escaping (Error?) -> Void
+    )
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
+    func invalidateAndCancel()
+}
+
+final class OpenClawTalkURLSessionWebSocket: NSObject, OpenClawTalkWebSocket {
+    var onOpen: (() -> Void)? {
+        get {
+            handlerLock.lock()
+            defer { handlerLock.unlock() }
+            return openHandler
+        }
+        set {
+            handlerLock.lock()
+            openHandler = newValue
+            handlerLock.unlock()
+        }
+    }
+    var onClose: ((URLSessionWebSocketTask.CloseCode) -> Void)? {
+        get {
+            handlerLock.lock()
+            defer { handlerLock.unlock() }
+            return closeHandler
+        }
+        set {
+            handlerLock.lock()
+            closeHandler = newValue
+            handlerLock.unlock()
+        }
+    }
+
+    private let request: URLRequest
+    private let handlerLock = NSLock()
+    private var openHandler: (() -> Void)?
+    private var closeHandler: ((URLSessionWebSocketTask.CloseCode) -> Void)?
+    private lazy var session = URLSession(
+        configuration: .default,
+        delegate: self,
+        delegateQueue: nil
+    )
+    private lazy var task = session.webSocketTask(with: request)
+
+    init(request: URLRequest) {
+        self.request = request
+    }
+
+    func resume() {
+        task.resume()
+    }
+
+    func receive(
+        completionHandler: @escaping (Result<URLSessionWebSocketTask.Message, Error>) -> Void
+    ) {
+        task.receive(completionHandler: completionHandler)
+    }
+
+    func send(
+        _ message: URLSessionWebSocketTask.Message,
+        completionHandler: @escaping (Error?) -> Void
+    ) {
+        task.send(message, completionHandler: completionHandler)
+    }
+
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        task.cancel(with: closeCode, reason: reason)
+    }
+
+    func invalidateAndCancel() {
+        session.invalidateAndCancel()
+    }
+}
+
+extension OpenClawTalkURLSessionWebSocket: URLSessionWebSocketDelegate {
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didOpenWithProtocol protocol: String?
+    ) {
+        guard webSocketTask === task else { return }
+        onOpen?()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
+        reason: Data?
+    ) {
+        guard webSocketTask === task else { return }
+        onClose?(closeCode)
+    }
+}
+
+protocol OpenClawTalkWatchdogCancellation: AnyObject {
+    func cancel()
+}
+
+extension DispatchWorkItem: OpenClawTalkWatchdogCancellation {}
+
+typealias OpenClawTalkWebSocketFactory = (URLRequest) -> OpenClawTalkWebSocket
+typealias OpenClawTalkWatchdogScheduler = (
+    TimeInterval,
+    @escaping () -> Void
+) -> OpenClawTalkWatchdogCancellation
+
 final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     let id: VoiceProviderID = .openClaw
     let capabilities = VoiceProviderCapabilities(
@@ -576,19 +697,63 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         supportsConnectionCheck: false
     )
 
-    var onEvent: ((VoiceProviderEvent) -> Void)?
+    var onEvent: ((VoiceProviderEvent) -> Void)? {
+        get {
+            withStateSync { eventHandler }
+        }
+        set {
+            withStateSync { eventHandler = newValue }
+        }
+    }
 
     private static let openClawBundleID = "ai.openclaw.mac"
     private static let missingTokenMessage = "OpenClaw gateway token not found — paste it in Settings"
     private static let unreachableMessage = "OpenClaw gateway unreachable — is the tunnel/OpenClaw running?"
     /// ~200 ms of PCM16 mono 24 kHz, the chunk size the gateway relay expects.
     private static let audioChunkByteCount = 9_600
+    private static let handshakeTimeout: TimeInterval = 3
 
+    private enum HandshakePhase: Equatable {
+        case awaitingSocketOpen
+        case awaitingChallenge
+        case awaitingHello
+        case awaitingSessionCreated
+
+        var diagnosticDescription: String {
+            switch self {
+            case .awaitingSocketOpen:
+                return "the WebSocket to open"
+            case .awaitingChallenge:
+                return "connect.challenge"
+            case .awaitingHello:
+                return "hello-ok"
+            case .awaitingSessionCreated:
+                return "talk.session.create"
+            }
+        }
+    }
+
+    private let stateQueue = DispatchQueue(label: "VoiceKey.OpenClawTalkProvider.state")
+    private let stateQueueKey = DispatchSpecificKey<Void>()
+    private var eventHandler: ((VoiceProviderEvent) -> Void)?
     private var configuration: VoiceSessionConfiguration
     private let tokenProvider: () -> String?
-    private let audioEngine: RealtimeAudioEngineProtocol
-    private lazy var urlSession = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
-    private var webSocketTask: URLSessionWebSocketTask?
+    private let audioEngineFactory: () -> RealtimeAudioEngineProtocol
+    private var instantiatedAudioEngine: RealtimeAudioEngineProtocol?
+    private var audioEngine: RealtimeAudioEngineProtocol {
+        if let instantiatedAudioEngine {
+            return instantiatedAudioEngine
+        }
+        let engine = audioEngineFactory()
+        instantiatedAudioEngine = engine
+        return engine
+    }
+    private let webSocketFactory: OpenClawTalkWebSocketFactory
+    private let watchdogScheduler: OpenClawTalkWatchdogScheduler
+    private var webSocket: OpenClawTalkWebSocket?
+    private var handshakeWatchdog: OpenClawTalkWatchdogCancellation?
+    private var handshakeWatchdogGeneration = 0
+    private var handshakePhase: HandshakePhase?
     private var startGeneration = 0
     private var isStarting = false
     private var isConnecting = false
@@ -602,7 +767,9 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     private var hasReportedMicrophoneSignal = false
     private var endpointCandidates: [String] = []
     private var endpointCandidateIndex = 0
+    private var currentEndpoint: String?
     private var sessionID: String?
+    private var relaySessionID: String?
     private var nextRequestIDValue = 3
     private var pendingAudio = Data()
     private var gatewayToken: String?
@@ -616,18 +783,47 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     init(
         configuration: VoiceSessionConfiguration,
         tokenProvider: @escaping () -> String?,
-        audioEngine: RealtimeAudioEngineProtocol = RealtimeAudioEngine(),
+        audioEngine: @autoclosure @escaping () -> RealtimeAudioEngineProtocol = RealtimeAudioEngine(),
         deviceCredentialsProvider: @escaping () -> OpenClawDeviceCredentials? = {
             OpenClawDeviceIdentityStore.loadCredentials()
+        },
+        webSocketFactory: @escaping OpenClawTalkWebSocketFactory = {
+            OpenClawTalkURLSessionWebSocket(request: $0)
+        },
+        watchdogScheduler: @escaping OpenClawTalkWatchdogScheduler = { delay, action in
+            let workItem = DispatchWorkItem(block: action)
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(
+                deadline: .now() + delay,
+                execute: workItem
+            )
+            return workItem
         }
     ) {
         self.configuration = configuration
         self.tokenProvider = tokenProvider
-        self.audioEngine = audioEngine
+        self.audioEngineFactory = audioEngine
         self.deviceCredentialsProvider = deviceCredentialsProvider
+        self.webSocketFactory = webSocketFactory
+        self.watchdogScheduler = watchdogScheduler
+        super.init()
+        stateQueue.setSpecific(key: stateQueueKey, value: ())
+    }
+
+    deinit {
+        withStateSync {
+            cancelHandshakeWatchdog()
+            instantiatedAudioEngine?.stop()
+            disposeCurrentSocket()
+        }
     }
 
     func prepare() {
+        withStateSync {
+            prepareOnStateQueue()
+        }
+    }
+
+    private func prepareOnStateQueue() {
         guard tokenProvider() != nil else {
             emit(.status(.needsAttention(Self.missingTokenMessage)))
             return
@@ -636,31 +832,41 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     }
 
     func update(configuration: VoiceSessionConfiguration) {
-        self.configuration = configuration
-        // The gateway owns the live session; endpoint changes apply next session.
-        guard isConnected == false else { return }
-        if isStarting || isConnecting {
-            emit(.status(.starting))
-        } else {
-            prepare()
+        withStateSync {
+            self.configuration = configuration
+            // The gateway owns the live session; endpoint changes apply next session.
+            guard isConnected == false else { return }
+            if isStarting || isConnecting {
+                emit(.status(.starting))
+            } else {
+                prepareOnStateQueue()
+            }
         }
     }
 
     func toggleVoice() {
-        switch VoiceToggleDecision.decide(
-            isStarting: isStarting,
-            isConnecting: isConnecting,
-            isConnected: isConnected,
-            isAudioStreaming: isAudioStreaming
-        ) {
-        case .stop:
-            stopVoice()
-        case .start:
-            startVoice()
+        withStateSync {
+            switch VoiceToggleDecision.decide(
+                isStarting: isStarting,
+                isConnecting: isConnecting,
+                isConnected: isConnected,
+                isAudioStreaming: isAudioStreaming
+            ) {
+            case .stop:
+                stopVoiceOnStateQueue()
+            case .start:
+                startVoice()
+            }
         }
     }
 
     func stopVoice() {
+        withStateSync {
+            stopVoiceOnStateQueue()
+        }
+    }
+
+    private func stopVoiceOnStateQueue() {
         startGeneration += 1
         isStopping = true
         emit(.status(.stopping))
@@ -673,13 +879,26 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     }
 
     func showProviderInterface() {
-        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.openClawBundleID) else {
-            emit(.diagnostic("The OpenClaw app is not installed."))
-            return
-        }
-        NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
-            if let error {
-                self?.emit(.diagnostic("Could not open the OpenClaw app: \(error.localizedDescription)"))
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard let appURL = NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: Self.openClawBundleID
+            ) else {
+                self.performOnStateQueue { [weak self] in
+                    self?.emit(.diagnostic("The OpenClaw app is not installed."))
+                }
+                return
+            }
+            NSWorkspace.shared.openApplication(
+                at: appURL,
+                configuration: NSWorkspace.OpenConfiguration()
+            ) { [weak self] _, error in
+                guard let error else { return }
+                self?.performOnStateQueue { [weak self] in
+                    self?.emit(.diagnostic(
+                        "Could not open the OpenClaw app: \(error.localizedDescription)"
+                    ))
+                }
             }
         }
     }
@@ -703,16 +922,20 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         hasReportedMicrophoneSignal = false
         emit(.status(.starting))
         audioEngine.requestMicrophoneAccess { [weak self] granted in
-            guard let self else { return }
-            guard self.startGeneration == generation,
-                  self.isStarting,
-                  self.isStopping == false else { return }
-            guard granted else {
-                self.isStarting = false
-                self.emit(.status(.needsAttention(RealtimeAudioEngineError.microphoneDenied.localizedDescription)))
-                return
+            self?.performOnStateQueue { [weak self] in
+                guard let self,
+                      self.startGeneration == generation,
+                      self.isStarting,
+                      self.isStopping == false else { return }
+                guard granted else {
+                    self.isStarting = false
+                    self.emit(.status(.needsAttention(
+                        RealtimeAudioEngineError.microphoneDenied.localizedDescription
+                    )))
+                    return
+                }
+                self.connect(token: token, generation: generation)
             }
-            self.connect(token: token, generation: generation)
         }
     }
 
@@ -727,6 +950,7 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         hasRetriedWithApprovedScopes = false
         endpointCandidates = OpenClawTalkRequestBuilder.endpointCandidates(endpointURL: configuration.endpointURL)
         endpointCandidateIndex = 0
+        currentEndpoint = nil
         nextRequestIDValue = 3
         isStarting = false
         isConnecting = true
@@ -753,11 +977,30 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
 
         isConnecting = true
         isConnected = false
+        hasConnectedToGateway = false
+        sessionID = nil
+        relaySessionID = nil
+        currentEndpoint = endpoint
+        handshakePhase = .awaitingSocketOpen
         emit(.diagnostic("Connecting to OpenClaw gateway at \(endpoint)."))
-        let task = urlSession.webSocketTask(with: request)
-        webSocketTask = task
-        task.resume()
-        receiveLoop(task: task, generation: generation)
+        let socket = webSocketFactory(request)
+        socket.onOpen = { [weak self, weak socket] in
+            guard let socket else { return }
+            self?.performOnStateQueue { [weak self, weak socket] in
+                guard let self, let socket else { return }
+                self.handleSocketOpened(socket, generation: generation)
+            }
+        }
+        socket.onClose = { [weak self, weak socket] closeCode in
+            guard let socket else { return }
+            self?.performOnStateQueue { [weak self, weak socket] in
+                guard let self, let socket else { return }
+                self.handleSocketClosed(socket, closeCode: closeCode, generation: generation)
+            }
+        }
+        webSocket = socket
+        socket.resume()
+        receiveLoop(socket: socket, generation: generation)
     }
 
     private func startAudioStreaming() {
@@ -767,17 +1010,17 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         do {
             try audioEngine.start(
                 inputHandler: { [weak self] audio in
-                    self?.queueMicrophoneAudio(audio)
+                    self?.performOnStateQueue { [weak self] in
+                        self?.queueMicrophoneAudio(audio)
+                    }
                 },
                 activityHandler: { [weak self] activity in
-                    self?.handleInputActivity(activity)
+                    self?.performOnStateQueue { [weak self] in
+                        self?.handleInputActivity(activity)
+                    }
                 }
             )
-            // stopVoice() runs on the main thread while this runs on the URLSession
-            // delegate queue. If a stop landed while the engine was starting, the
-            // engine may be running for a session that no longer exists — tear it
-            // down instead of leaking the microphone.
-            guard isConnected, isStopping == false else {
+            guard webSocket != nil, sessionID != nil, isStopping == false else {
                 isAudioStreaming = false
                 audioEngine.stop()
                 return
@@ -831,25 +1074,34 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
 
     // MARK: - Receiving
 
-    private func receiveLoop(task: URLSessionWebSocketTask, generation: Int) {
-        task.receive { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case let .success(message):
-                guard self.webSocketTask === task, self.isStopping == false else { return }
-                self.handle(message)
-                if self.webSocketTask === task {
-                    self.receiveLoop(task: task, generation: generation)
-                }
-            case let .failure(error):
-                guard self.webSocketTask === task, self.isStopping == false else { return }
-                self.webSocketTask = nil
-                if self.hasConnectedToGateway {
-                    self.teardownConnection()
-                    self.emit(.diagnostic("OpenClaw gateway connection lost: \(error.localizedDescription)"))
-                    self.emit(.status(.ready))
-                } else {
-                    self.connectToNextEndpointCandidate(generation: generation)
+    private func receiveLoop(socket: OpenClawTalkWebSocket, generation: Int) {
+        socket.receive { [weak self, weak socket] result in
+            guard let socket else { return }
+            self?.performOnStateQueue { [weak self, weak socket] in
+                guard let self,
+                      let socket,
+                      self.webSocket === socket,
+                      self.startGeneration == generation,
+                      self.isStopping == false else { return }
+                switch result {
+                case let .success(message):
+                    self.handle(message)
+                    if self.webSocket === socket {
+                        self.receiveLoop(socket: socket, generation: generation)
+                    }
+                case let .failure(error):
+                    if self.sessionID == nil {
+                        self.advanceToNextEndpointCandidate(
+                            generation: generation,
+                            diagnostic: "OpenClaw gateway handshake failed: \(error.localizedDescription)"
+                        )
+                    } else {
+                        self.teardownConnection()
+                        self.emit(.diagnostic(
+                            "OpenClaw gateway connection lost: \(error.localizedDescription)"
+                        ))
+                        self.emit(.status(.ready))
+                    }
                 }
             }
         }
@@ -869,22 +1121,30 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     }
 
     private func handleEventText(_ text: String) {
-        for action in OpenClawTalkEventMapper.actions(from: text, sessionID: sessionID) {
+        for action in OpenClawTalkEventMapper.actions(from: text, sessionID: relaySessionID) {
             switch action {
             case .connectChallenge:
+                cancelHandshakeWatchdog()
                 sendConnectFrame(nonce: OpenClawTalkEventMapper.connectChallengeNonce(from: text))
+                scheduleHandshakeWatchdog(.awaitingHello)
             case .connected:
                 handleGatewayConnected()
-            case let .sessionCreated(newSessionID):
+            case let .sessionCreated(newSessionID, newRelaySessionID):
+                cancelHandshakeWatchdog()
                 sessionID = newSessionID
+                relaySessionID = newRelaySessionID
+                gatewayToken = nil
             case .sessionReady:
                 startAudioStreaming()
             case let .audio(audio):
                 isSpeaking = true
-                hasCancelledOutput = false
                 audioEngine.playPCM16(audio)
+            case .assistantTurnEnded:
+                isSpeaking = false
+                hasCancelledOutput = false
             case .stopPlayback:
                 isSpeaking = false
+                hasCancelledOutput = false
                 audioEngine.stopPlayback()
             case let .sessionClosed(reason):
                 handleSessionClosed(reason: reason)
@@ -893,9 +1153,6 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
             case let .connectRetryWithScopes(scopes, message):
                 retryConnectWithApprovedScopes(scopes, failureMessage: message)
             case let .providerEvent(event):
-                if case .status(.listening) = event {
-                    isSpeaking = false
-                }
                 emit(event)
             }
         }
@@ -903,25 +1160,31 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
 
     private func sendConnectFrame(nonce: String?) {
         guard let gatewayToken else { return }
-        if let deviceCredentials,
-           let nonce,
-           let proof = makeDeviceProof(credentials: deviceCredentials, nonce: nonce) {
-            sendJSON(OpenClawTalkRequestBuilder.connectFrame(
-                token: gatewayToken,
-                clientVersion: Self.clientVersion,
-                scopes: requestedScopesOverride ?? deviceCredentials.operatorScopes,
-                deviceToken: deviceCredentials.operatorToken,
-                deviceProof: proof
-            ))
-        } else {
-            // No paired-device material on this Mac (or no challenge nonce): the
-            // bare gateway token connects but carries no scopes, so talk setup will
-            // surface the gateway's "missing scope"/pairing guidance instead.
-            sendJSON(OpenClawTalkRequestBuilder.connectFrame(
-                token: gatewayToken,
-                clientVersion: Self.clientVersion
-            ))
+        if let deviceCredentials {
+            if let nonce,
+               let proof = makeDeviceProof(credentials: deviceCredentials, nonce: nonce) {
+                sendJSON(OpenClawTalkRequestBuilder.connectFrame(
+                    token: gatewayToken,
+                    clientVersion: Self.clientVersion,
+                    scopes: requestedScopesOverride ?? deviceCredentials.operatorScopes,
+                    deviceToken: deviceCredentials.operatorToken,
+                    deviceProof: proof
+                ))
+                return
+            }
+            if nonce == nil {
+                emit(.diagnostic(
+                    "OpenClaw gateway challenge omitted a nonce; paired-device authentication is unavailable."
+                ))
+            }
         }
+
+        // Without usable paired-device proof, the bare gateway token connects but
+        // carries no scopes; talk setup surfaces the gateway's pairing guidance.
+        sendJSON(OpenClawTalkRequestBuilder.connectFrame(
+            token: gatewayToken,
+            clientVersion: Self.clientVersion
+        ))
     }
 
     private func makeDeviceProof(credentials: OpenClawDeviceCredentials, nonce: String) -> OpenClawDeviceProof? {
@@ -967,16 +1230,19 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         hasRetriedWithApprovedScopes = true
         requestedScopesOverride = scopes
         emit(.diagnostic("OpenClaw gateway approved scopes differ; reconnecting with adjusted scopes."))
-        webSocketTask?.cancel(with: .normalClosure, reason: nil)
-        webSocketTask = nil
+        cancelHandshakeWatchdog()
+        disposeCurrentSocket()
+        isConnected = false
+        hasConnectedToGateway = false
         endpointCandidateIndex = max(0, endpointCandidateIndex - 1)
         connectToNextEndpointCandidate(generation: startGeneration)
     }
 
     private func handleGatewayConnected() {
+        cancelHandshakeWatchdog()
         hasConnectedToGateway = true
-        gatewayToken = nil
         sendJSON(OpenClawTalkRequestBuilder.sessionCreateFrame())
+        scheduleHandshakeWatchdog(.awaitingSessionCreated)
     }
 
     private func handleSessionClosed(reason: String?) {
@@ -994,10 +1260,106 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         emit(.status(.needsAttention(message)))
     }
 
+    private func handleSocketOpened(
+        _ socket: OpenClawTalkWebSocket,
+        generation: Int
+    ) {
+        guard webSocket === socket,
+              startGeneration == generation,
+              isStopping == false else { return }
+        isConnecting = false
+        isConnected = true
+        emit(.diagnostic("OpenClaw gateway WebSocket opened."))
+        if handshakePhase == .awaitingSocketOpen {
+            scheduleHandshakeWatchdog(.awaitingChallenge)
+        }
+    }
+
+    private func handleSocketClosed(
+        _ socket: OpenClawTalkWebSocket,
+        closeCode: URLSessionWebSocketTask.CloseCode,
+        generation: Int
+    ) {
+        guard webSocket === socket,
+              startGeneration == generation,
+              isStopping == false else { return }
+        if sessionID == nil {
+            advanceToNextEndpointCandidate(
+                generation: generation,
+                diagnostic: "OpenClaw gateway closed during handshake (code \(closeCode.rawValue))."
+            )
+        } else {
+            teardownConnection()
+            emit(.diagnostic(
+                "OpenClaw gateway connection closed (code \(closeCode.rawValue))."
+            ))
+            emit(.status(.ready))
+        }
+    }
+
+    private func scheduleHandshakeWatchdog(_ phase: HandshakePhase) {
+        cancelHandshakeWatchdog()
+        handshakePhase = phase
+        handshakeWatchdogGeneration += 1
+        let watchdogGeneration = handshakeWatchdogGeneration
+        handshakeWatchdog = watchdogScheduler(Self.handshakeTimeout) { [weak self] in
+            self?.performOnStateQueue { [weak self] in
+                guard let self,
+                      self.handshakeWatchdogGeneration == watchdogGeneration,
+                      self.handshakePhase == phase,
+                      self.webSocket != nil,
+                      self.isStopping == false else { return }
+                self.handshakeWatchdog = nil
+                self.handshakePhase = nil
+                let endpoint = self.currentEndpoint ?? "the current endpoint"
+                self.advanceToNextEndpointCandidate(
+                    generation: self.startGeneration,
+                    diagnostic: """
+                        OpenClaw gateway at \(endpoint) timed out waiting for \
+                        \(phase.diagnosticDescription).
+                        """
+                )
+            }
+        }
+    }
+
+    private func cancelHandshakeWatchdog() {
+        handshakeWatchdogGeneration += 1
+        handshakeWatchdog?.cancel()
+        handshakeWatchdog = nil
+        handshakePhase = nil
+    }
+
+    private func advanceToNextEndpointCandidate(
+        generation: Int,
+        diagnostic: String
+    ) {
+        guard startGeneration == generation, isStopping == false else { return }
+        emit(.diagnostic(diagnostic))
+        cancelHandshakeWatchdog()
+        disposeCurrentSocket()
+        isConnecting = true
+        isConnected = false
+        hasConnectedToGateway = false
+        sessionID = nil
+        relaySessionID = nil
+        currentEndpoint = nil
+        connectToNextEndpointCandidate(generation: generation)
+    }
+
+    private func disposeCurrentSocket() {
+        guard let socket = webSocket else { return }
+        webSocket = nil
+        socket.onOpen = nil
+        socket.onClose = nil
+        socket.cancel(with: .normalClosure, reason: nil)
+        socket.invalidateAndCancel()
+    }
+
     private func teardownConnection() {
+        cancelHandshakeWatchdog()
         audioEngine.stop()
-        webSocketTask?.cancel(with: .normalClosure, reason: nil)
-        webSocketTask = nil
+        disposeCurrentSocket()
         isStarting = false
         isConnecting = false
         isConnected = false
@@ -1008,6 +1370,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         hasReportedMicrophoneAudio = false
         hasReportedMicrophoneSignal = false
         sessionID = nil
+        relaySessionID = nil
+        currentEndpoint = nil
         pendingAudio = Data()
         gatewayToken = nil
         deviceCredentials = nil
@@ -1025,56 +1389,42 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     }
 
     private func sendJSON(_ object: [String: Any]) {
-        guard let webSocketTask,
+        guard let socket = webSocket,
               let data = try? JSONSerialization.data(withJSONObject: object),
               let text = String(data: data, encoding: .utf8) else {
             return
         }
-        webSocketTask.send(.string(text)) { [weak self] error in
-            if let error {
-                self?.emit(.status(.needsAttention(error.localizedDescription)))
+        socket.send(.string(text)) { [weak self, weak socket] error in
+            guard let error, let socket else { return }
+            self?.performOnStateQueue { [weak self, weak socket] in
+                guard let self,
+                      let socket,
+                      self.webSocket === socket,
+                      self.isStopping == false else { return }
+                self.emit(.status(.needsAttention(error.localizedDescription)))
             }
         }
     }
 
     private func emit(_ event: VoiceProviderEvent) {
-        DispatchQueue.main.async { [weak self] in
-            self?.onEvent?(event)
+        let handler = eventHandler
+        DispatchQueue.main.async {
+            handler?(event)
         }
     }
-}
 
-extension OpenClawTalkProvider: URLSessionWebSocketDelegate {
-    func urlSession(
-        _ session: URLSession,
-        webSocketTask: URLSessionWebSocketTask,
-        didOpenWithProtocol protocol: String?
-    ) {
-        guard let currentTask = self.webSocketTask,
-              currentTask === webSocketTask,
-              isStopping == false else { return }
-        isConnecting = false
-        isConnected = true
-        emit(.diagnostic("OpenClaw gateway WebSocket opened."))
-        // The server pushes connect.challenge immediately; the receive loop picks it up.
+    private func withStateSync<T>(_ action: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: stateQueueKey) != nil {
+            return action()
+        }
+        return stateQueue.sync(execute: action)
     }
 
-    func urlSession(
-        _ session: URLSession,
-        webSocketTask: URLSessionWebSocketTask,
-        didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
-        reason: Data?
-    ) {
-        guard let currentTask = self.webSocketTask,
-              currentTask === webSocketTask,
-              isStopping == false else { return }
-        self.webSocketTask = nil
-        if hasConnectedToGateway {
-            teardownConnection()
-            emit(.diagnostic("OpenClaw gateway connection closed (code \(closeCode.rawValue))."))
-            emit(.status(.ready))
+    private func performOnStateQueue(_ action: @escaping () -> Void) {
+        if DispatchQueue.getSpecific(key: stateQueueKey) != nil {
+            action()
         } else {
-            connectToNextEndpointCandidate(generation: startGeneration)
+            stateQueue.async(execute: action)
         }
     }
 }

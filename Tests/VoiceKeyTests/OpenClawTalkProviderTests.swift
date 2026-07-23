@@ -69,7 +69,7 @@ final class OpenClawTalkProviderTests: XCTestCase {
         XCTAssertEqual(params["maxProtocol"] as? Int, 4)
         XCTAssertEqual(params["role"] as? String, "operator")
         XCTAssertEqual(params["scopes"] as? [String], [
-            "operator.admin", "operator.talk", "operator.write", "operator.read"
+            "operator.talk", "operator.write", "operator.read"
         ])
 
         let client = try dictionary(params["client"])
@@ -171,7 +171,31 @@ final class OpenClawTalkProviderTests: XCTestCase {
         XCTAssertEqual(
             OpenClawTalkEventMapper.actions(from: frame, sessionID: nil),
             [
-                .sessionCreated(sessionID: "session-1"),
+                .sessionCreated(sessionID: "session-1", relaySessionID: "session-1"),
+                .providerEvent(.diagnostic("OpenClaw talk session created."))
+            ]
+        )
+    }
+
+    func testSessionCreateResponseKeepsDistinctRelaySessionID() {
+        let frame = #"{"type":"res","id":"2","ok":true,"payload":{"sessionId":"session-1","relaySessionId":"relay-1"}}"#
+
+        XCTAssertEqual(
+            OpenClawTalkEventMapper.actions(from: frame, sessionID: nil),
+            [
+                .sessionCreated(sessionID: "session-1", relaySessionID: "relay-1"),
+                .providerEvent(.diagnostic("OpenClaw talk session created."))
+            ]
+        )
+    }
+
+    func testSessionCreateResponseFallsBackToSessionIDForRelayMatching() {
+        let frame = #"{"type":"res","id":"2","ok":true,"payload":{"sessionId":"session-1"}}"#
+
+        XCTAssertEqual(
+            OpenClawTalkEventMapper.actions(from: frame, sessionID: nil),
+            [
+                .sessionCreated(sessionID: "session-1", relaySessionID: "session-1"),
                 .providerEvent(.diagnostic("OpenClaw talk session created."))
             ]
         )
@@ -260,7 +284,10 @@ final class OpenClawTalkProviderTests: XCTestCase {
 
         XCTAssertEqual(
             OpenClawTalkEventMapper.actions(from: frame, sessionID: "session-1"),
-            [.providerEvent(.status(.listening))]
+            [
+                .assistantTurnEnded,
+                .providerEvent(.status(.listening))
+            ]
         )
     }
 
