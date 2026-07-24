@@ -23,3 +23,14 @@ if [[ -d "$ROOT/Resources" ]]; then
 fi
 
 echo "$APP"
+
+# Sign dev builds with a stable identity when available: macOS TCC keys
+# accessibility/microphone grants to the code signature, and ad-hoc
+# rebuilds invalidate them silently on every build (2026-07-24: an
+# accessibility grant vanished after a rebuild, breaking native clicks).
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application: JAMIE B ZIGELBAUM"; then
+  codesign --force --deep --options runtime --entitlements /dev/null \
+    --sign "Developer ID Application: JAMIE B ZIGELBAUM (5L9687WCZQ)" "$APP" 2>/dev/null \
+    || codesign --force --deep --sign "Developer ID Application: JAMIE B ZIGELBAUM (5L9687WCZQ)" "$APP"
+  echo "signed: $(codesign -dv "$APP" 2>&1 | grep '^Authority' | head -1)"
+fi
