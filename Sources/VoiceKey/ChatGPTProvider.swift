@@ -268,7 +268,11 @@ final class ChatGPTProvider: NSObject {
             let title = dictionary["title"] as? String ?? "?"
             let url = dictionary["url"] as? String ?? "?"
             let labels = dictionary["labels"] as? String ?? ""
-            self.log("ChatGPT control inventory — title: \(title) | url: \(url) | controls: \(labels)")
+            let summary = "ChatGPT control inventory — title: \(title) | url: \(url) | controls: \(labels)"
+            self.log(summary)
+            // NSLog alone vanishes into unified-log redaction; the session
+            // log is the project's ground-truth sink for diagnostics.
+            self.onDebugChange?(summary)
         }
     }
 
