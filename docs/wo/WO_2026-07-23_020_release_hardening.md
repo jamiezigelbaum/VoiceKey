@@ -842,3 +842,65 @@ should be selectable rather than grayed out.
 - `swift build` and `swift test` green; CoreAudio-dependent tests
   skip-and-flag if the sandbox lacks devices.
 - Skip-and-flag standing authority applies.
+
+## WO-K: Support openclaw_agent_control (status/steer/cancel/followup)
+
+The gateway offers the voice model a second tool during active consults;
+VoiceKey rejects it ("rejected unsupported tool 'openclaw_agent_control'",
+live log 2026-07-24 07:57Z), so spoken "how's it going?" / "cancel that" /
+"also do X" cannot reach the native run-control machinery.
+
+### Verified facts (do not re-investigate)
+
+1. Contract (gateway source v2026.7.1, reference web client
+   ui/src/pages/chat/realtime-talk-shared.ts:451-497
+   `submitRealtimeTalkAgentControl`): on a talk.event toolCall named
+   `openclaw_agent_control`, parse args {mode, text}, call
+   `talk.session.steer` with `{sessionId, sessionKey, text, mode}`
+   (schema channels.ts:367-375, additionalProperties:false; sessionId =
+   the RELAY session id, sessionKey optional), and submit the steer
+   RESULT OBJECT verbatim via talk.session.submitToolResult for that
+   callId. On error, submit `{error: message}`. No willContinue involved.
+2. Modes: status | steer | cancel | followup
+   (TalkAgentControlModeSchema; agent-run-control.ts). The gateway
+   classifies/executes against the active consult run and returns a
+   speakable result.
+3. VoiceKey already has: the toolCall receive path with an
+   unsupported-tool rejection branch (OpenClawTalkProvider
+   handleToolCall area), submitConsultResult/submitToolResult plumbing
+   keyed on sessionId+callId, and relaySessionID state.
+4. The control call is independent of the consult round-trip state
+   machine: it must work while a consult is IN FLIGHT (that is its whole
+   point) and must not touch consultState, the watchdog, or the overlap
+   guard for openclaw_agent_consult.
+
+### Required behavior
+
+1. Accept toolCall name `openclaw_agent_control` (exact match; other
+   unknown tools keep the existing rejection).
+2. Parse args {mode?, text}: text required non-empty after trimming
+   (reject with the existing malformed-toolCall result on violation);
+   mode optional, passed through only when one of the four known values.
+3. Call talk.session.steer with sessionId = relay session id,
+   sessionKey = OpenClawTalkRequestBuilder.sessionKey, text, and mode
+   when present. On response, submit the result payload verbatim as the
+   tool result for the callId; on request failure, submit
+   {error: message}. Never leave the callId unanswered.
+4. Concurrency: fully independent of any active consult; no interaction
+   with consultState/watchdog/hasCancelledOutput. Multiple control calls
+   may occur per turn.
+5. Diagnostics: emit one diagnostic per control call with the mode
+   (e.g. "OpenClaw agent control 'status' forwarded.").
+
+### Acceptance
+
+- Unit tests: control toolCall during an active consult steers and
+  submits without disturbing the consult state machine (watchdog
+  generation unchanged, consult still completes normally afterward);
+  args validation (missing text rejected; unknown mode dropped, known
+  modes passed); steer failure submits {error}; steer frame shape
+  matches the schema exactly (sessionId/sessionKey/text/mode, nothing
+  else); other unknown tools still rejected.
+- `swift build` and `swift test` green; CoreAudio-dependent tests
+  skip-and-flag.
+- Skip-and-flag standing authority applies.
