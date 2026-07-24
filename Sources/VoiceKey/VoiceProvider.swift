@@ -13,7 +13,7 @@ enum VoiceProviderID: String, CaseIterable, Codable, Equatable {
         case .openAIRealtime:
             return "OpenAI Realtime API"
         case .chatGPTWeb:
-            return "ChatGPT Web (OAuth)"
+            return "ChatGPT (web)"
         case .geminiLive:
             return "Gemini Live"
         case .deepgramVoiceAgent:
@@ -22,6 +22,34 @@ enum VoiceProviderID: String, CaseIterable, Codable, Equatable {
             return "Custom Realtime Endpoint"
         case .openClaw:
             return "OpenClaw Talk"
+        }
+    }
+
+    var settingsDescription: String {
+        switch self {
+        case .openAIRealtime:
+            return "OpenAI Realtime API — your OpenAI API key; pick model & voice; web search via MCP"
+        case .chatGPTWeb:
+            return "ChatGPT (web) — your ChatGPT subscription in a window; GPT-Live voice when available; OpenAI controls model & voice"
+        case .geminiLive:
+            return "Gemini Live — Google’s live voice service; requires a Gemini API key"
+        case .deepgramVoiceAgent:
+            return "Deepgram Voice Agent — Deepgram’s hosted voice agent; requires a Deepgram API key"
+        case .custom:
+            return "Custom Realtime Endpoint — connect to a compatible realtime endpoint you manage"
+        case .openClaw:
+            return "OpenClaw Talk — a gateway-managed voice runtime using the dedicated VoiceKey consult session"
+        }
+    }
+
+    /// Stable text written to on-disk session logs. User-facing provider names
+    /// may change, but release hardening treats these file terms as wire data.
+    var logWireName: String {
+        switch self {
+        case .chatGPTWeb:
+            return "ChatGPT Web (OAuth)"
+        case .openAIRealtime, .geminiLive, .deepgramVoiceAgent, .custom, .openClaw:
+            return displayName
         }
     }
 

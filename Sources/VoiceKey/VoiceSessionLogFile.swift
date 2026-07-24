@@ -2,8 +2,8 @@ import Foundation
 
 /// Appends every session-log event to a daily file under
 /// ~/Library/Logs/VoiceKey so live-test evidence survives app relaunches.
-/// Local-only, same content as Copy Session Log (transcripts are written
-/// as deltas, uncoalesced); never contains credentials.
+/// Local-only, with stable provider wire names (transcripts are written as
+/// deltas, uncoalesced); never contains credentials.
 final class VoiceSessionLogFile {
     private let directory: URL
     private let retentionDays: Int
@@ -48,7 +48,7 @@ final class VoiceSessionLogFile {
             text = message
         }
 
-        let line = "[\(Self.timestampFormatter.string(from: timestamp))] \(provider.displayName) \(kind): \(text)\n"
+        let line = "[\(Self.timestampFormatter.string(from: timestamp))] \(provider.logWireName) \(kind): \(text)\n"
         let fileURL = directory.appendingPathComponent(
             "session-\(Self.dayFormatter.string(from: timestamp)).log"
         )

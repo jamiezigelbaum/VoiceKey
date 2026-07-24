@@ -1,6 +1,85 @@
 import AppKit
 import Carbon
 
+enum VoiceChannelUIStrings {
+    static let windowTitle = "VoiceKey Voice Channels"
+    static let channelSectionTitle = "Voice Channel"
+    static let addChannel = "Add Channel"
+    static let duplicateChannel = "Duplicate Channel"
+    static let deleteChannel = "Delete Channel"
+    static let channelNamePlaceholder = "Voice channel name"
+    static let speakerModeLabel = "Channel speaker mode"
+}
+
+enum VoiceChannelOperations {
+    static func makeChannel(
+        provider: VoiceProviderID,
+        existingNames: [String]
+    ) -> VoiceProfile {
+        VoiceProfile(
+            id: UUID(),
+            name: uniqueName(
+                base: provider.displayName,
+                existingNames: existingNames
+            ),
+            providerID: provider,
+            hotKey: nil,
+            model: provider.defaultModel,
+            voice: provider.defaultVoice,
+            instructions: VoiceSessionConfiguration.defaultInstructions,
+            endpointURL: ""
+        )
+    }
+
+    static func duplicate(
+        _ source: VoiceProfile,
+        existingNames: [String]
+    ) -> VoiceProfile {
+        var copy = source
+        copy.id = UUID()
+        copy.name = uniqueName(
+            base: "\(displayName(for: source)) Copy",
+            existingNames: existingNames
+        )
+        copy.hotKey = nil
+        copy.mcpServers = source.mcpServers.map { server in
+            MCPServerConfiguration(
+                label: server.label,
+                urlString: server.urlString,
+                allowedTools: server.allowedTools
+            )
+        }
+        return copy
+    }
+
+    private static func uniqueName(
+        base: String,
+        existingNames: [String]
+    ) -> String {
+        let names = Set(existingNames)
+        if names.contains(base) == false {
+            return base
+        }
+        var suffix = 2
+        while names.contains("\(base) \(suffix)") {
+            suffix += 1
+        }
+        return "\(base) \(suffix)"
+    }
+
+    private static func displayName(for profile: VoiceProfile) -> String {
+        let trimmed = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? profile.providerID.displayName : trimmed
+    }
+}
+
+struct OpenClawRuntimePanelSnapshot: Equatable {
+    var isVisible: Bool
+    var modelIsEditable: Bool
+    var voicePickerIsVisible: Bool
+    var applyButtonIsVisible: Bool
+}
+
 struct VoiceProfileProviderSettings: Equatable {
     var model: String
     var voice: String
@@ -50,6 +129,9 @@ final class SettingsWindowController: NSWindowController {
     private var providerSettingsCache: VoiceProfileProviderSettingsCache
     private var pendingMCPAuthorizationValues: [UUID: String] = [:]
     private var pendingMCPAuthorizationDeletions: Set<UUID> = []
+    private let openClawRuntimeService: OpenClawRuntimeSettingsServing
+    private(set) var openClawRuntimePanelState: OpenClawRuntimePanelState
+    private var openClawRuntimeLoadGeneration = UUID()
 
     /// The profiles under edit. The app delegate pushes its authoritative list whenever the
     /// settings window opens; setting this replaces the working copy and refreshes the form.
@@ -58,19 +140,43 @@ final class SettingsWindowController: NSWindowController {
         set { adoptProfiles(newValue) }
     }
 
+    var openClawRuntimePanelSnapshot: OpenClawRuntimePanelSnapshot {
+        OpenClawRuntimePanelSnapshot(
+            isVisible: openClawRuntimeSectionViews.first?.isHidden == false,
+            modelIsEditable: openClawModelField.isEditable,
+            voicePickerIsVisible: openClawVoicePopup.isHidden == false,
+            applyButtonIsVisible: applyOpenClawRuntimeButton.isHidden == false
+        )
+    }
+
     private let formStackView = NSStackView()
 
     private let profilePopup = NSPopUpButton()
-    private let addProfileButton = NSButton(title: "Add", target: nil, action: nil)
-    private let removeProfileButton = NSButton(title: "Remove", target: nil, action: nil)
-    private let duplicateProfileButton = NSButton(title: "Duplicate", target: nil, action: nil)
+    private let addProfileButton = NSButton(
+        title: VoiceChannelUIStrings.addChannel,
+        target: nil,
+        action: nil
+    )
+    private let removeProfileButton = NSButton(
+        title: VoiceChannelUIStrings.deleteChannel,
+        target: nil,
+        action: nil
+    )
+    private let duplicateProfileButton = NSButton(
+        title: VoiceChannelUIStrings.duplicateChannel,
+        target: nil,
+        action: nil
+    )
 
     private let nameField = NSTextField()
     private let providerPopup = NSPopUpButton()
+    private let providerDescriptionLabel = NSTextField(wrappingLabelWithString: "")
     private let recorderView = HotKeyRecorderView()
     private let hotKeyStatusLabel = NSTextField(labelWithString: "")
     private let modelField = NSTextField()
     private let voiceComboBox = NSComboBox()
+    private var modelRow: NSStackView?
+    private var voiceRow: NSStackView?
     private let endpointLabel = NSTextField(labelWithString: "Endpoint (wss://...)")
     private let endpointField = NSTextField()
     private let endpointRequiredLabel = NSTextField(labelWithString: "Required")
@@ -92,15 +198,36 @@ final class SettingsWindowController: NSWindowController {
     private let tipLabel = NSTextField(wrappingLabelWithString: "If the voice hears phrases you did not say, use headphones — speaker audio feeding back into the microphone causes phantom turns.")
     private let formStatusLabel = NSTextField(wrappingLabelWithString: "")
     private let saveButton = NSButton(title: "Save", target: nil, action: nil)
+    private var openClawRuntimeSectionViews: [NSView] = []
+    private let openClawSessionLabel = NSTextField(labelWithString: "")
+    private let openClawModelField = NSTextField()
+    private let openClawVoiceLabel = NSTextField(labelWithString: "")
+    private let openClawVoicePopup = NSPopUpButton()
+    private let openClawRuntimeCaption = NSTextField(wrappingLabelWithString: "")
+    private let applyOpenClawRuntimeButton = NSButton(
+        title: "Apply Gateway Settings",
+        target: nil,
+        action: nil
+    )
+    private let openClawRuntimeStatusLabel = NSTextField(wrappingLabelWithString: "")
 
     private static let labelColumnWidth: CGFloat = 140
     private static let hotKeyHint = "Click the field, then press the new shortcut."
 
-    init(profiles: [VoiceProfile]) {
+    init(
+        profiles: [VoiceProfile],
+        openClawRuntimeService: OpenClawRuntimeSettingsServing = OpenClawRuntimeSettingsService()
+    ) {
         let initialProfiles = profiles.isEmpty ? [Self.makeDefaultProfile()] : profiles
         workingProfiles = initialProfiles
         selectedProfileID = initialProfiles[0].id
         providerSettingsCache = VoiceProfileProviderSettingsCache(profiles: initialProfiles)
+        self.openClawRuntimeService = openClawRuntimeService
+        openClawRuntimePanelState = OpenClawRuntimePanelState(
+            settings: .staticFallback,
+            approvedScopes: openClawRuntimeService.approvedScopes,
+            loadError: nil
+        )
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 560, height: 660),
@@ -108,7 +235,7 @@ final class SettingsWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "VoiceKey Settings"
+        window.title = VoiceChannelUIStrings.windowTitle
         window.contentMinSize = NSSize(width: 540, height: 560)
         window.isReleasedWhenClosed = false
         window.center()
@@ -182,12 +309,13 @@ final class SettingsWindowController: NSWindowController {
         configureProfileControls()
         configureProviderPopup()
         configureSpeakerModePopup()
+        configureOpenClawRuntimeControls()
         configureInstructionsEditor()
         configureStaticControls()
         configureMCPServerControls()
 
-        // Profile: picker with add/remove/duplicate, plus the display name.
-        addSection("Profile")
+        // Voice channel: picker with add/delete/duplicate, plus the display name.
+        addSection(VoiceChannelUIStrings.channelSectionTitle)
         addArranged(makeControlRow(
             views: [profilePopup, addProfileButton, removeProfileButton, duplicateProfileButton],
             stretching: profilePopup
@@ -198,11 +326,30 @@ final class SettingsWindowController: NSWindowController {
 
         // Voice Provider: adapter choice plus its model/voice/endpoint knobs.
         addSection("Voice Provider")
-        addArranged(makeRow(label: "Provider", views: [providerPopup], stretching: providerPopup))
-        addArranged(makeRow(label: "Model", views: [modelField], stretching: modelField))
-        addArranged(makeRow(label: "Voice", views: [voiceComboBox], stretching: voiceComboBox))
+        let providerRow = makeRow(
+            label: "Provider",
+            views: [providerPopup],
+            stretching: providerPopup
+        )
+        addArranged(providerRow)
+        formStackView.setCustomSpacing(4, after: providerRow)
+        addArranged(indentedRow(providerDescriptionLabel))
+        let modelRow = makeRow(
+            label: "Model",
+            views: [modelField],
+            stretching: modelField
+        )
+        self.modelRow = modelRow
+        addArranged(modelRow)
+        let voiceRow = makeRow(
+            label: "Voice",
+            views: [voiceComboBox],
+            stretching: voiceComboBox
+        )
+        self.voiceRow = voiceRow
+        addArranged(voiceRow)
         let speakerModeRow = makeRow(
-            label: "Speaker mode",
+            label: VoiceChannelUIStrings.speakerModeLabel,
             views: [speakerModePopup],
             stretching: speakerModePopup
         )
@@ -224,6 +371,59 @@ final class SettingsWindowController: NSWindowController {
         endpointRow.addArrangedSubview(endpointRequiredLabel)
         addArranged(endpointRow)
         endSection(after: endpointRow)
+
+        // OpenClaw owns these values at the gateway. Scope determines whether the
+        // paired device may edit them; the section never requests broader scopes.
+        let runtimeHeader = sectionLabel("OpenClaw runtime")
+        let runtimeSeparator = makeSeparator()
+        let runtimeSessionRow = makeRow(
+            label: "Consult session",
+            views: [openClawSessionLabel],
+            stretching: openClawSessionLabel
+        )
+        let runtimeModelRow = makeRow(
+            label: "Pinned consult model",
+            views: [openClawModelField],
+            stretching: openClawModelField
+        )
+        let runtimeVoiceControls = NSStackView(
+            views: [openClawVoiceLabel, openClawVoicePopup]
+        )
+        runtimeVoiceControls.orientation = .horizontal
+        runtimeVoiceControls.alignment = .centerY
+        runtimeVoiceControls.spacing = 8
+        let runtimeVoiceRow = makeRow(
+            label: "Gateway talk voice",
+            views: [runtimeVoiceControls],
+            stretching: runtimeVoiceControls
+        )
+        let runtimeApplySpacer = NSView()
+        runtimeApplySpacer.translatesAutoresizingMaskIntoConstraints = false
+        runtimeApplySpacer.setContentHuggingPriority(
+            NSLayoutConstraint.Priority(1),
+            for: .horizontal
+        )
+        let runtimeApplyRow = NSStackView(
+            views: [runtimeApplySpacer, applyOpenClawRuntimeButton]
+        )
+        runtimeApplyRow.orientation = .horizontal
+        runtimeApplyRow.translatesAutoresizingMaskIntoConstraints = false
+        openClawRuntimeSectionViews = [
+            runtimeHeader,
+            runtimeSeparator,
+            runtimeSessionRow,
+            runtimeModelRow,
+            runtimeVoiceRow,
+            openClawRuntimeCaption,
+            openClawRuntimeStatusLabel,
+            runtimeApplyRow
+        ]
+        for view in openClawRuntimeSectionViews {
+            addArranged(view)
+        }
+        formStackView.setCustomSpacing(4, after: runtimeHeader)
+        formStackView.setCustomSpacing(4, after: openClawRuntimeCaption)
+        endSection(after: runtimeApplyRow)
 
         // Shortcut: global hotkey recorder with an inline hint/error line.
         addSection("Shortcut")
@@ -276,7 +476,7 @@ final class SettingsWindowController: NSWindowController {
         addArranged(mcpRow)
         endSection(after: mcpRow)
 
-        // Instructions: system prompt for the selected profile.
+        // Instructions: system prompt for the selected voice channel.
         addSection("Instructions")
         addArranged(instructionsScrollView)
         endSection(after: instructionsScrollView)
@@ -305,9 +505,24 @@ final class SettingsWindowController: NSWindowController {
 
         // Compact square symbol buttons keep the picker row quiet; the titles
         // set at declaration remain as accessibility labels.
-        configureProfileButton(addProfileButton, symbolName: "plus", toolTip: "Add profile", action: #selector(addProfile))
-        configureProfileButton(removeProfileButton, symbolName: "minus", toolTip: "Remove profile", action: #selector(removeProfileWithConfirmation))
-        configureProfileButton(duplicateProfileButton, symbolName: "plus.square.on.square", toolTip: "Duplicate profile", action: #selector(duplicateProfile))
+        configureProfileButton(
+            addProfileButton,
+            symbolName: "plus",
+            toolTip: VoiceChannelUIStrings.addChannel,
+            action: #selector(addProfile)
+        )
+        configureProfileButton(
+            removeProfileButton,
+            symbolName: "minus",
+            toolTip: VoiceChannelUIStrings.deleteChannel,
+            action: #selector(removeProfileWithConfirmation)
+        )
+        configureProfileButton(
+            duplicateProfileButton,
+            symbolName: "plus.square.on.square",
+            toolTip: VoiceChannelUIStrings.duplicateChannel,
+            action: #selector(duplicateProfile)
+        )
     }
 
     private func configureProfileButton(_ button: NSButton, symbolName: String, toolTip: String, action: Selector) {
@@ -332,6 +547,9 @@ final class SettingsWindowController: NSWindowController {
         }
         providerPopup.target = self
         providerPopup.action = #selector(providerChanged)
+
+        providerDescriptionLabel.font = NSFont.systemFont(ofSize: 11)
+        providerDescriptionLabel.textColor = .secondaryLabelColor
     }
 
     private func configureSpeakerModePopup() {
@@ -342,7 +560,40 @@ final class SettingsWindowController: NSWindowController {
             speakerModePopup.lastItem?.representedObject = preference.rawValue
         }
         speakerModePopup.toolTip =
-            "Auto uses headphone behavior for Bluetooth and the built-in headphone jack. USB defaults to speaker behavior."
+            "Controls speaker echo handling for this voice channel. Auto uses headphone behavior for Bluetooth and the built-in headphone jack; USB defaults to speaker behavior."
+    }
+
+    private func configureOpenClawRuntimeControls() {
+        openClawSessionLabel.font = NSFont.monospacedSystemFont(
+            ofSize: 12,
+            weight: .regular
+        )
+        openClawSessionLabel.isSelectable = true
+
+        openClawModelField.font = NSFont.monospacedSystemFont(
+            ofSize: 12,
+            weight: .regular
+        )
+        openClawModelField.placeholderString = "provider/model"
+
+        openClawVoiceLabel.font = NSFont.monospacedSystemFont(
+            ofSize: 12,
+            weight: .regular
+        )
+        openClawVoiceLabel.isSelectable = true
+        openClawVoicePopup.removeAllItems()
+        openClawVoicePopup.addItems(
+            withTitles: OpenClawRuntimeSettings.voiceOptions
+        )
+
+        openClawRuntimeCaption.font = NSFont.systemFont(ofSize: 11)
+        openClawRuntimeCaption.textColor = .secondaryLabelColor
+        openClawRuntimeStatusLabel.font = NSFont.systemFont(ofSize: 11)
+        openClawRuntimeStatusLabel.isHidden = true
+
+        applyOpenClawRuntimeButton.bezelStyle = .rounded
+        applyOpenClawRuntimeButton.target = self
+        applyOpenClawRuntimeButton.action = #selector(applyOpenClawRuntimeSettings)
     }
 
     private func configureMCPServerControls() {
@@ -389,7 +640,7 @@ final class SettingsWindowController: NSWindowController {
 
     private func configureStaticControls() {
         nameField.delegate = self
-        nameField.placeholderString = "Profile name"
+        nameField.placeholderString = VoiceChannelUIStrings.channelNamePlaceholder
 
         hotKeyStatusLabel.font = NSFont.systemFont(ofSize: 11)
         resetHotKeyStatus()
@@ -569,16 +820,19 @@ final class SettingsWindowController: NSWindowController {
         } else if providerPopup.itemArray.isEmpty == false {
             providerPopup.selectItem(at: 0)
         }
+        providerDescriptionLabel.stringValue = provider.settingsDescription
 
         recorderView.profileID = profile.id
         recorderView.hotKey = profile.hotKey
         resetHotKeyStatus()
 
+        modelRow?.isHidden = provider == .openClaw
         modelField.isEnabled = provider.supportsModelSetting
         modelField.placeholderString = provider.defaultModel
         let model = profile.model.trimmingCharacters(in: .whitespacesAndNewlines)
         modelField.stringValue = provider.supportsModelSetting && model.isEmpty == false ? model : provider.defaultModel
 
+        voiceRow?.isHidden = provider == .openClaw
         voiceComboBox.isEnabled = provider.supportsVoiceSetting
         voiceComboBox.placeholderString = provider.defaultVoice
         voiceComboBox.removeAllItems()
@@ -605,8 +859,74 @@ final class SettingsWindowController: NSWindowController {
         apiKeyField.stringValue = ""
         syncCredentialStatus(for: provider)
         syncMCPServerControls(for: profile)
+        syncOpenClawRuntimePanel(for: profile)
 
         clearFormStatus()
+    }
+
+    private func syncOpenClawRuntimePanel(for profile: VoiceProfile) {
+        let isOpenClaw = profile.providerID == .openClaw
+        for view in openClawRuntimeSectionViews {
+            view.isHidden = isOpenClaw == false
+        }
+        guard isOpenClaw else {
+            openClawRuntimeLoadGeneration = UUID()
+            return
+        }
+
+        openClawRuntimePanelState.approvedScopes =
+            openClawRuntimeService.approvedScopes
+        openClawRuntimePanelState.loadError = nil
+        renderOpenClawRuntimePanel()
+
+        let generation = UUID()
+        openClawRuntimeLoadGeneration = generation
+        openClawRuntimeService.load(endpointURL: profile.endpointURL) {
+            [weak self] result in
+            DispatchQueue.main.async {
+                guard let self,
+                      self.openClawRuntimeLoadGeneration == generation,
+                      self.selectedProfileID == profile.id else {
+                    return
+                }
+                switch result {
+                case let .success(settings):
+                    self.openClawRuntimePanelState.settings = settings
+                    self.openClawRuntimePanelState.loadError = nil
+                case let .failure(error):
+                    self.openClawRuntimePanelState.settings = .staticFallback
+                    self.openClawRuntimePanelState.loadError =
+                        error.localizedDescription
+                }
+                self.renderOpenClawRuntimePanel()
+            }
+        }
+    }
+
+    private func renderOpenClawRuntimePanel() {
+        let settings = openClawRuntimePanelState.settings
+        let isEditable = openClawRuntimePanelState.isEditable
+        openClawSessionLabel.stringValue = settings.sessionKey
+        openClawModelField.stringValue = settings.model
+        openClawModelField.isEditable = isEditable
+        openClawModelField.isSelectable = true
+        openClawModelField.isBezeled = isEditable
+        openClawModelField.drawsBackground = isEditable
+
+        openClawVoiceLabel.stringValue = settings.voice
+        openClawVoiceLabel.isHidden = isEditable
+        openClawVoicePopup.isHidden = isEditable == false
+        if let index = openClawVoicePopup.itemTitles.firstIndex(
+            of: settings.voice
+        ) {
+            openClawVoicePopup.selectItem(at: index)
+        }
+        applyOpenClawRuntimeButton.isHidden = isEditable == false
+        applyOpenClawRuntimeButton.isEnabled = isEditable
+        openClawRuntimeCaption.stringValue =
+            openClawRuntimePanelState.caption
+        openClawRuntimeStatusLabel.stringValue = ""
+        openClawRuntimeStatusLabel.isHidden = true
     }
 
     private func syncMCPServerControls(for profile: VoiceProfile) {
@@ -683,19 +1003,7 @@ final class SettingsWindowController: NSWindowController {
         removeProfileButton.isEnabled = workingProfiles.count > 1
     }
 
-    private func uniqueProfileName(base: String) -> String {
-        let names = Set(workingProfiles.map { $0.name })
-        if names.contains(base) == false {
-            return base
-        }
-        var suffix = 2
-        while names.contains("\(base) \(suffix)") {
-            suffix += 1
-        }
-        return "\(base) \(suffix)"
-    }
-
-    // MARK: - Profile picker actions
+    // MARK: - Voice channel picker actions
 
     @objc private func profileSelectionChanged() {
         guard let raw = profilePopup.selectedItem?.representedObject as? String,
@@ -707,16 +1015,10 @@ final class SettingsWindowController: NSWindowController {
 
     @objc private func addProfile() {
         commitFormToWorkingCopy()
-        let provider = VoiceProviderID.openAIRealtime
-        let profile = VoiceProfile(
-            id: UUID(),
-            name: uniqueProfileName(base: "New Profile"),
-            providerID: provider,
-            hotKey: nil,
-            model: provider.defaultModel,
-            voice: provider.defaultVoice,
-            instructions: VoiceSessionConfiguration.defaultInstructions,
-            endpointURL: ""
+        guard let provider = chooseProviderForNewChannel() else { return }
+        let profile = VoiceChannelOperations.makeChannel(
+            provider: provider,
+            existingNames: workingProfiles.map(\.name)
         )
         workingProfiles.append(profile)
         providerSettingsCache.remember(profile)
@@ -728,20 +1030,17 @@ final class SettingsWindowController: NSWindowController {
         guard let sourceIndex = selectedProfileIndex else { return }
         commitFormToWorkingCopy()
         let source = workingProfiles[sourceIndex]
-        var copy = source
-        copy.id = UUID()
-        copy.name = uniqueProfileName(base: "\(displayName(for: source)) Copy")
-        copy.hotKey = nil
-        copy.mcpServers = source.mcpServers.map { server in
-            let copiedServer = MCPServerConfiguration(
-                label: server.label,
-                urlString: server.urlString,
-                allowedTools: server.allowedTools
-            )
-            if let token = effectiveMCPAuthorization(for: server.id) {
+        let copy = VoiceChannelOperations.duplicate(
+            source,
+            existingNames: workingProfiles.map(\.name)
+        )
+        for (sourceServer, copiedServer) in zip(
+            source.mcpServers,
+            copy.mcpServers
+        ) {
+            if let token = effectiveMCPAuthorization(for: sourceServer.id) {
                 pendingMCPAuthorizationValues[copiedServer.id] = token
             }
-            return copiedServer
         }
         workingProfiles.insert(copy, at: sourceIndex + 1)
         providerSettingsCache.remember(copy)
@@ -755,9 +1054,9 @@ final class SettingsWindowController: NSWindowController {
 
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Remove profile “\(name)”?"
-        alert.informativeText = "This can’t be undone."
-        alert.addButton(withTitle: "Remove")
+        alert.messageText = "Delete voice channel “\(name)”?"
+        alert.informativeText = "This can’t be undone. If this channel is active, its voice session will stop when you save."
+        alert.addButton(withTitle: VoiceChannelUIStrings.deleteChannel)
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
@@ -772,6 +1071,20 @@ final class SettingsWindowController: NSWindowController {
         rebuildProfilePopup()
         syncFormFromSelectedProfile()
         updateProfileButtons()
+    }
+
+    private func chooseProviderForNewChannel() -> VoiceProviderID? {
+        let picker = VoiceChannelProviderPickerView()
+        let alert = NSAlert()
+        alert.messageText = "Add Voice Channel"
+        alert.informativeText = "Choose how this voice channel connects."
+        alert.accessoryView = picker
+        alert.addButton(withTitle: VoiceChannelUIStrings.addChannel)
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return nil
+        }
+        return picker.selectedProvider
     }
 
     // MARK: - MCP server actions
@@ -988,7 +1301,74 @@ final class SettingsWindowController: NSWindowController {
         hotKeyStatusLabel.textColor = .systemRed
     }
 
-    // MARK: - Save / API key actions
+    // MARK: - Gateway runtime / save / API key actions
+
+    @objc private func applyOpenClawRuntimeSettings() {
+        guard let index = selectedProfileIndex,
+              workingProfiles[index].providerID == .openClaw,
+              openClawRuntimePanelState.isEditable else {
+            showOpenClawRuntimeError(
+                "The paired device is not approved for operator.admin."
+            )
+            return
+        }
+        let model = openClawModelField.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard model.isEmpty == false else {
+            showOpenClawRuntimeError(
+                "Enter the gateway model as a provider/model string."
+            )
+            return
+        }
+        guard let voice = openClawVoicePopup.selectedItem?.title,
+              OpenClawRuntimeSettings.voiceOptions.contains(voice) else {
+            showOpenClawRuntimeError("Choose a supported realtime voice.")
+            return
+        }
+
+        applyOpenClawRuntimeButton.isEnabled = false
+        openClawRuntimeStatusLabel.stringValue =
+            "Applying gateway-managed settings…"
+        openClawRuntimeStatusLabel.textColor = .secondaryLabelColor
+        openClawRuntimeStatusLabel.isHidden = false
+        let profileID = workingProfiles[index].id
+        let endpointURL = endpointField.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        openClawRuntimeService.apply(
+            model: model,
+            voice: voice,
+            endpointURL: endpointURL
+        ) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self,
+                      self.selectedProfileID == profileID else {
+                    return
+                }
+                self.applyOpenClawRuntimeButton.isEnabled = true
+                switch result {
+                case let .success(settings):
+                    self.openClawRuntimePanelState.settings = settings
+                    self.openClawRuntimePanelState.loadError = nil
+                    self.renderOpenClawRuntimePanel()
+                    self.openClawRuntimeStatusLabel.stringValue =
+                        "Gateway settings applied."
+                    self.openClawRuntimeStatusLabel.textColor =
+                        .secondaryLabelColor
+                    self.openClawRuntimeStatusLabel.isHidden = false
+                case let .failure(error):
+                    self.showOpenClawRuntimeError(
+                        "Gateway update failed: \(error.localizedDescription)"
+                    )
+                }
+            }
+        }
+    }
+
+    private func showOpenClawRuntimeError(_ message: String) {
+        openClawRuntimeStatusLabel.stringValue = message
+        openClawRuntimeStatusLabel.textColor = .systemRed
+        openClawRuntimeStatusLabel.isHidden = false
+    }
 
     @objc private func saveSettings() {
         let previouslySelectedID = selectedProfileID
@@ -1196,6 +1576,65 @@ extension SettingsWindowController: NSWindowDelegate {
 
     func windowDidResignKey(_ notification: Notification) {
         cancelHotKeyRecording()
+    }
+}
+
+final class VoiceChannelProviderPickerView: NSView {
+    private let popup = NSPopUpButton()
+    private let descriptionLabel = NSTextField(wrappingLabelWithString: "")
+
+    var selectedProvider: VoiceProviderID? {
+        guard let rawValue = popup.selectedItem?.representedObject as? String else {
+            return nil
+        }
+        return VoiceProviderID(rawValue: rawValue)
+    }
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 440, height: 72))
+
+        popup.translatesAutoresizingMaskIntoConstraints = false
+        for provider in VoiceProviderID.allCases {
+            let suffix = provider.isImplemented ? "" : " (coming soon)"
+            popup.addItem(withTitle: provider.displayName + suffix)
+            popup.lastItem?.representedObject = provider.rawValue
+            popup.lastItem?.isEnabled = provider.isImplemented
+        }
+        if let firstImplemented = popup.itemArray.firstIndex(where: {
+            $0.isEnabled
+        }) {
+            popup.selectItem(at: firstImplemented)
+        }
+        popup.target = self
+        popup.action = #selector(selectionChanged)
+
+        descriptionLabel.font = NSFont.systemFont(ofSize: 12)
+        descriptionLabel.textColor = .secondaryLabelColor
+        descriptionLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView(views: [popup, descriptionLabel])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            popup.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        ])
+        selectionChanged()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func selectionChanged() {
+        descriptionLabel.stringValue =
+            selectedProvider?.settingsDescription ?? ""
     }
 }
 

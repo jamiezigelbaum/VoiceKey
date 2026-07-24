@@ -30,7 +30,7 @@ final class VoiceSessionLogTests: XCTestCase {
             log.displayText,
             """
             [2026-06-14T12:00:00Z] OpenAI Realtime API transcript: hello
-            [2026-06-14T12:00:01Z] ChatGPT Web (OAuth) transcript: hi
+            [2026-06-14T12:00:01Z] ChatGPT (web) transcript: hi
             """
         )
     }
@@ -70,6 +70,39 @@ final class VoiceSessionLogTests: XCTestCase {
 }
 
 final class VoiceSessionLogFileTests: XCTestCase {
+    func testProviderRenameDoesNotChangeOnDiskWireTerm() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "VoiceSessionLogFileTests-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let logFile = VoiceSessionLogFile(directory: directory)
+
+        logFile.append(
+            .diagnostic("connected"),
+            provider: .chatGPTWeb,
+            timestamp: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        logFile.waitForPendingWrites()
+
+        let file = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil
+            ).first(where: { $0.lastPathComponent.hasPrefix("session-") })
+        )
+        let text = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(text.contains("ChatGPT Web (OAuth) diagnostic"))
+        XCTAssertFalse(text.contains("ChatGPT (web)"))
+    }
+
     func testAppendDeletesOnlyExpiredSessionLogFiles() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("VoiceSessionLogFileTests-\(UUID().uuidString)", isDirectory: true)

@@ -74,7 +74,7 @@ final class VoiceKeyDiagnosticsSnapshotTests: XCTestCase {
             hasSessionLog: false
         )
 
-        XCTAssertTrue(snapshot.displayText.contains("Provider: ChatGPT Web (OAuth)"))
+        XCTAssertTrue(snapshot.displayText.contains("Provider: ChatGPT (web)"))
         XCTAssertTrue(snapshot.displayText.contains("Readiness: Sign-in - Uses provider sign-in."))
         XCTAssertTrue(snapshot.displayText.contains("API key: not required"))
         XCTAssertTrue(snapshot.displayText.contains("Provider window: yes"))

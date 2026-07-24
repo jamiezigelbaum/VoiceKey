@@ -334,7 +334,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
             hasSessionLog: false
         )
 
-        XCTAssertEqual(state.providerTitle, "Provider: ChatGPT Web (OAuth) - Sign-in")
+        XCTAssertEqual(state.providerTitle, "Provider: ChatGPT (web) - Sign-in")
         XCTAssertEqual(state.toggleTitle, "Start VoiceKey Voice")
         XCTAssertTrue(state.isToggleEnabled)
         XCTAssertEqual(state.setupTitle, "Sign In with Provider...")

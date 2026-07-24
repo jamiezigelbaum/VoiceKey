@@ -289,7 +289,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             }
         ) else {
             recordProviderEvent(.diagnostic(
-                "Hotkey \(configuration.displayName) for profile \"\(profile.name)\" could not be registered with Carbon; event monitor fallback active."
+                "Hotkey \(configuration.displayName) for voice channel \"\(profile.name)\" could not be registered with Carbon; event monitor fallback active."
             ))
             return false
         }

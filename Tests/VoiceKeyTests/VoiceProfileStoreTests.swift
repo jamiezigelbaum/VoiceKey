@@ -193,4 +193,69 @@ final class VoiceProfileStoreTests: XCTestCase {
         XCTAssertEqual(VoiceProfileStore.load(defaults: defaults), saved)
         XCTAssertFalse(VoiceProfileStore.isFreshInstall(defaults: defaults))
     }
+
+    func testPreWorkOrderFixtureRoundTripsWithoutRenamingStorage() throws {
+        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let fixture = Data(
+            """
+            [{
+              "id":"EA546738-9D6D-4E04-B243-240D5E9F2CF1",
+              "name":"Pre-WO channel",
+              "providerID":"openai-realtime",
+              "hotKey":{
+                "keyCode":63,
+                "carbonModifiers":256,
+                "menuKeyEquivalent":"v",
+                "menuModifierMask":1048576,
+                "displayName":"⌘V",
+                "mainKeyDisplayName":"V"
+              },
+              "model":"gpt-realtime-2",
+              "voice":"marin",
+              "instructions":"Be concise.",
+              "endpointURL":"",
+              "mcpServers":[],
+              "webSearchEnabled":true,
+              "speakerModePreference":"automatic"
+            }]
+            """.utf8
+        )
+        defaults.set(fixture, forKey: "VoiceProfiles.v1")
+
+        let loaded = VoiceProfileStore.load(defaults: defaults)
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded[0].name, "Pre-WO channel")
+        XCTAssertEqual(loaded[0].providerID, .openAIRealtime)
+        XCTAssertEqual(loaded[0].hotKey?.displayName, "⌘V")
+        XCTAssertTrue(loaded[0].webSearchEnabled)
+
+        VoiceProfileStore.save(loaded, defaults: defaults)
+
+        let savedData = try XCTUnwrap(
+            defaults.data(forKey: "VoiceProfiles.v1")
+        )
+        XCTAssertNil(defaults.object(forKey: "VoiceChannels.v1"))
+        let savedArray = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: savedData)
+                as? [[String: Any]]
+        )
+        let keys = Set(try XCTUnwrap(savedArray.first).keys)
+        XCTAssertEqual(keys, [
+            "id",
+            "name",
+            "providerID",
+            "hotKey",
+            "model",
+            "voice",
+            "instructions",
+            "endpointURL",
+            "mcpServers",
+            "webSearchEnabled",
+            "speakerModePreference"
+        ])
+    }
 }
