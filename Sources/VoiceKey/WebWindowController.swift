@@ -126,7 +126,12 @@ final class WebWindowController: NSObject, NSWindowDelegate, WKNavigationDelegat
             "Native click DOM=(\(Int(x)),\(Int(y))) view=(\(Int(webPoint.x)),\(Int(webPoint.y))) screen=(\(Int(location.x)),\(Int(location.y)))"
         )
 
-        if AXIsProcessTrusted() {
+        // Request trust with the system prompt: this registers the app's
+        // CURRENT code signature in the Accessibility list. A stale entry
+        // from a previous build reads as untrusted even when toggled on
+        // (observed 2026-07-24 across three grant attempts).
+        let promptOptions = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        if AXIsProcessTrustedWithOptions(promptOptions) {
             clickScreenPoint(location)
         } else {
             onDiagnostic?("Accessibility trust is not reported; using in-window WebKit click fallback.")
