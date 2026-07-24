@@ -29,6 +29,12 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
         let params = try XCTUnwrap(connect["params"] as? [String: Any])
         XCTAssertNotNil(params["device"] as? [String: Any])
         XCTAssertEqual(params["scopes"] as? [String], ["operator.talk", "operator.write"])
+        // caps must be TOP-LEVEL: the gateway's client object is
+        // additionalProperties:false and rejects a nested caps (live
+        // incident 2026-07-24: "unexpected property 'caps'").
+        XCTAssertEqual(params["caps"] as? [String], ["tool-events"])
+        let client = try XCTUnwrap(params["client"] as? [String: Any])
+        XCTAssertNil(client["caps"])
         let auth = try XCTUnwrap(params["auth"] as? [String: Any])
         XCTAssertEqual(auth["deviceToken"] as? String, "device-token")
     }

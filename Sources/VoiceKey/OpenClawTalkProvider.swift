@@ -104,11 +104,14 @@ enum OpenClawTalkRequestBuilder {
                     "id": clientID,
                     "version": clientVersion,
                     "platform": "macos",
-                    "mode": clientMode,
-                    // tool-events: chat.send auto-registers this connection for
-                    // per-tool agent events (stream:"tool") on consult runs.
-                    "caps": ["tool-events"]
+                    "mode": clientMode
                 ],
+                // caps is a TOP-LEVEL connect param (client is
+                // additionalProperties:false — verified in the gateway frame
+                // schema after the nested placement was rejected live).
+                // tool-events: chat.send auto-registers this connection for
+                // per-tool agent events (stream:"tool") on consult runs.
+                "caps": ["tool-events"],
                 "role": role,
                 "scopes": ["operator.talk", "operator.write", "operator.read"],
                 "auth": ["token": token]
@@ -139,9 +142,9 @@ enum OpenClawTalkRequestBuilder {
                     "id": clientID,
                     "version": clientVersion,
                     "platform": "macos",
-                    "mode": clientMode,
-                    "caps": ["tool-events"]
+                    "mode": clientMode
                 ],
+                "caps": ["tool-events"],
                 "role": role,
                 "scopes": scopes,
                 "device": [
