@@ -95,6 +95,12 @@ struct CredentialFieldSnapshot: Equatable {
     var isChangeVisible: Bool
 }
 
+struct OpenClawConnectionTestSnapshot: Equatable {
+    var isVisible: Bool
+    var isTesting: Bool
+    var status: String
+}
+
 struct AdvancedDisclosureSnapshot: Equatable {
     var isVisible: Bool
     var isExpanded: Bool
@@ -339,8 +345,13 @@ final class SettingsWindowController: NSWindowController {
     private let credentialStore: VoiceCredentialStoring
     private let saveProfiles: ([VoiceProfile]) -> Void
     private let openClawRuntimeService: OpenClawRuntimeSettingsServing
+    private let openClawConnectionTester: OpenClawConnectionTesting
+    private let saveOpenClawConnectionFact: (Bool) -> Void
     private(set) var openClawRuntimePanelState: OpenClawRuntimePanelState
     private var openClawRuntimeLoadGeneration = UUID()
+    private var openClawConnectionTest:
+        OpenClawConnectionTestCancellation?
+    private var openClawConnectionTestProfileID: UUID?
 
     /// The profiles under edit. The app delegate pushes its authoritative list whenever the
     /// settings window opens; setting this replaces the working copy and refreshes the form.
@@ -378,6 +389,16 @@ final class SettingsWindowController: NSWindowController {
             renderedValue: apiKeyField.stringValue,
             isEnabled: apiKeyField.isEnabled,
             isChangeVisible: changeAPIKeyButton.isHidden == false
+        )
+    }
+
+    var openClawConnectionTestSnapshot:
+        OpenClawConnectionTestSnapshot {
+        OpenClawConnectionTestSnapshot(
+            isVisible:
+                openClawConnectionTestRow?.isHidden == false,
+            isTesting: openClawConnectionTest != nil,
+            status: openClawConnectionTestStatusLabel.stringValue
         )
     }
 
@@ -451,6 +472,14 @@ final class SettingsWindowController: NSWindowController {
     private let credentialSharingLabel = NSTextField(
         labelWithString: CredentialFieldPresentation.caption
     )
+    private let testOpenClawConnectionButton = NSButton(
+        title: "Test Connection",
+        target: nil,
+        action: nil
+    )
+    private let openClawConnectionTestStatusLabel =
+        NSTextField(wrappingLabelWithString: "")
+    private var openClawConnectionTestRow: NSStackView?
     private let advancedDisclosureButton = NSButton(
         title: "Advanced",
         target: nil,
@@ -505,6 +534,11 @@ final class SettingsWindowController: NSWindowController {
     init(
         profiles: [VoiceProfile],
         openClawRuntimeService: OpenClawRuntimeSettingsServing = OpenClawRuntimeSettingsService(),
+        openClawConnectionTester: OpenClawConnectionTesting = OpenClawConnectionTester(),
+        saveOpenClawConnectionFact: @escaping (Bool) -> Void = {
+            OnboardingServicePreferences
+                .setHasOpenClawConnection($0)
+        },
         credentialStore: VoiceCredentialStoring = APIKeyStore.shared,
         saveProfiles: @escaping ([VoiceProfile]) -> Void = {
             VoiceProfileStore.save($0)
@@ -568,6 +602,10 @@ final class SettingsWindowController: NSWindowController {
             requestAccessibilityAccess
         self.openSystemSettingsURL = openSystemSettingsURL
         self.openClawRuntimeService = openClawRuntimeService
+        self.openClawConnectionTester =
+            openClawConnectionTester
+        self.saveOpenClawConnectionFact =
+            saveOpenClawConnectionFact
         openClawRuntimePanelState = OpenClawRuntimePanelState(
             settings: .staticFallback,
             approvedScopes: openClawRuntimeService.approvedScopes,
@@ -890,7 +928,27 @@ final class SettingsWindowController: NSWindowController {
             credentialSharingLabel
         )
         addArranged(credentialSharingRow)
-        endSection(after: credentialSharingRow)
+        testOpenClawConnectionButton.bezelStyle = .rounded
+        testOpenClawConnectionButton.controlSize = .small
+        testOpenClawConnectionButton.target = self
+        testOpenClawConnectionButton.action =
+            #selector(testOpenClawConnection)
+        openClawConnectionTestStatusLabel.font =
+            NSFont.systemFont(ofSize: 11)
+        openClawConnectionTestStatusLabel.textColor =
+            .secondaryLabelColor
+        openClawConnectionTestStatusLabel.maximumNumberOfLines = 3
+        let connectionTestRow = makeRow(
+            label: "Connection",
+            views: [
+                testOpenClawConnectionButton,
+                openClawConnectionTestStatusLabel
+            ],
+            stretching: openClawConnectionTestStatusLabel
+        )
+        openClawConnectionTestRow = connectionTestRow
+        addArranged(connectionTestRow)
+        endSection(after: connectionTestRow)
 
         // Permissions: live state with a concrete action for each missing
         // capability.
@@ -1466,6 +1524,7 @@ final class SettingsWindowController: NSWindowController {
 
         apiCredentialLabel.stringValue = provider.credentialLabel
         syncCredentialStatus(for: profile)
+        syncOpenClawConnectionTest(for: profile)
         syncMCPServerControls(for: profile)
         syncOpenClawRuntimePanel(for: profile)
 
@@ -1487,6 +1546,11 @@ final class SettingsWindowController: NSWindowController {
             "Add a voice channel to configure credentials."
         credentialStatusLabel.textColor = .secondaryLabelColor
         credentialSharingLabel.isHidden = true
+        openClawConnectionTest?.cancel()
+        openClawConnectionTest = nil
+        openClawConnectionTestProfileID = nil
+        openClawConnectionTestRow?.isHidden = true
+        openClawConnectionTestStatusLabel.stringValue = ""
         instructionsTextView.string = ""
         isAdvancedMCPExpanded = false
         for view in mcpSectionViews + openClawRuntimeSectionViews {
@@ -1656,6 +1720,28 @@ final class SettingsWindowController: NSWindowController {
             presentation.isCaptionVisible == false
         credentialSharingLabel.stringValue =
             presentation.caption
+    }
+
+    private func syncOpenClawConnectionTest(
+        for profile: VoiceProfile
+    ) {
+        let isOpenClaw = profile.providerID == .openClaw
+        openClawConnectionTestRow?.isHidden =
+            isOpenClaw == false
+        guard isOpenClaw else {
+            openClawConnectionTest?.cancel()
+            openClawConnectionTest = nil
+            openClawConnectionTestProfileID = nil
+            openClawConnectionTestStatusLabel.stringValue = ""
+            return
+        }
+        if openClawConnectionTestProfileID != profile.id {
+            openClawConnectionTest?.cancel()
+            openClawConnectionTest = nil
+            openClawConnectionTestProfileID = nil
+            openClawConnectionTestStatusLabel.stringValue = ""
+            testOpenClawConnectionButton.isEnabled = true
+        }
     }
 
     private func rebuildProfilePopup() {
@@ -2237,6 +2323,105 @@ final class SettingsWindowController: NSWindowController {
         openClawRuntimeStatusLabel.isHidden = false
     }
 
+    @objc private func testOpenClawConnection() {
+        guard let index = selectedProfileIndex,
+              workingProfiles[index].providerID == .openClaw else {
+            return
+        }
+        if endpointField.currentEditor() != nil {
+            if let editor = endpointField.currentEditor() {
+                endpointField.stringValue = editor.string
+            }
+            _ = apply(.endpointURL(endpointField.stringValue))
+        }
+        let profile = workingProfiles[index]
+        openClawConnectionTest?.cancel()
+        openClawConnectionTestProfileID = profile.id
+        testOpenClawConnectionButton.isEnabled = false
+        openClawConnectionTestStatusLabel.stringValue =
+            "Testing…"
+        openClawConnectionTestStatusLabel.textColor =
+            .secondaryLabelColor
+        openClawConnectionTest =
+            openClawConnectionTester.testConnection(
+                endpointURL: profile.endpointURL
+            ) { [weak self] outcome in
+                guard let self,
+                      self.selectedProfileID == profile.id else {
+                    return
+                }
+                self.openClawConnectionTest = nil
+                self.testOpenClawConnectionButton.isEnabled =
+                    true
+                let succeeded: Bool
+                switch outcome {
+                case let .ok(serverVersion, _):
+                    succeeded = true
+                    self.openClawConnectionTestStatusLabel
+                        .stringValue =
+                        "Connected to gateway \(serverVersion)."
+                    self.openClawConnectionTestStatusLabel
+                        .textColor = .systemGreen
+                case let .pairingRequired(
+                    _,
+                    requestID,
+                    remediationHint
+                ):
+                    succeeded = false
+                    let request = requestID.map {
+                        " Approval request: \($0)."
+                    } ?? ""
+                    let hint = remediationHint.map {
+                        " \($0)"
+                    } ?? ""
+                    self.openClawConnectionTestStatusLabel
+                        .stringValue =
+                        "OpenClaw needs approval.\(request)\(hint)"
+                    self.openClawConnectionTestStatusLabel
+                        .textColor = .systemOrange
+                case .gatewayTokenMissing:
+                    succeeded = false
+                    self.showOpenClawConnectionTestFailure(
+                        "Gateway token missing."
+                    )
+                case .gatewayTokenMismatch:
+                    succeeded = false
+                    self.showOpenClawConnectionTestFailure(
+                        "Gateway token wasn’t accepted."
+                    )
+                case .deviceTokenMismatch:
+                    succeeded = false
+                    self.showOpenClawConnectionTestFailure(
+                        "OpenClaw’s saved device approval changed. Retry to refresh it."
+                    )
+                case let .unreachable(endpoints):
+                    succeeded = false
+                    self.showOpenClawConnectionTestFailure(
+                        "Gateway unreachable (\(endpoints.count) addresses tried)."
+                    )
+                case let .failed(_, message):
+                    succeeded = false
+                    self.showOpenClawConnectionTestFailure(
+                        message
+                    )
+                }
+                self.saveOpenClawConnectionFact(succeeded)
+                self.delegate?.settingsController(
+                    self,
+                    didUpdateCredentialsFor: profile
+                )
+            }
+    }
+
+    private func showOpenClawConnectionTestFailure(
+        _ message: String
+    ) {
+        openClawConnectionTestStatusLabel.stringValue =
+            message
+        openClawConnectionTestStatusLabel.textColor =
+            .systemRed
+    }
+
     private func commitAPIKeyField() {
         guard let index = selectedProfileIndex else { return }
         _ = commitAPIKey(
@@ -2555,6 +2740,8 @@ extension SettingsWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         permissionsTimer?.invalidate()
         permissionsTimer = nil
+        openClawConnectionTest?.cancel()
+        openClawConnectionTest = nil
         commitFocusedControl()
         credentialProfileIDsBeingChanged.removeAll()
         cancelHotKeyRecording()
