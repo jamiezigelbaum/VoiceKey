@@ -31,7 +31,14 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         XCTAssertTrue(instructions.hasPrefix("Keep it concise."))
         XCTAssertTrue(instructions.contains("Session started"))
         XCTAssertEqual(session["output_modalities"] as? [String], ["audio"])
-        XCTAssertNil(session["tools"])
+        let tools = try XCTUnwrap(
+            session["tools"] as? [[String: Any]]
+        )
+        XCTAssertEqual(tools.count, 1)
+        XCTAssertEqual(
+            tools.first?["server_label"] as? String,
+            "exa"
+        )
 
         let audio = try dictionary(session["audio"])
         let input = try dictionary(audio["input"])
@@ -120,29 +127,33 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
 
         let session = try dictionary(event["session"])
         let tools = try XCTUnwrap(session["tools"] as? [[String: Any]])
-        XCTAssertEqual(tools.count, 2)
-        XCTAssertEqual(tools[0]["type"] as? String, "mcp")
-        XCTAssertEqual(tools[0]["server_label"] as? String, "calendar")
+        XCTAssertEqual(tools.count, 3)
         XCTAssertEqual(
-            tools[0]["server_url"] as? String,
-            "https://mcp.example.com/calendar"
+            tools[0]["server_label"] as? String,
+            "exa"
         )
-        XCTAssertEqual(tools[0]["require_approval"] as? String, "never")
-        XCTAssertEqual(
-            tools[0]["allowed_tools"] as? [String],
-            ["search_events", "create_event"]
-        )
-        XCTAssertEqual(tools[0]["authorization"] as? String, "secret-token")
-
         XCTAssertEqual(tools[1]["type"] as? String, "mcp")
-        XCTAssertEqual(tools[1]["server_label"] as? String, "search")
+        XCTAssertEqual(tools[1]["server_label"] as? String, "calendar")
         XCTAssertEqual(
             tools[1]["server_url"] as? String,
-            "https://mcp.example.com/search"
+            "https://mcp.example.com/calendar"
         )
         XCTAssertEqual(tools[1]["require_approval"] as? String, "never")
-        XCTAssertNil(tools[1]["allowed_tools"])
-        XCTAssertNil(tools[1]["authorization"])
+        XCTAssertEqual(
+            tools[1]["allowed_tools"] as? [String],
+            ["search_events", "create_event"]
+        )
+        XCTAssertEqual(tools[1]["authorization"] as? String, "secret-token")
+
+        XCTAssertEqual(tools[2]["type"] as? String, "mcp")
+        XCTAssertEqual(tools[2]["server_label"] as? String, "search")
+        XCTAssertEqual(
+            tools[2]["server_url"] as? String,
+            "https://mcp.example.com/search"
+        )
+        XCTAssertEqual(tools[2]["require_approval"] as? String, "never")
+        XCTAssertNil(tools[2]["allowed_tools"])
+        XCTAssertNil(tools[2]["authorization"])
     }
 
     func testSessionUpdateOmitsEmptyAuthorization() throws {
@@ -161,7 +172,12 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
 
         let session = try dictionary(event["session"])
         let tools = try XCTUnwrap(session["tools"] as? [[String: Any]])
-        XCTAssertNil(try XCTUnwrap(tools.first)["authorization"])
+        let publicTool = try XCTUnwrap(
+            tools.first(where: {
+                ($0["server_label"] as? String) == "public"
+            })
+        )
+        XCTAssertNil(publicTool["authorization"])
     }
 
     func testInputAudioAppendEventBase64EncodesPCMBytes() {
@@ -204,7 +220,7 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         try XCTUnwrap(value as? [String: Any], file: file, line: line)
     }
 
-    func testWebSearchEnabledInjectsExaMCPServerAndNoInvalidHostedType() throws {
+    func testOpenAIAlwaysInjectsExaMCPServerAndNoInvalidHostedType() throws {
         // Web search is delivered as the Exa remote MCP server (Realtime
         // executes it server-side); it must never be an invalid hosted type.
         var configuration = VoiceSessionConfiguration(
@@ -213,7 +229,7 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
             voice: "marin",
             instructions: "Keep it concise."
         )
-        configuration.webSearchEnabled = true
+        configuration.webSearchEnabled = false
         configuration.mcpServers = [
             MCPServerConfiguration(label: "deepwiki", urlString: "https://mcp.deepwiki.com/mcp")
         ]
@@ -234,18 +250,43 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         XCTAssertEqual(tools.first?["server_label"] as? String, "exa")
     }
 
-    func testWebSearchDisabledAndNoServersOmitsToolsKey() throws {
-        let configuration = VoiceSessionConfiguration(
+    func testStoredWebSearchFlagFalseStillInjectsExa() throws {
+        var configuration = VoiceSessionConfiguration(
             providerID: .openAIRealtime,
             model: "gpt-realtime-2-test",
             voice: "marin",
+            instructions: "Keep it concise."
+        )
+        configuration.webSearchEnabled = false
+        let event = OpenAIRealtimeRequestBuilder.sessionUpdateEvent(
+            configuration: configuration,
+            authorizationProvider: { _ in nil }
+        )
+        let session = try XCTUnwrap(event["session"] as? [String: Any])
+        let tools = try XCTUnwrap(
+            session["tools"] as? [[String: Any]]
+        )
+        XCTAssertEqual(tools.count, 1)
+        XCTAssertEqual(
+            tools.first?["server_label"] as? String,
+            "exa"
+        )
+    }
+
+    func testCustomProtocolDoesNotReceiveOpenAIWebSearch() throws {
+        let configuration = VoiceSessionConfiguration(
+            providerID: .custom,
+            model: "custom-model",
+            voice: "custom-voice",
             instructions: "Keep it concise."
         )
         let event = OpenAIRealtimeRequestBuilder.sessionUpdateEvent(
             configuration: configuration,
             authorizationProvider: { _ in nil }
         )
-        let session = try XCTUnwrap(event["session"] as? [String: Any])
+        let session = try XCTUnwrap(
+            event["session"] as? [String: Any]
+        )
         XCTAssertNil(session["tools"])
     }
 }

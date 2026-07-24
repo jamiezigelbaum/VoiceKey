@@ -43,7 +43,12 @@ final class VoiceProfileStoreTests: XCTestCase {
 
         VoiceProfileStore.save(profiles, defaults: defaults)
 
-        XCTAssertEqual(VoiceProfileStore.load(defaults: defaults), profiles)
+        var expected = profiles
+        expected[0].webSearchEnabled = true
+        XCTAssertEqual(
+            VoiceProfileStore.load(defaults: defaults),
+            expected
+        )
         XCTAssertFalse(VoiceProfileStore.isFreshInstall(defaults: defaults))
     }
 
@@ -192,8 +197,42 @@ final class VoiceProfileStoreTests: XCTestCase {
         ]
         VoiceProfileStore.save(saved, defaults: defaults)
 
-        XCTAssertEqual(VoiceProfileStore.load(defaults: defaults), saved)
+        var expected = saved
+        expected[0].webSearchEnabled = true
+        XCTAssertEqual(
+            VoiceProfileStore.load(defaults: defaults),
+            expected
+        )
         XCTAssertFalse(VoiceProfileStore.isFreshInstall(defaults: defaults))
+    }
+
+    func testOpenAISaveKeepsLegacyWebSearchFlagTrueForDowngrade()
+        throws {
+        let suiteName =
+            "VoiceKeyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(
+            UserDefaults(suiteName: suiteName)
+        )
+        defer {
+            defaults.removePersistentDomain(
+                forName: suiteName
+            )
+        }
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.webSearchEnabled = false
+
+        VoiceProfileStore.save(
+            [profile],
+            defaults: defaults
+        )
+
+        XCTAssertTrue(
+            try XCTUnwrap(
+                VoiceProfileStore.load(
+                    defaults: defaults
+                ).first
+            ).webSearchEnabled
+        )
     }
 
     func testPreWorkOrderFixtureRoundTripsWithoutRenamingStorage() throws {

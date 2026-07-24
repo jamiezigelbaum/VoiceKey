@@ -1,4 +1,6 @@
 import AppKit
+import ApplicationServices
+import AVFoundation
 import Carbon
 
 enum VoiceChannelUIStrings {
@@ -85,6 +87,116 @@ struct SettingsWindowSizingSnapshot: Equatable {
     var formHeight: CGFloat
 }
 
+struct CredentialFieldSnapshot: Equatable {
+    var placeholder: String?
+    var caption: String
+    var renderedValue: String
+    var isEnabled: Bool
+    var isChangeVisible: Bool
+}
+
+struct AdvancedDisclosureSnapshot: Equatable {
+    var isVisible: Bool
+    var isExpanded: Bool
+}
+
+struct PermissionRowSnapshot: Equatable {
+    var isReady: Bool
+    var status: String
+    var actionTitle: String?
+}
+
+struct SettingsPermissionsSnapshot: Equatable {
+    var microphone: PermissionRowSnapshot
+    var accessibility: PermissionRowSnapshot
+}
+
+struct CredentialFieldPresentation: Equatable {
+    static let placeholder = "Paste key here"
+    static let caption =
+        "API keys are stored in Apple keychain and shared across channels of this provider."
+    static let maskedValue = "••••••••••••"
+
+    var placeholder: String
+    var caption: String
+    var renderedValue: String
+    var isEnabled: Bool
+    var isChangeVisible: Bool
+    var isRemoveVisible: Bool
+    var isCaptionVisible: Bool
+
+    init(
+        provider: VoiceProviderID,
+        hasAPIKey: Bool,
+        isChanging: Bool
+    ) {
+        let acceptsInput =
+            VoiceProviderCredentialViewState(
+                provider: provider,
+                hasAPIKey: hasAPIKey
+            ).acceptsAPIKeyInput
+        placeholder = provider == .chatGPTWeb
+            ? provider.credentialPlaceholder
+            : Self.placeholder
+        caption = Self.caption
+        renderedValue =
+            hasAPIKey && isChanging == false
+            ? Self.maskedValue
+            : ""
+        isEnabled =
+            acceptsInput
+            && (hasAPIKey == false || isChanging)
+        isChangeVisible =
+            acceptsInput && hasAPIKey && isChanging == false
+        isRemoveVisible =
+            provider != .chatGPTWeb && hasAPIKey
+        isCaptionVisible = acceptsInput
+    }
+}
+
+enum SettingsPermissionPolicy {
+    static func microphone(
+        _ authorization: MicrophoneAuthorizationState
+    ) -> PermissionRowSnapshot {
+        switch authorization {
+        case .authorized:
+            return PermissionRowSnapshot(
+                isReady: true,
+                status: "Ready",
+                actionTitle: nil
+            )
+        case .notDetermined:
+            return PermissionRowSnapshot(
+                isReady: false,
+                status: "Needs access",
+                actionTitle: "Enable"
+            )
+        case .denied:
+            return PermissionRowSnapshot(
+                isReady: false,
+                status: "Turned off",
+                actionTitle: "Open Settings"
+            )
+        case .restricted:
+            return PermissionRowSnapshot(
+                isReady: false,
+                status: "Blocked by account or MDM",
+                actionTitle: "Open Settings"
+            )
+        }
+    }
+
+    static func accessibility(
+        isTrusted: Bool
+    ) -> PermissionRowSnapshot {
+        PermissionRowSnapshot(
+            isReady: isTrusted,
+            status: isTrusted ? "Ready" : "Needs access",
+            actionTitle: isTrusted ? nil : "Open Settings"
+        )
+    }
+}
+
 struct VoiceProfileProviderSettings: Equatable {
     var model: String
     var voice: String
@@ -139,7 +251,11 @@ enum SettingsAutoApplyPersistence {
         saveProfiles: ([VoiceProfile]) -> Void,
         credentialStore: VoiceCredentialStoring
     ) throws -> [VoiceProfile] {
-        let sorted = VoiceProfileStore.sortedByHotKey(nextProfiles)
+        let normalized =
+            VoiceProfileStore.normalizedForPersistence(
+                nextProfiles
+            )
+        let sorted = VoiceProfileStore.sortedByHotKey(normalized)
         let previousTokens = Dictionary(
             uniqueKeysWithValues: authorizationMutations.map {
                 ($0.serverID, credentialStore.authorizationToken(forMCPServer: $0.serverID))
@@ -177,7 +293,11 @@ enum SettingsAutoApplyPersistence {
                     )
                 }
             }
-            saveProfiles(previousProfiles)
+            saveProfiles(
+                VoiceProfileStore.normalizedForPersistence(
+                    previousProfiles
+                )
+            )
             throw error
         }
         return sorted
@@ -251,6 +371,40 @@ final class SettingsWindowController: NSWindowController {
         selectedProfileID
     }
 
+    var credentialFieldSnapshot: CredentialFieldSnapshot {
+        CredentialFieldSnapshot(
+            placeholder: apiKeyField.placeholderString,
+            caption: credentialSharingLabel.stringValue,
+            renderedValue: apiKeyField.stringValue,
+            isEnabled: apiKeyField.isEnabled,
+            isChangeVisible: changeAPIKeyButton.isHidden == false
+        )
+    }
+
+    var advancedDisclosureSnapshot:
+        AdvancedDisclosureSnapshot {
+        AdvancedDisclosureSnapshot(
+            isVisible:
+                advancedDisclosureButton.isHidden == false,
+            isExpanded:
+                advancedMCPContainer.isHidden == false
+        )
+    }
+
+    var permissionsSnapshot:
+        SettingsPermissionsSnapshot {
+        SettingsPermissionsSnapshot(
+            microphone:
+                SettingsPermissionPolicy.microphone(
+                    microphoneAuthorizationProvider()
+                ),
+            accessibility:
+                SettingsPermissionPolicy.accessibility(
+                    isTrusted: isAccessibilityTrusted()
+                )
+        )
+    }
+
     private let formStackView = NSStackView()
 
     private let profilePopup = NSPopUpButton()
@@ -287,17 +441,36 @@ final class SettingsWindowController: NSWindowController {
     private var speakerModeRow: NSStackView?
     private let apiCredentialLabel = NSTextField(labelWithString: "")
     private let apiKeyField = NSSecureTextField()
+    private let changeAPIKeyButton = NSButton(
+        title: "Change",
+        target: nil,
+        action: nil
+    )
     private let removeAPIKeyButton = NSButton(title: "Remove Key", target: nil, action: nil)
     private let credentialStatusLabel = NSTextField(labelWithString: "")
     private let credentialSharingLabel = NSTextField(
-        labelWithString: "Shared across channels of this provider."
+        labelWithString: CredentialFieldPresentation.caption
     )
-    private let webSearchCheckbox = NSButton(checkboxWithTitle: "Enable OpenAI web search (hosted tool)", target: nil, action: nil)
+    private let advancedDisclosureButton = NSButton(
+        title: "Advanced",
+        target: nil,
+        action: nil
+    )
+    private let advancedMCPContainer = NSStackView()
+    private var isAdvancedMCPExpanded = false
     private let mcpServerPopup = NSPopUpButton()
     private let addMCPServerButton = NSButton(title: "Add", target: nil, action: nil)
     private let editMCPServerButton = NSButton(title: "Edit", target: nil, action: nil)
     private let removeMCPServerButton = NSButton(title: "Remove", target: nil, action: nil)
     private var mcpSectionViews: [NSView] = []
+    private let microphonePermissionStatusLabel =
+        NSTextField(labelWithString: "")
+    private let microphonePermissionButton =
+        NSButton(title: "", target: nil, action: nil)
+    private let accessibilityPermissionStatusLabel =
+        NSTextField(labelWithString: "")
+    private let accessibilityPermissionButton =
+        NSButton(title: "", target: nil, action: nil)
     private let instructionsScrollView = NSScrollView()
     private let instructionsTextView = NSTextView()
     private let tipLabel = NSTextField(wrappingLabelWithString: "If the voice hears phrases you did not say, use headphones — speaker audio feeding back into the microphone causes phantom turns.")
@@ -314,6 +487,17 @@ final class SettingsWindowController: NSWindowController {
         action: nil
     )
     private let openClawRuntimeStatusLabel = NSTextField(wrappingLabelWithString: "")
+    private let microphoneAuthorizationProvider:
+        () -> MicrophoneAuthorizationState
+    private let requestMicrophoneAccess:
+        (@escaping (Bool) -> Void) -> Void
+    private let isAccessibilityTrusted: () -> Bool
+    private let requestAccessibilityAccess: () -> Void
+    private let openSystemSettingsURL: (URL) -> Void
+    private var permissionsTimer: Timer?
+    private var activationObserver: NSObjectProtocol?
+    private var credentialProfileIDsBeingChanged: Set<UUID> =
+        []
 
     private static let labelColumnWidth: CGFloat = 140
     private static let hotKeyHint = "Click the field, then press the new shortcut."
@@ -324,14 +508,65 @@ final class SettingsWindowController: NSWindowController {
         credentialStore: VoiceCredentialStoring = APIKeyStore.shared,
         saveProfiles: @escaping ([VoiceProfile]) -> Void = {
             VoiceProfileStore.save($0)
+        },
+        microphoneAuthorizationProvider: @escaping (
+        ) -> MicrophoneAuthorizationState = {
+            switch AVCaptureDevice.authorizationStatus(
+                for: .audio
+            ) {
+            case .notDetermined:
+                return .notDetermined
+            case .denied:
+                return .denied
+            case .authorized:
+                return .authorized
+            case .restricted:
+                return .restricted
+            @unknown default:
+                return .restricted
+            }
+        },
+        requestMicrophoneAccess: @escaping (
+            @escaping (Bool) -> Void
+        ) -> Void = {
+            AVCaptureDevice.requestAccess(
+                for: .audio,
+                completionHandler: $0
+            )
+        },
+        isAccessibilityTrusted: @escaping () -> Bool = {
+            AXIsProcessTrusted()
+        },
+        requestAccessibilityAccess: @escaping () -> Void = {
+            let options = [
+                kAXTrustedCheckOptionPrompt
+                    .takeUnretainedValue() as String: true
+            ] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+        },
+        openSystemSettingsURL: @escaping (URL) -> Void = {
+            _ = NSWorkspace.shared.open($0)
         }
     ) {
-        let initialProfiles = VoiceProfileStore.sortedByHotKey(profiles)
+        let initialProfiles = VoiceProfileStore.sortedByHotKey(
+            VoiceProfileStore.normalizedForPersistence(
+                profiles
+            )
+        )
         workingProfiles = initialProfiles
         selectedProfileID = initialProfiles.first?.id
         providerSettingsCache = VoiceProfileProviderSettingsCache(profiles: initialProfiles)
         self.credentialStore = credentialStore
         self.saveProfiles = saveProfiles
+        self.microphoneAuthorizationProvider =
+            microphoneAuthorizationProvider
+        self.requestMicrophoneAccess =
+            requestMicrophoneAccess
+        self.isAccessibilityTrusted =
+            isAccessibilityTrusted
+        self.requestAccessibilityAccess =
+            requestAccessibilityAccess
+        self.openSystemSettingsURL = openSystemSettingsURL
         self.openClawRuntimeService = openClawRuntimeService
         openClawRuntimePanelState = OpenClawRuntimePanelState(
             settings: .staticFallback,
@@ -353,6 +588,14 @@ final class SettingsWindowController: NSWindowController {
         super.init(window: window)
         window.delegate = self
 
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.syncPermissionsPanel()
+        }
+
         buildContent()
         rebuildProfilePopup()
         syncFormFromSelectedProfile()
@@ -367,6 +610,15 @@ final class SettingsWindowController: NSWindowController {
         }
     }
 
+    deinit {
+        permissionsTimer?.invalidate()
+        if let activationObserver {
+            NotificationCenter.default.removeObserver(
+                activationObserver
+            )
+        }
+    }
+
     convenience init() {
         self.init(profiles: VoiceProfileStore.load())
     }
@@ -377,6 +629,8 @@ final class SettingsWindowController: NSWindowController {
     }
 
     func showAndFocus() {
+        syncPermissionsPanel()
+        startPermissionsPolling()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -402,17 +656,6 @@ final class SettingsWindowController: NSWindowController {
                 failure.settingsMessage
             credentialStatusLabel.textColor = .systemRed
         }
-    }
-
-    func showFirstRunHotKeyPrompt() {
-        guard let profileID = workingProfiles.first?.id else {
-            showAndFocus()
-            return
-        }
-        showActivationFailure(
-            for: profileID,
-            failure: .missingHotKey
-        )
     }
 
     func beginHotKeyRecording() {
@@ -456,6 +699,7 @@ final class SettingsWindowController: NSWindowController {
         configureInstructionsEditor()
         configureStaticControls()
         configureMCPServerControls()
+        configurePermissionControls()
 
         // Voice channel: picker with add/delete/duplicate, plus the display name.
         addSection(VoiceChannelUIStrings.channelSectionTitle)
@@ -513,7 +757,39 @@ final class SettingsWindowController: NSWindowController {
         endpointRow.addArrangedSubview(endpointField)
         endpointRow.addArrangedSubview(endpointRequiredLabel)
         addArranged(endpointRow)
-        endSection(after: endpointRow)
+
+        // Provider-specific MCP servers stay out of the basic path.
+        // OpenAI web search is always available and has no setting.
+        let mcpRow = makeControlRow(
+            views: [
+                mcpServerPopup,
+                addMCPServerButton,
+                editMCPServerButton,
+                removeMCPServerButton
+            ],
+            stretching: mcpServerPopup
+        )
+        advancedMCPContainer.orientation = .vertical
+        advancedMCPContainer.alignment = .leading
+        advancedMCPContainer.spacing = 8
+        advancedMCPContainer.edgeInsets = NSEdgeInsets(
+            top: 2,
+            left: Self.labelColumnWidth + 12,
+            bottom: 0,
+            right: 0
+        )
+        advancedMCPContainer.addArrangedSubview(mcpRow)
+        mcpRow.widthAnchor.constraint(
+            equalTo: advancedMCPContainer.widthAnchor,
+            constant: -(Self.labelColumnWidth + 12)
+        ).isActive = true
+        mcpSectionViews = [
+            advancedDisclosureButton,
+            advancedMCPContainer
+        ]
+        addArranged(advancedDisclosureButton)
+        addArranged(advancedMCPContainer)
+        endSection(after: advancedMCPContainer)
 
         // OpenClaw owns these values at the gateway. Scope determines whether the
         // paired device may edit them; the section never requests broader scopes.
@@ -588,7 +864,20 @@ final class SettingsWindowController: NSWindowController {
         removeAPIKeyButton.translatesAutoresizingMaskIntoConstraints = false
         removeAPIKeyButton.target = self
         removeAPIKeyButton.action = #selector(removeAPIKey)
-        let apiKeyRow = NSStackView(views: [apiCredentialLabel, apiKeyField, removeAPIKeyButton])
+        changeAPIKeyButton.bezelStyle = .rounded
+        changeAPIKeyButton.controlSize = .small
+        changeAPIKeyButton.translatesAutoresizingMaskIntoConstraints =
+            false
+        changeAPIKeyButton.target = self
+        changeAPIKeyButton.action = #selector(changeAPIKey)
+        let apiKeyRow = NSStackView(
+            views: [
+                apiCredentialLabel,
+                apiKeyField,
+                changeAPIKeyButton,
+                removeAPIKeyButton
+            ]
+        )
         apiKeyRow.orientation = .horizontal
         apiKeyRow.alignment = .centerY
         apiKeyRow.spacing = 12
@@ -603,25 +892,22 @@ final class SettingsWindowController: NSWindowController {
         addArranged(credentialSharingRow)
         endSection(after: credentialSharingRow)
 
-        // MCP tools are declared to OpenAI-protocol channels and executed there.
-        let mcpHeader = sectionLabel("Tools")
-        let mcpSeparator = makeSeparator()
-        let mcpRow = makeControlRow(
-            views: [
-                mcpServerPopup,
-                addMCPServerButton,
-                editMCPServerButton,
-                removeMCPServerButton
-            ],
-            stretching: mcpServerPopup
+        // Permissions: live state with a concrete action for each missing
+        // capability.
+        addSection("Permissions")
+        let microphoneRow = makePermissionRow(
+            title: "Microphone",
+            statusLabel: microphonePermissionStatusLabel,
+            actionButton: microphonePermissionButton
         )
-        mcpSectionViews = [mcpHeader, mcpSeparator, webSearchCheckbox, mcpRow]
-        addArranged(mcpHeader)
-        formStackView.setCustomSpacing(4, after: mcpHeader)
-        addArranged(mcpSeparator)
-        addArranged(webSearchCheckbox)
-        addArranged(mcpRow)
-        endSection(after: mcpRow)
+        addArranged(microphoneRow)
+        let accessibilityRow = makePermissionRow(
+            title: "Accessibility",
+            statusLabel: accessibilityPermissionStatusLabel,
+            actionButton: accessibilityPermissionButton
+        )
+        addArranged(accessibilityRow)
+        endSection(after: accessibilityRow)
 
         // Instructions: system prompt for the selected voice channel.
         addSection("Instructions")
@@ -738,6 +1024,15 @@ final class SettingsWindowController: NSWindowController {
     }
 
     private func configureMCPServerControls() {
+        advancedDisclosureButton.setButtonType(
+            .pushOnPushOff
+        )
+        advancedDisclosureButton.bezelStyle = .disclosure
+        advancedDisclosureButton.state = .off
+        advancedDisclosureButton.target = self
+        advancedDisclosureButton.action =
+            #selector(toggleAdvancedMCP)
+
         mcpServerPopup.translatesAutoresizingMaskIntoConstraints = false
         mcpServerPopup.setContentHuggingPriority(
             NSLayoutConstraint.Priority(1),
@@ -756,6 +1051,32 @@ final class SettingsWindowController: NSWindowController {
         editMCPServerButton.action = #selector(editMCPServer)
         removeMCPServerButton.action =
             #selector(removeMCPServerWithConfirmation)
+    }
+
+    private func configurePermissionControls() {
+        for label in [
+            microphonePermissionStatusLabel,
+            accessibilityPermissionStatusLabel
+        ] {
+            label.font = NSFont.systemFont(
+                ofSize: 12,
+                weight: .medium
+            )
+            label.alignment = .right
+        }
+        for button in [
+            microphonePermissionButton,
+            accessibilityPermissionButton
+        ] {
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.target = self
+        }
+        microphonePermissionButton.action =
+            #selector(handleMicrophonePermissionAction)
+        accessibilityPermissionButton.action =
+            #selector(handleAccessibilityPermissionAction)
+        syncPermissionsPanel()
     }
 
     private func configureInstructionsEditor() {
@@ -796,8 +1117,6 @@ final class SettingsWindowController: NSWindowController {
         voiceComboBox.isEditable = true
 
         endpointField.placeholderString = "wss://localhost:8080"
-        webSearchCheckbox.target = self
-        webSearchCheckbox.action = #selector(webSearchChanged)
 
         credentialStatusLabel.font = NSFont.systemFont(ofSize: 11)
         credentialStatusLabel.textColor = .secondaryLabelColor
@@ -852,6 +1171,34 @@ final class SettingsWindowController: NSWindowController {
         return row
     }
 
+    private func makePermissionRow(
+        title: String,
+        statusLabel: NSTextField,
+        actionButton: NSButton
+    ) -> NSStackView {
+        let titleLabel = NSTextField(
+            labelWithString: title
+        )
+        styleFormLabel(titleLabel)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(
+            NSLayoutConstraint.Priority(1),
+            for: .horizontal
+        )
+        let row = NSStackView(
+            views: [
+                titleLabel,
+                spacer,
+                statusLabel,
+                actionButton
+            ]
+        )
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        return row
+    }
+
     private func indentedRow(_ view: NSView) -> NSStackView {
         view.translatesAutoresizingMaskIntoConstraints = false
         view.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
@@ -902,7 +1249,11 @@ final class SettingsWindowController: NSWindowController {
         // would discard in-progress values. Re-opening the window resets to persisted state.
         guard window?.isVisible != true else { return }
 
-        let nextProfiles = VoiceProfileStore.sortedByHotKey(newValue)
+        let nextProfiles = VoiceProfileStore.sortedByHotKey(
+            VoiceProfileStore.normalizedForPersistence(
+                newValue
+            )
+        )
         workingProfiles = nextProfiles
         providerSettingsCache = VoiceProfileProviderSettingsCache(profiles: nextProfiles)
         if let selectedProfileID,
@@ -1003,9 +1354,11 @@ final class SettingsWindowController: NSWindowController {
             }
             profile.endpointURL = trimmed
             resetEndpointStatus(for: profile.providerID)
-        case let .webSearchEnabled(enabled):
+        case .webSearchEnabled:
+            // Compatibility field only: OpenAI Realtime web search is
+            // always on from WO-N onward.
             profile.webSearchEnabled =
-                profile.providerID == .openAIRealtime && enabled
+                profile.providerID == .openAIRealtime
         case let .speakerModePreference(preference):
             profile.speakerModePreference = preference
         }
@@ -1112,7 +1465,6 @@ final class SettingsWindowController: NSWindowController {
         instructionsTextView.isEditable = provider != .chatGPTWeb
 
         apiCredentialLabel.stringValue = provider.credentialLabel
-        apiKeyField.stringValue = ""
         syncCredentialStatus(for: profile)
         syncMCPServerControls(for: profile)
         syncOpenClawRuntimePanel(for: profile)
@@ -1129,11 +1481,14 @@ final class SettingsWindowController: NSWindowController {
             "Add a voice channel, then record its global shortcut."
         hotKeyStatusLabel.textColor = .secondaryLabelColor
         apiKeyField.stringValue = ""
+        changeAPIKeyButton.isHidden = true
+        removeAPIKeyButton.isHidden = true
         credentialStatusLabel.stringValue =
             "Add a voice channel to configure credentials."
         credentialStatusLabel.textColor = .secondaryLabelColor
         credentialSharingLabel.isHidden = true
         instructionsTextView.string = ""
+        isAdvancedMCPExpanded = false
         for view in mcpSectionViews + openClawRuntimeSectionViews {
             view.isHidden = true
         }
@@ -1150,7 +1505,6 @@ final class SettingsWindowController: NSWindowController {
             speakerModePopup,
             apiKeyField,
             removeAPIKeyButton,
-            webSearchCheckbox,
             mcpServerPopup,
             addMCPServerButton,
             editMCPServerButton,
@@ -1229,13 +1583,13 @@ final class SettingsWindowController: NSWindowController {
 
     private func syncMCPServerControls(for profile: VoiceProfile) {
         let supportsMCP = [.openAIRealtime, .custom].contains(profile.providerID)
-        for view in mcpSectionViews {
-            view.isHidden = supportsMCP == false
-        }
-        // Hosted web search is an OpenAI platform feature, not part of the
-        // generic realtime protocol, so only OpenAI profiles offer it.
-        webSearchCheckbox.isHidden = profile.providerID != .openAIRealtime
-        webSearchCheckbox.state = profile.webSearchEnabled ? .on : .off
+        advancedDisclosureButton.isHidden =
+            supportsMCP == false
+        advancedMCPContainer.isHidden =
+            supportsMCP == false
+            || isAdvancedMCPExpanded == false
+        advancedDisclosureButton.state =
+            isAdvancedMCPExpanded ? .on : .off
         guard supportsMCP else { return }
 
         let selectedID = mcpServerPopup.selectedItem?.representedObject as? String
@@ -1269,18 +1623,39 @@ final class SettingsWindowController: NSWindowController {
 
     private func syncCredentialStatus(for profile: VoiceProfile) {
         let provider = profile.providerID
+        let hasAPIKey =
+            credentialStore.hasAPIKey(for: profile)
         let credentialState = VoiceProviderCredentialViewState(
             provider: provider,
-            hasAPIKey: credentialStore.hasAPIKey(for: profile)
+            hasAPIKey: hasAPIKey
         )
-        apiKeyField.isEnabled = credentialState.acceptsAPIKeyInput
-        apiKeyField.placeholderString = provider.credentialPlaceholder
+        let presentation = CredentialFieldPresentation(
+            provider: provider,
+            hasAPIKey: hasAPIKey,
+            isChanging:
+                credentialProfileIDsBeingChanged.contains(
+                    profile.id
+                )
+        )
+        apiKeyField.stringValue = presentation.renderedValue
+        apiKeyField.isEnabled = presentation.isEnabled
+        apiKeyField.placeholderString =
+            presentation.placeholder
+        apiKeyField.textColor =
+            presentation.renderedValue.isEmpty
+            ? .controlTextColor
+            : .secondaryLabelColor
+        changeAPIKeyButton.isHidden =
+            presentation.isChangeVisible == false
         removeAPIKeyButton.isEnabled = credentialState.canRemoveAPIKey
-        removeAPIKeyButton.isHidden = provider == .chatGPTWeb
+        removeAPIKeyButton.isHidden =
+            presentation.isRemoveVisible == false
         credentialStatusLabel.stringValue = credentialState.statusMessage
         credentialStatusLabel.textColor = .secondaryLabelColor
         credentialSharingLabel.isHidden =
-            provider != .openAIRealtime && provider != .openClaw
+            presentation.isCaptionVisible == false
+        credentialSharingLabel.stringValue =
+            presentation.caption
     }
 
     private func rebuildProfilePopup() {
@@ -1302,6 +1677,7 @@ final class SettingsWindowController: NSWindowController {
     private func selectProfile(id: UUID) {
         guard workingProfiles.contains(where: { $0.id == id }) else { return }
         selectedProfileID = id
+        isAdvancedMCPExpanded = false
         rebuildProfilePopup()
         syncFormFromSelectedProfile()
     }
@@ -1730,8 +2106,16 @@ final class SettingsWindowController: NSWindowController {
         _ = apply(.speakerModePreference(preference))
     }
 
-    @objc private func webSearchChanged() {
-        _ = apply(.webSearchEnabled(webSearchCheckbox.state == .on))
+    @objc private func toggleAdvancedMCP() {
+        isAdvancedMCPExpanded =
+            advancedDisclosureButton.state == .on
+        guard let index = selectedProfileIndex else {
+            advancedMCPContainer.isHidden = true
+            return
+        }
+        syncMCPServerControls(
+            for: workingProfiles[index]
+        )
     }
 
     func handleRecordedHotKey(
@@ -1861,6 +2245,18 @@ final class SettingsWindowController: NSWindowController {
         )
     }
 
+    @objc private func changeAPIKey() {
+        guard let index = selectedProfileIndex else {
+            return
+        }
+        let profile = workingProfiles[index]
+        credentialProfileIDsBeingChanged.insert(
+            profile.id
+        )
+        syncCredentialStatus(for: profile)
+        apiKeyField.selectText(nil)
+    }
+
     @discardableResult
     func commitAPIKey(_ value: String, for profileID: UUID) -> Bool {
         guard let index = workingProfiles.firstIndex(where: {
@@ -1885,6 +2281,9 @@ final class SettingsWindowController: NSWindowController {
             // The committed profile, not the popup's transient selection, owns
             // this account.
             try credentialStore.setAPIKey(typedAPIKey, for: profile)
+            credentialProfileIDsBeingChanged.remove(
+                profile.id
+            )
             apiKeyField.stringValue = ""
             syncCredentialStatus(for: profile)
             delegate?.settingsController(
@@ -1918,6 +2317,9 @@ final class SettingsWindowController: NSWindowController {
 
         do {
             try credentialStore.deleteAPIKey(for: profile)
+            credentialProfileIDsBeingChanged.remove(
+                profile.id
+            )
             apiKeyField.stringValue = ""
             syncCredentialStatus(for: profile)
             delegate?.settingsController(
@@ -1931,6 +2333,85 @@ final class SettingsWindowController: NSWindowController {
             credentialStatusLabel.textColor = .systemRed
             return false
         }
+    }
+
+    private func syncPermissionsPanel() {
+        let snapshot = permissionsSnapshot
+        renderPermissionRow(
+            snapshot.microphone,
+            statusLabel: microphonePermissionStatusLabel,
+            button: microphonePermissionButton
+        )
+        renderPermissionRow(
+            snapshot.accessibility,
+            statusLabel:
+                accessibilityPermissionStatusLabel,
+            button: accessibilityPermissionButton
+        )
+    }
+
+    private func renderPermissionRow(
+        _ snapshot: PermissionRowSnapshot,
+        statusLabel: NSTextField,
+        button: NSButton
+    ) {
+        statusLabel.stringValue = "● \(snapshot.status)"
+        statusLabel.textColor =
+            snapshot.isReady ? .systemGreen : .systemRed
+        button.title = snapshot.actionTitle ?? ""
+        button.isHidden = snapshot.actionTitle == nil
+    }
+
+    private func startPermissionsPolling() {
+        permissionsTimer?.invalidate()
+        permissionsTimer = Timer(
+            timeInterval: 1,
+            repeats: true
+        ) { [weak self] _ in
+            self?.syncPermissionsPanel()
+        }
+        if let permissionsTimer {
+            RunLoop.main.add(
+                permissionsTimer,
+                forMode: .common
+            )
+        }
+    }
+
+    @objc private func handleMicrophonePermissionAction() {
+        switch microphoneAuthorizationProvider() {
+        case .notDetermined:
+            requestMicrophoneAccess { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.syncPermissionsPanel()
+                }
+            }
+        case .denied, .restricted:
+            openSettingsPane(
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+            )
+        case .authorized:
+            syncPermissionsPanel()
+        }
+    }
+
+    @objc private func handleAccessibilityPermissionAction() {
+        guard isAccessibilityTrusted() == false else {
+            syncPermissionsPanel()
+            return
+        }
+        requestAccessibilityAccess()
+        openSettingsPane(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        )
+        syncPermissionsPanel()
+    }
+
+    private func openSettingsPane(_ string: String) {
+        guard let url = URL(string: string) else {
+            return
+        }
+        openSystemSettingsURL(url)
     }
 
     private func endpointValidationError(
@@ -2072,9 +2553,17 @@ extension SettingsWindowController: NSTextViewDelegate {
 
 extension SettingsWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
+        permissionsTimer?.invalidate()
+        permissionsTimer = nil
         commitFocusedControl()
+        credentialProfileIDsBeingChanged.removeAll()
         cancelHotKeyRecording()
         delegate?.settingsControllerDidClose(self)
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        syncPermissionsPanel()
+        startPermissionsPolling()
     }
 
     func windowDidResignKey(_ notification: Notification) {

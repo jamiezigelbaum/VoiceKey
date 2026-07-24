@@ -177,6 +177,20 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertFalse(VoiceProviderID.chatGPTWeb.supportsVoiceSetting)
     }
 
+    func testEveryAPIKeyProviderUsesPastePlaceholder() {
+        for provider in VoiceProviderID.allCases
+            where provider != .chatGPTWeb {
+            XCTAssertEqual(
+                provider.credentialPlaceholder,
+                "Paste key here"
+            )
+            XCTAssertNotEqual(
+                provider.credentialPlaceholder,
+                "Stored in macOS Keychain"
+            )
+        }
+    }
+
     func testOpenAIReadinessRequiresAPIKey() {
         XCTAssertEqual(
             VoiceProviderID.openAIRealtime.readiness(hasAPIKey: false),

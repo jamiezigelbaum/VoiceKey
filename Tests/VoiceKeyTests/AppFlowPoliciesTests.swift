@@ -160,35 +160,6 @@ final class StopWatchdogTests: XCTestCase {
     }
 }
 
-final class FirstRunSettingsLifecycleTests: XCTestCase {
-    func testFlagCannotCompleteBeforeWindowIsShown() {
-        var lifecycle = FirstRunSettingsLifecycle()
-
-        XCTAssertFalse(
-            lifecycle.profilesDidChange(hasHotKey: true)
-        )
-        XCTAssertFalse(lifecycle.isComplete)
-    }
-
-    func testShownWindowCompletesAfterHotKeyExists() {
-        var lifecycle = FirstRunSettingsLifecycle()
-
-        XCTAssertFalse(lifecycle.didShow(hasHotKey: false))
-        XCTAssertTrue(
-            lifecycle.profilesDidChange(hasHotKey: true)
-        )
-        XCTAssertTrue(lifecycle.isComplete)
-    }
-
-    func testDeliberateCloseCompletesAfterShow() {
-        var lifecycle = FirstRunSettingsLifecycle()
-
-        XCTAssertFalse(lifecycle.didShow(hasHotKey: false))
-        XCTAssertTrue(lifecycle.didClose())
-        XCTAssertTrue(lifecycle.isComplete)
-    }
-}
-
 final class HotKeyFallbackPolicyTests: XCTestCase {
     func testTrustedPathHonestlyClaimsFallbackWithoutPrompt() {
         var promptCount = 0
@@ -348,7 +319,9 @@ final class APIKeyStoreProfileScopeTests: XCTestCase {
         )
     }
 
-    func testSharedCredentialNoteIsOnlyVisibleForSharedProviders() {
+    func testOwnerCredentialCaptionIsVisibleForEveryKeyField() {
+        let caption =
+            "API keys are stored in Apple keychain and shared across channels of this provider."
         let shared = SettingsWindowController(
             profiles: [VoiceProfile.defaultOpenAI()],
             credentialStore: PolicyTestCredentialStore(),
@@ -357,8 +330,7 @@ final class APIKeyStoreProfileScopeTests: XCTestCase {
         XCTAssertTrue(
             descendantLabels(in: shared.window?.contentView)
                 .contains(where: {
-                    $0.stringValue ==
-                        "Shared across channels of this provider."
+                    $0.stringValue == caption
                         && $0.isHidden == false
                 })
         )
@@ -368,11 +340,10 @@ final class APIKeyStoreProfileScopeTests: XCTestCase {
             credentialStore: PolicyTestCredentialStore(),
             saveProfiles: { _ in }
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             descendantLabels(in: custom.window?.contentView)
                 .contains(where: {
-                    $0.stringValue ==
-                        "Shared across channels of this provider."
+                    $0.stringValue == caption
                         && $0.isHidden == false
                 })
         )

@@ -140,8 +140,25 @@ enum VoiceProfileStore {
     }
 
     static func save(_ profiles: [VoiceProfile], defaults: UserDefaults = .standard) {
-        guard let data = try? JSONEncoder().encode(sortedByHotKey(profiles)) else { return }
+        let normalized = normalizedForPersistence(profiles)
+        guard let data = try? JSONEncoder().encode(
+            sortedByHotKey(normalized)
+        ) else { return }
         defaults.set(data, forKey: profilesKey)
+    }
+
+    static func normalizedForPersistence(
+        _ profiles: [VoiceProfile]
+    ) -> [VoiceProfile] {
+        profiles.map { profile in
+            var normalized = profile
+            if normalized.providerID == .openAIRealtime {
+                // Compatibility field retained for older VoiceKey builds.
+                // Current builds always expose web search for OpenAI.
+                normalized.webSearchEnabled = true
+            }
+            return normalized
+        }
     }
 
     /// Canonical channel order everywhere (menu, channel picker): by hotkey
