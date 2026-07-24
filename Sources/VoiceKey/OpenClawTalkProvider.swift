@@ -42,13 +42,14 @@ enum OpenClawTalkRequestBuilder {
     static let connectRequestID = "1"
     static let sessionCreateRequestID = "2"
     // Must be a chat session key the gateway can resolve (format
-    // agent:<agent>:<session>); the consult runs against this session's
-    // agent and memory. agent:main:voicekey is VoiceKey's DEDICATED lane on
-    // the main agent (created 2026-07-24): same workspace/memory/tools, but
-    // isolated from agent:main:main, which other operator threads keep busy —
-    // consults sharing that session collided with concurrent runs and came
-    // back as instant empty finals while the real answer landed later.
-    static let sessionKey = "agent:main:voicekey"
+    // agent:<agent>:<session>). agent:voice:voicekey targets the dedicated
+    // "voice" agent (created 2026-07-24): Castor's persona with a ~3.5KB
+    // workspace instead of ~38KB, gpt-5.6-luna/low-thinking defaults, the
+    // full tool surface, and shared long-term memory via
+    // memorySearch.extraPaths. Its own agent lane also isolates voice
+    // consults from main-agent congestion (whole runs previously queued
+    // ~3 minutes behind Telegram/operator traffic on lane=main).
+    static let sessionKey = "agent:voice:voicekey"
     static let clientID = "openclaw-macos"
     static let clientMode = "backend"
     static let role = "operator"
