@@ -100,6 +100,7 @@ final class OnboardingFlowPolicyTests: XCTestCase {
             OnboardingFlowPolicy.reentryStep(
                 groundTruth: groundTruth(
                     hasAPIKey: true,
+                    hasOpenClawConnection: true,
                     microphone: .authorized,
                     hasHotKey: true
                 )
@@ -118,6 +119,7 @@ final class OnboardingFlowPolicyTests: XCTestCase {
                 OnboardingFlowPolicy.reentryStep(
                     groundTruth: groundTruth(
                         hasAPIKey: true,
+                        hasOpenClawConnection: true,
                         microphone: state,
                         hasHotKey: true
                     )
@@ -129,6 +131,7 @@ final class OnboardingFlowPolicyTests: XCTestCase {
             OnboardingFlowPolicy.reentryStep(
                 groundTruth: groundTruth(
                     hasAPIKey: true,
+                    hasOpenClawConnection: true,
                     microphone: .authorized,
                     hasHotKey: true
                 )
@@ -140,10 +143,11 @@ final class OnboardingFlowPolicyTests: XCTestCase {
     func testOptionalCredentialDoesNotCreateAnIncompleteKeyStep() {
         let facts = OnboardingGroundTruth(
             applicationLocation: .applications,
-            requiresAPIKey: false,
-            hasAPIKey: false,
+            selectedServices: [.openClaw],
+            hasOpenAIAPIKey: false,
+            hasOpenClawConnection: true,
             microphoneAuthorization: .authorized,
-            hasHotKey: true
+            hasHotKeysForSelectedServices: true
         )
 
         XCTAssertEqual(
@@ -205,6 +209,108 @@ final class OnboardingFlowPolicyTests: XCTestCase {
         )
     }
 
+    func testWelcomeAlwaysFlowsThroughServicePickerBeforeConditionalSteps() {
+        let facts = groundTruth(
+            hasAPIKey: true,
+            microphone: .authorized,
+            hasHotKey: true
+        )
+
+        XCTAssertEqual(
+            OnboardingFlowPolicy.nextStep(
+                after: .welcome,
+                groundTruth: facts,
+                handledSteps: [.welcome]
+            ),
+            .services
+        )
+    }
+
+    func testConditionalServiceStepsFollowSelection() {
+        let bothMissing = groundTruth(
+            services: [.openAI, .openClaw],
+            hasAPIKey: false,
+            hasOpenClawConnection: false,
+            microphone: .authorized,
+            hasHotKey: true
+        )
+        XCTAssertEqual(
+            OnboardingFlowPolicy.reentryStep(
+                groundTruth: bothMissing
+            ),
+            .apiKey
+        )
+        XCTAssertEqual(
+            OnboardingFlowPolicy.nextStep(
+                after: .apiKey,
+                groundTruth: bothMissing,
+                handledSteps: [.apiKey]
+            ),
+            .openClawConnect
+        )
+
+        let openClawOnly = groundTruth(
+            services: [.openClaw],
+            hasAPIKey: false,
+            hasOpenClawConnection: false,
+            microphone: .authorized,
+            hasHotKey: true
+        )
+        XCTAssertEqual(
+            OnboardingFlowPolicy.reentryStep(
+                groundTruth: openClawOnly
+            ),
+            .openClawConnect
+        )
+
+        let none = groundTruth(
+            services: [],
+            hasAPIKey: false,
+            microphone: .authorized,
+            hasHotKey: true
+        )
+        XCTAssertEqual(
+            OnboardingFlowPolicy.reentryStep(
+                groundTruth: none
+            ),
+            .services
+        )
+    }
+
+    func testFreshBothServicesWalksEveryRequiredStepInOrder() {
+        let facts = groundTruth(
+            services: [.openAI, .openClaw],
+            hasAPIKey: false,
+            hasOpenClawConnection: false,
+            microphone: .notDetermined,
+            hasHotKey: false
+        )
+        var handled: Set<OnboardingStep> = [.welcome]
+        var step = OnboardingFlowPolicy.nextStep(
+            after: .welcome,
+            groundTruth: facts,
+            handledSteps: handled
+        )
+        XCTAssertEqual(step, .services)
+
+        let expected: [OnboardingStep] = [
+            .apiKey,
+            .openClawConnect,
+            .microphone,
+            .hotKey,
+            .done
+        ]
+        for next in expected {
+            handled.insert(step)
+            step = OnboardingFlowPolicy.nextStep(
+                after: step,
+                groundTruth: facts,
+                handledSteps: handled
+            )
+            XCTAssertEqual(step, next)
+        }
+    }
+
     func testLocationDetectionUsesExecutableTranslocationBeforeBundlePath() {
         XCTAssertEqual(
             ApplicationLocationState.detect(
@@ -247,6 +353,11 @@ final class OnboardingFlowPolicyTests: XCTestCase {
             OnboardingWizardController.maskedKey,
             "••••••••••••"
         )
+        XCTAssertEqual(
+            OnboardingWizardController
+                .openClawTokenPlaceholder,
+            "Paste token here"
+        )
         XCTAssertFalse(
             OnboardingWizardController.maskedKey.contains(
                 "sk-"
@@ -256,16 +367,438 @@ final class OnboardingFlowPolicyTests: XCTestCase {
 
     private func groundTruth(
         location: ApplicationLocationState = .applications,
+        services: Set<OnboardingService> = [.openAI],
         hasAPIKey: Bool,
+        hasOpenClawConnection: Bool = false,
         microphone: MicrophoneAuthorizationState,
         hasHotKey: Bool
     ) -> OnboardingGroundTruth {
         OnboardingGroundTruth(
             applicationLocation: location,
-            requiresAPIKey: true,
-            hasAPIKey: hasAPIKey,
+            selectedServices: services,
+            hasOpenAIAPIKey: hasAPIKey,
+            hasOpenClawConnection: hasOpenClawConnection,
             microphoneAuthorization: microphone,
-            hasHotKey: hasHotKey
+            hasHotKeysForSelectedServices: hasHotKey
+        )
+    }
+}
+
+final class OnboardingWizardControllerServiceTests:
+    XCTestCase {
+    func testReentryDropsDeletedServiceAndDoesNotRecreateChannel() {
+        let defaults = makeDefaults()
+        OnboardingServicePreferences.saveSelectedServices(
+            [.openAI, .openClaw],
+            defaults: defaults
+        )
+        OnboardingServicePreferences.setHasOpenClawConnection(
+            true,
+            defaults: defaults
+        )
+        let delegate = OnboardingChannelRecordingDelegate(
+            profiles: [VoiceProfile.defaultOpenAI()]
+        )
+        let controller = OnboardingWizardController(
+            profileProvider: { delegate.profiles },
+            credentialStore: OnboardingCredentialStore(
+                hasAPIKey: true
+            ),
+            userDefaults: defaults,
+            applicationLocationProvider: { .applications },
+            microphoneAuthorizationProvider: { .authorized }
+        )
+        controller.delegate = delegate
+        defer { controller.close() }
+
+        controller.showReentrant()
+
+        XCTAssertEqual(controller.currentStepSnapshot, .done)
+        XCTAssertEqual(
+            OnboardingServicePreferences.selectedServices(
+                defaults: defaults
+            ),
+            [.openAI]
+        )
+        XCTAssertTrue(delegate.ensureRequests.isEmpty)
+        XCTAssertFalse(delegate.profiles.contains {
+            $0.providerID == .openClaw
+        })
+    }
+
+    func testFreshServiceConfirmationStillCreatesSelectedChannels() {
+        let defaults = makeDefaults()
+        let delegate = OnboardingChannelRecordingDelegate(
+            profiles: [VoiceProfile.defaultOpenAI()]
+        )
+        let controller = OnboardingWizardController(
+            profileProvider: { delegate.profiles },
+            credentialStore: OnboardingCredentialStore(),
+            userDefaults: defaults,
+            applicationLocationProvider: { .applications },
+            microphoneAuthorizationProvider: { .authorized }
+        )
+        controller.delegate = delegate
+        defer { controller.close() }
+
+        controller.confirmServices([.openAI, .openClaw])
+
+        XCTAssertEqual(
+            delegate.ensureRequests,
+            [[.openAI, .openClaw]]
+        )
+        XCTAssertEqual(
+            delegate.profiles.filter {
+                $0.providerID == .openAIRealtime
+            }.count,
+            1
+        )
+        XCTAssertEqual(
+            delegate.profiles.filter {
+                $0.providerID == .openClaw
+            }.count,
+            1
+        )
+        XCTAssertEqual(
+            OnboardingServicePreferences.selectedServices(
+                defaults: defaults
+            ),
+            [.openAI, .openClaw]
+        )
+    }
+
+    private func makeDefaults() -> UserDefaults {
+        let suiteName =
+            "OnboardingWizardControllerServiceTests-\(UUID())"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        return defaults
+    }
+}
+
+final class OnboardingServicePreferencesTests: XCTestCase {
+    private var defaults: UserDefaults!
+    private var suiteName: String!
+
+    override func setUp() {
+        super.setUp()
+        suiteName = "OnboardingServicePreferencesTests-\(UUID())"
+        defaults = UserDefaults(suiteName: suiteName)
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults = nil
+        suiteName = nil
+        super.tearDown()
+    }
+
+    func testSelectionRoundTripsIncludingEmptySelection() {
+        XCTAssertNil(
+            OnboardingServicePreferences.selectedServices(
+                defaults: defaults
+            )
+        )
+
+        OnboardingServicePreferences.saveSelectedServices(
+            [.openAI, .openClaw],
+            defaults: defaults
+        )
+        XCTAssertEqual(
+            OnboardingServicePreferences.selectedServices(
+                defaults: defaults
+            ),
+            [.openAI, .openClaw]
+        )
+
+        OnboardingServicePreferences.saveSelectedServices(
+            [],
+            defaults: defaults
+        )
+        XCTAssertEqual(
+            OnboardingServicePreferences.selectedServices(
+                defaults: defaults
+            ),
+            []
+        )
+    }
+
+    func testOpenClawConnectionFactRoundTrips() {
+        XCTAssertFalse(
+            OnboardingServicePreferences.hasOpenClawConnection(
+                defaults: defaults
+            )
+        )
+        OnboardingServicePreferences.setHasOpenClawConnection(
+            true,
+            defaults: defaults
+        )
+        XCTAssertTrue(
+            OnboardingServicePreferences.hasOpenClawConnection(
+                defaults: defaults
+            )
+        )
+    }
+}
+
+final class OnboardingChannelEnsurerTests: XCTestCase {
+    func testEnsuringBothServicesIsIdempotentAndPreservesUnselectedChannels() {
+        let custom = VoiceProfile(
+            name: "Custom",
+            providerID: .custom,
+            hotKey: nil,
+            model: "model",
+            voice: "voice"
+        )
+        let initial = [custom]
+        let once = OnboardingChannelEnsurer.ensure(
+            services: [.openAI, .openClaw],
+            openClawEndpoint: "https://gateway.example.com",
+            in: initial
+        )
+        let twice = OnboardingChannelEnsurer.ensure(
+            services: [.openAI, .openClaw],
+            openClawEndpoint: "https://gateway.example.com",
+            in: once
+        )
+
+        XCTAssertEqual(once, twice)
+        XCTAssertEqual(
+            once.filter { $0.providerID == .openAIRealtime }.count,
+            1
+        )
+        XCTAssertEqual(
+            once.filter { $0.providerID == .openClaw }.count,
+            1
+        )
+        XCTAssertTrue(once.contains { $0.id == custom.id })
+        XCTAssertEqual(
+            once.first { $0.providerID == .openClaw }?.endpointURL,
+            "https://gateway.example.com"
+        )
+        XCTAssertEqual(
+            once.first { $0.providerID == .openClaw }?.instructions,
+            ""
+        )
+    }
+
+    func testEnsuringOneServiceNeverDeletesAnother() {
+        let openClaw = VoiceProfile(
+            name: "OpenClaw",
+            providerID: .openClaw,
+            model: "",
+            voice: ""
+        )
+        let ensured = OnboardingChannelEnsurer.ensure(
+            services: [.openAI],
+            openClawEndpoint: "",
+            in: [openClaw]
+        )
+
+        XCTAssertTrue(ensured.contains { $0.id == openClaw.id })
+        XCTAssertTrue(
+            ensured.contains {
+                $0.providerID == .openAIRealtime
+            }
+        )
+    }
+}
+
+final class OnboardingHotKeyPolicyTests: XCTestCase {
+    func testSequentiallyReturnsEachSelectedUnassignedChannel() {
+        let openAI = VoiceProfile(
+            name: "OpenAI",
+            providerID: .openAIRealtime,
+            model: "model",
+            voice: "voice"
+        )
+        let openClaw = VoiceProfile(
+            name: "OpenClaw",
+            providerID: .openClaw,
+            model: "",
+            voice: ""
+        )
+        let unrelated = VoiceProfile(
+            name: "Custom",
+            providerID: .custom,
+            model: "model",
+            voice: "voice"
+        )
+        let profiles = [openAI, openClaw, unrelated]
+
+        XCTAssertEqual(
+            OnboardingHotKeyPolicy.nextProfile(
+                in: profiles,
+                selectedServices: [.openAI, .openClaw],
+                handledProfileIDs: []
+            )?.id,
+            openAI.id
+        )
+        XCTAssertEqual(
+            OnboardingHotKeyPolicy.nextProfile(
+                in: profiles,
+                selectedServices: [.openAI, .openClaw],
+                handledProfileIDs: [openAI.id]
+            )?.id,
+            openClaw.id
+        )
+        XCTAssertNil(
+            OnboardingHotKeyPolicy.nextProfile(
+                in: profiles,
+                selectedServices: [.openAI, .openClaw],
+                handledProfileIDs: [openAI.id, openClaw.id]
+            )
+        )
+    }
+
+    func testGroundTruthRequiresAChannelAndHotKeyForEverySelection() {
+        var openAI = VoiceProfile(
+            name: "OpenAI",
+            providerID: .openAIRealtime,
+            model: "model",
+            voice: "voice"
+        )
+        XCTAssertFalse(
+            OnboardingHotKeyPolicy
+                .hasHotKeysForEverySelectedChannel(
+                    profiles: [openAI],
+                    selectedServices: [.openAI, .openClaw]
+                )
+        )
+        openAI.hotKey = .defaultVoiceToggle
+        XCTAssertTrue(
+            OnboardingHotKeyPolicy
+                .hasHotKeysForEverySelectedChannel(
+                    profiles: [openAI],
+                    selectedServices: [.openAI]
+                )
+        )
+    }
+}
+
+final class OpenClawConnectionWizardTests: XCTestCase {
+    func testPairingRetryKeepsScreenAndAdoptsLatestRequestID() {
+        let tester = FakeOpenClawConnectionTester()
+        let scheduler = FakeOnboardingRetryScheduler()
+        let wizard = OpenClawConnectionWizard(
+            tester: tester,
+            tokenProvider: { "gateway-token" },
+            retryScheduler: scheduler.schedule
+        )
+
+        wizard.begin(endpointURL: "")
+        XCTAssertEqual(wizard.state, .testing)
+        tester.completeNext(.pairingRequired(
+            reason: "metadata-upgrade",
+            requestID: "expired-request",
+            remediationHint: "Approve it."
+        ))
+        XCTAssertEqual(
+            wizard.state,
+            .pairingWait(
+                reason: "metadata-upgrade",
+                requestID: "expired-request",
+                remediationHint: "Approve it."
+            )
+        )
+
+        scheduler.fireNext()
+        XCTAssertEqual(
+            wizard.state,
+            .pairingWait(
+                reason: "metadata-upgrade",
+                requestID: "expired-request",
+                remediationHint: "Approve it."
+            ),
+            "The approval command remains visible while the retry is in flight."
+        )
+        tester.completeNext(.pairingRequired(
+            reason: "metadata-upgrade",
+            requestID: "latest-request",
+            remediationHint: "Approve the latest request."
+        ))
+        XCTAssertEqual(
+            wizard.state,
+            .pairingWait(
+                reason: "metadata-upgrade",
+                requestID: "latest-request",
+                remediationHint: "Approve the latest request."
+            )
+        )
+    }
+
+    func testLeavingPairingScreenCancelsRetryAndActiveTest() {
+        let tester = FakeOpenClawConnectionTester()
+        let scheduler = FakeOnboardingRetryScheduler()
+        let wizard = OpenClawConnectionWizard(
+            tester: tester,
+            tokenProvider: { "gateway-token" },
+            retryScheduler: scheduler.schedule
+        )
+        wizard.begin(endpointURL: "")
+        tester.completeNext(.pairingRequired(
+            reason: nil,
+            requestID: "request-1",
+            remediationHint: nil
+        ))
+
+        wizard.leave()
+        scheduler.fireNext()
+
+        XCTAssertEqual(tester.testCount, 1)
+        XCTAssertTrue(scheduler.cancellations.allSatisfy(\.isCancelled))
+    }
+
+    func testMissingTokenAndSuccessMapToWizardStates() {
+        let missingTester = FakeOpenClawConnectionTester()
+        let missing = OpenClawConnectionWizard(
+            tester: missingTester,
+            tokenProvider: { nil }
+        )
+        missing.begin(endpointURL: "")
+        XCTAssertEqual(
+            missing.state,
+            .needsToken(
+                message: "No gateway token was found on this Mac."
+            )
+        )
+        XCTAssertEqual(missingTester.testCount, 0)
+
+        let tester = FakeOpenClawConnectionTester()
+        let connected = OpenClawConnectionWizard(
+            tester: tester,
+            tokenProvider: { "token" }
+        )
+        connected.begin(endpointURL: "")
+        tester.completeNext(.ok(
+            serverVersion: "2026.7.1-2",
+            scopes: ["operator.read"]
+        ))
+        XCTAssertEqual(
+            connected.state,
+            .success(serverVersion: "2026.7.1-2")
+        )
+    }
+
+    func testDeviceTokenMismatchCopyRequiresRepairInsteadOfPromisingRefresh() {
+        let tester = FakeOpenClawConnectionTester()
+        let wizard = OpenClawConnectionWizard(
+            tester: tester,
+            tokenProvider: { "token" }
+        )
+
+        wizard.begin(endpointURL: "")
+        tester.completeNext(.deviceTokenMismatch)
+
+        XCTAssertEqual(
+            wizard.state,
+            .failed(
+                message: "OpenClaw’s saved device approval is no longer valid. Re-pair this Mac in OpenClaw, then try again."
+            )
         )
     }
 }
@@ -422,6 +955,152 @@ final class OpenAIAPIKeyVerifierTests: XCTestCase {
             )
         )
     }
+}
+
+private final class FakeOpenClawConnectionTester:
+    OpenClawConnectionTesting {
+    private var completions:
+        [(OpenClawConnectionOutcome) -> Void] = []
+    private(set) var testCount = 0
+
+    @discardableResult
+    func testConnection(
+        endpointURL: String,
+        completion: @escaping (
+            OpenClawConnectionOutcome
+        ) -> Void
+    ) -> OpenClawConnectionTestCancellation {
+        testCount += 1
+        completions.append(completion)
+        return FakeOpenClawTestCancellation()
+    }
+
+    func completeNext(
+        _ outcome: OpenClawConnectionOutcome
+    ) {
+        completions.removeFirst()(outcome)
+    }
+}
+
+private final class FakeOpenClawTestCancellation:
+    OpenClawConnectionTestCancellation {
+    private(set) var isCancelled = false
+
+    func cancel() {
+        isCancelled = true
+    }
+}
+
+private final class FakeOnboardingRetryScheduler {
+    private(set) var cancellations:
+        [FakeOnboardingRetryCancellation] = []
+    private var actions: [() -> Void] = []
+
+    func schedule(
+        after delay: TimeInterval,
+        action: @escaping () -> Void
+    ) -> OnboardingRetryCancellation {
+        XCTAssertEqual(delay, 4)
+        let cancellation =
+            FakeOnboardingRetryCancellation()
+        cancellations.append(cancellation)
+        actions.append {
+            guard cancellation.isCancelled == false else {
+                return
+            }
+            action()
+        }
+        return cancellation
+    }
+
+    func fireNext() {
+        actions.removeFirst()()
+    }
+}
+
+private final class FakeOnboardingRetryCancellation:
+    OnboardingRetryCancellation {
+    private(set) var isCancelled = false
+
+    func cancel() {
+        isCancelled = true
+    }
+}
+
+private final class OnboardingChannelRecordingDelegate:
+    OnboardingWizardControllerDelegate {
+    var profiles: [VoiceProfile]
+    private(set) var ensureRequests:
+        [Set<OnboardingService>] = []
+
+    init(profiles: [VoiceProfile]) {
+        self.profiles = profiles
+    }
+
+    func onboardingController(
+        _ controller: OnboardingWizardController,
+        didRecordHotKey hotKey: HotKeyConfiguration,
+        for profile: VoiceProfile
+    ) -> Bool {
+        false
+    }
+
+    func onboardingController(
+        _ controller: OnboardingWizardController,
+        isRecordingHotKey: Bool
+    ) {}
+
+    func onboardingController(
+        _ controller: OnboardingWizardController,
+        ensureChannelsFor services: Set<OnboardingService>,
+        openClawEndpoint: String
+    ) {
+        ensureRequests.append(services)
+        profiles = OnboardingChannelEnsurer.ensure(
+            services: services,
+            openClawEndpoint: openClawEndpoint,
+            in: profiles
+        )
+    }
+}
+
+private final class OnboardingCredentialStore:
+    VoiceCredentialStoring {
+    private let hasAPIKeyValue: Bool
+
+    init(hasAPIKey: Bool = false) {
+        hasAPIKeyValue = hasAPIKey
+    }
+
+    func hasAPIKey(for profile: VoiceProfile) -> Bool {
+        hasAPIKeyValue
+    }
+
+    func apiKey(for profile: VoiceProfile) -> String? {
+        nil
+    }
+
+    func setAPIKey(
+        _ apiKey: String,
+        for profile: VoiceProfile
+    ) throws {}
+
+    func deleteAPIKey(for profile: VoiceProfile) throws {}
+
+    func authorizationToken(
+        forMCPServer id: UUID
+    ) -> String? {
+        nil
+    }
+
+    func setAuthorizationToken(
+        _ token: String,
+        forMCPServer id: UUID
+    ) throws {}
+
+    func deleteAuthorizationToken(
+        forMCPServer id: UUID
+    ) throws {}
 }
 
 private final class StubOnboardingURLProtocol:

@@ -827,6 +827,96 @@ final class SettingsAutoApplyTests: XCTestCase {
         )
     }
 
+    func testOpenClawConnectionTestRowUsesSharedTypedTester() throws {
+        let profile = VoiceProfile(
+            name: "OpenClaw",
+            providerID: .openClaw,
+            model: "",
+            voice: "",
+            endpointURL: "https://gateway.example.com"
+        )
+        let tester = SettingsOpenClawConnectionTester()
+        var savedFacts: [Bool] = []
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            openClawConnectionTester: tester,
+            saveOpenClawConnectionFact: {
+                savedFacts.append($0)
+            },
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+
+        XCTAssertTrue(
+            controller.openClawConnectionTestSnapshot
+                .isVisible
+        )
+        let button = try XCTUnwrap(
+            descendantButtons(
+                in: controller.window?.contentView
+            ).first {
+                $0.title == "Test Connection"
+            }
+        )
+        sendAction(for: button)
+        XCTAssertEqual(
+            controller.openClawConnectionTestSnapshot,
+            OpenClawConnectionTestSnapshot(
+                isVisible: true,
+                isTesting: true,
+                status: "Testing…"
+            )
+        )
+        XCTAssertEqual(
+            tester.endpoints,
+            ["https://gateway.example.com"]
+        )
+
+        tester.complete(.ok(
+            serverVersion: "2026.7.1-2",
+            scopes: ["operator.read"]
+        ))
+        XCTAssertEqual(
+            controller.openClawConnectionTestSnapshot,
+            OpenClawConnectionTestSnapshot(
+                isVisible: true,
+                isTesting: false,
+                status: "Connected to gateway 2026.7.1-2."
+            )
+        )
+        XCTAssertEqual(savedFacts, [true])
+
+        sendAction(for: button)
+        tester.complete(.unreachable(
+            endpointsTried: ["wss://gateway.example.com"]
+        ))
+        XCTAssertEqual(
+            controller.openClawConnectionTestSnapshot.status,
+            "Gateway unreachable (1 addresses tried)."
+        )
+        XCTAssertEqual(
+            savedFacts,
+            [true],
+            "A failed test must not downgrade a prior connection fact."
+        )
+
+        sendAction(for: button)
+        tester.complete(.deviceTokenMismatch)
+        XCTAssertEqual(
+            controller.openClawConnectionTestSnapshot.status,
+            "OpenClaw’s saved device approval is no longer valid. Re-pair this Mac in OpenClaw, then try again."
+        )
+        XCTAssertEqual(savedFacts, [true])
+
+        controller.profiles = [
+            VoiceProfile.defaultOpenAI()
+        ]
+        XCTAssertFalse(
+            controller.openClawConnectionTestSnapshot
+                .isVisible
+        )
+    }
+
     func testWindowDefaultsTallEnoughAndHasNoSaveButton() {
         var profile = VoiceProfile.defaultOpenAI()
         profile.mcpServers = [
@@ -1065,4 +1155,33 @@ private final class EndpointRecordingRuntimeService:
             source: .gateway
         )))
     }
+}
+
+private final class SettingsOpenClawConnectionTester:
+    OpenClawConnectionTesting {
+    private var completion:
+        ((OpenClawConnectionOutcome) -> Void)?
+    private(set) var endpoints: [String] = []
+
+    @discardableResult
+    func testConnection(
+        endpointURL: String,
+        completion: @escaping (
+            OpenClawConnectionOutcome
+        ) -> Void
+    ) -> OpenClawConnectionTestCancellation {
+        endpoints.append(endpointURL)
+        self.completion = completion
+        return SettingsOpenClawTestCancellation()
+    }
+
+    func complete(_ outcome: OpenClawConnectionOutcome) {
+        completion?(outcome)
+        completion = nil
+    }
+}
+
+private final class SettingsOpenClawTestCancellation:
+    OpenClawConnectionTestCancellation {
+    func cancel() {}
 }

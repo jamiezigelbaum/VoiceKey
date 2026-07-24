@@ -262,9 +262,7 @@ struct VoiceProviderCredentialViewState: Equatable {
     init(
         provider: VoiceProviderID,
         hasAPIKey: Bool,
-        hasDiscoveredGatewayToken: Bool = OpenClawTokenResolver.gatewayTokenFromSecretsDirectory(
-            OpenClawTokenResolver.defaultSecretsDirectory
-        ) != nil
+        hasDiscoveredGatewayToken: Bool = OpenClawTokenResolver.discoveredGatewayToken() != nil
     ) {
         // The credential caption reflects credential PRESENCE, not channel
         // readiness: OpenClaw's readiness always passes (token optional,

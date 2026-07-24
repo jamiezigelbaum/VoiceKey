@@ -698,7 +698,14 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
     private var onboardingGroundTruth:
         OnboardingGroundTruth {
-        let profile = profiles.first
+        let selectedServices =
+            OnboardingServicePreferences.selectedServices()
+            ?? OnboardingServicePreferences.inferredServices(
+                from: profiles
+            )
+        let openAIProfile = profiles.first {
+            $0.providerID == .openAIRealtime
+        }
         let microphoneAuthorization:
             MicrophoneAuthorizationState
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -719,14 +726,21 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
                     executableURL: Bundle.main.executableURL,
                     bundleURL: Bundle.main.bundleURL
                 ),
-            requiresAPIKey:
-                profile?.providerID.requiresAPIKey == true,
-            hasAPIKey: profile.map {
+            selectedServices: selectedServices,
+            hasOpenAIAPIKey: openAIProfile.map {
                 APIKeyStore.shared.hasAPIKey(for: $0)
             } ?? false,
+            hasOpenClawConnection:
+                OnboardingServicePreferences
+                    .hasOpenClawConnection(),
             microphoneAuthorization:
                 microphoneAuthorization,
-            hasHotKey: profile?.hotKey != nil
+            hasHotKeysForSelectedServices:
+                OnboardingHotKeyPolicy
+                    .hasHotKeysForEverySelectedChannel(
+                        profiles: profiles,
+                        selectedServices: selectedServices
+                    )
         )
     }
 
@@ -1071,6 +1085,29 @@ extension VoiceKeyAppDelegate:
     func onboardingControllerGroundTruthDidChange(
         _ controller: OnboardingWizardController
     ) {
+        updateMenuContent()
+    }
+
+    func onboardingController(
+        _ controller: OnboardingWizardController,
+        ensureChannelsFor services: Set<OnboardingService>,
+        openClawEndpoint: String
+    ) {
+        let ensured = OnboardingChannelEnsurer.ensure(
+            services: services,
+            openClawEndpoint: openClawEndpoint,
+            in: profiles
+        )
+        guard ensured != profiles else { return }
+        profiles = ensured
+        VoiceProfileStore.save(profiles)
+        registerAllHotKeys()
+        rebuildMenu()
+        if let selectedProfile {
+            updateProviderConfiguration(
+                sessionConfiguration(for: selectedProfile)
+            )
+        }
         updateMenuContent()
     }
 }

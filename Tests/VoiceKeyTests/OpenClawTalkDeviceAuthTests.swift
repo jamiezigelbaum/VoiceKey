@@ -298,6 +298,9 @@ final class OpenClawTalkDeviceAuthTests: XCTestCase {
             OpenClawTalkEventMapper.actions(from: frame, sessionID: nil),
             [.connectRetryWithScopes(
                 scopes: ["operator.write"],
+                reason: nil,
+                requestID: nil,
+                remediationHint: nil,
                 message: "pairing required: device identity changed and must be re-approved"
             )]
         )
@@ -308,17 +311,50 @@ final class OpenClawTalkDeviceAuthTests: XCTestCase {
 
         XCTAssertEqual(
             OpenClawTalkEventMapper.actions(from: frame, sessionID: nil),
-            [.connectRetryWithScopes(scopes: ["operator.read", "operator.write"], message: "pairing required")]
+            [.connectRetryWithScopes(
+                scopes: ["operator.read", "operator.write"],
+                reason: nil,
+                requestID: nil,
+                remediationHint: nil,
+                message: "pairing required"
+            )]
         )
     }
 
-    func testNotPairedWithoutApprovedScopesStaysHandshakeFailure() {
+    func testNotPairedWithoutApprovedScopesCarriesPairingDetails() {
         let frame = #"{"type":"res","id":"1","ok":false,"error":{"code":"NOT_PAIRED","message":"pairing required: unknown device","details":{"code":"PAIRING_REQUIRED"}}}"#
 
         XCTAssertEqual(
             OpenClawTalkEventMapper.actions(from: frame, sessionID: nil),
-            [.handshakeFailed(message: "pairing required: unknown device")]
+            [.pairingRequired(
+                reason: nil,
+                requestID: nil,
+                remediationHint: nil,
+                message: "pairing required: unknown device"
+            )]
         )
+    }
+
+    func testSignedConnectFrameCanOmitStaleDeviceToken() throws {
+        let frame = OpenClawTalkRequestBuilder.connectFrame(
+            token: "gateway-token",
+            clientVersion: "0.2.0",
+            scopes: ["operator.write"],
+            deviceToken: nil,
+            deviceProof: OpenClawDeviceProof(
+                deviceID: "device-1",
+                publicKeyBase64URL: "pub",
+                signatureBase64URL: "sig",
+                signedAtMs: 42,
+                nonce: "nonce-1"
+            )
+        )
+
+        let params = try XCTUnwrap(frame["params"] as? [String: Any])
+        let auth = try XCTUnwrap(params["auth"] as? [String: Any])
+        XCTAssertEqual(auth["token"] as? String, "gateway-token")
+        XCTAssertNil(auth["deviceToken"])
+        XCTAssertNotNil(params["device"])
     }
 
     func testMissingScopeSessionCreateErrorIncludesPairingHint() {

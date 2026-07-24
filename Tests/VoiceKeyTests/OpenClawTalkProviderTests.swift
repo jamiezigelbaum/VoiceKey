@@ -224,7 +224,7 @@ final class OpenClawTalkProviderTests: XCTestCase {
         XCTAssertEqual(
             OpenClawTalkEventMapper.actions(from: frame, sessionID: nil),
             [
-                .connected,
+                .connected(deviceToken: nil),
                 .providerEvent(.diagnostic("Connected to OpenClaw gateway."))
             ]
         )
@@ -569,6 +569,64 @@ final class OpenClawTalkProviderTests: XCTestCase {
             ),
             "token-z"
         )
+    }
+
+    func testTokenResolutionFallsBackToSecretsJSON() throws {
+        let secrets = try makeSecretsDirectory()
+        let secretsJSON = secrets.appendingPathComponent("secrets.json")
+        try #"{"gateway":{"auth":{"token":"  json-token\n"}}}"#.write(
+            to: secretsJSON,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertEqual(
+            OpenClawTokenResolver.resolveGatewayToken(
+                apiKeyProvider: { nil },
+                secretsDirectory: secrets,
+                secretsJSONURL: secretsJSON
+            ),
+            "json-token"
+        )
+    }
+
+    func testTokenResolutionPrefersGatewayTokenFileOverSecretsJSON() throws {
+        let secrets = try makeSecretsDirectory()
+        try writeSecretsFile("a-gateway-token", contents: "file-token", in: secrets)
+        let secretsJSON = secrets.appendingPathComponent("secrets.json")
+        try #"{"gateway":{"auth":{"token":"json-token"}}}"#.write(
+            to: secretsJSON,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertEqual(
+            OpenClawTokenResolver.resolveGatewayToken(
+                apiKeyProvider: { nil },
+                secretsDirectory: secrets,
+                secretsJSONURL: secretsJSON
+            ),
+            "file-token"
+        )
+    }
+
+    func testTokenResolutionSilentlyIgnoresMalformedOrReferencedSecretsJSONToken() throws {
+        let secrets = try makeSecretsDirectory()
+        let secretsJSON = secrets.appendingPathComponent("secrets.json")
+        for contents in [
+            "not-json",
+            #"{"gateway":{"auth":{"token":{"source":"file","id":"gateway"}}}}"#,
+            #"{"gateway":{"auth":{"token":"  "}}}"#
+        ] {
+            try contents.write(to: secretsJSON, atomically: true, encoding: .utf8)
+            XCTAssertNil(
+                OpenClawTokenResolver.resolveGatewayToken(
+                    apiKeyProvider: { nil },
+                    secretsDirectory: secrets,
+                    secretsJSONURL: secretsJSON
+                )
+            )
+        }
     }
 
     func testTokenResolutionReturnsNilWhenNothingIsAvailable() throws {

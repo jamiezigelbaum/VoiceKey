@@ -19,6 +19,11 @@ protocol OnboardingWizardControllerDelegate: AnyObject {
     func onboardingControllerGroundTruthDidChange(
         _ controller: OnboardingWizardController
     )
+    func onboardingController(
+        _ controller: OnboardingWizardController,
+        ensureChannelsFor services: Set<OnboardingService>,
+        openClawEndpoint: String
+    )
 }
 
 extension OnboardingWizardControllerDelegate {
@@ -29,6 +34,12 @@ extension OnboardingWizardControllerDelegate {
 
     func onboardingControllerGroundTruthDidChange(
         _ controller: OnboardingWizardController
+    ) {}
+
+    func onboardingController(
+        _ controller: OnboardingWizardController,
+        ensureChannelsFor services: Set<OnboardingService>,
+        openClawEndpoint: String
     ) {}
 }
 
@@ -119,10 +130,14 @@ final class OnboardingWizardController: NSWindowController {
     static let keyCaption =
         "API keys are stored in Apple keychain and shared across channels of this provider."
     static let maskedKey = "••••••••••••"
+    static let openClawTokenPlaceholder = "Paste token here"
 
     private let profileProvider: () -> [VoiceProfile]
     private let credentialStore: VoiceCredentialStoring
     private let apiKeyVerifier: APIKeyVerifying
+    private let userDefaults: UserDefaults
+    private let openClawTester: OpenClawConnectionTesting
+    private let retryScheduler: OnboardingRetryScheduler
     private let applicationLocationProvider:
         () -> ApplicationLocationState
     private let microphoneAuthorizationProvider:
@@ -137,8 +152,17 @@ final class OnboardingWizardController: NSWindowController {
     private let contentStack = NSStackView()
     private var currentStep: OnboardingStep = .welcome
     private var handledSteps: Set<OnboardingStep> = []
+    private var handledHotKeyProfileIDs: Set<UUID> = []
+    private var selectedServices: Set<OnboardingService>
+    private var confirmedServicesThisSession:
+        Set<OnboardingService> = []
     private var verificationState: APIKeyVerificationState = .idle
     private var enteredAPIKey = ""
+    private var enteredOpenClawToken = ""
+    private var openClawEndpoint = ""
+    private var openClawApprovalCommand: String?
+    private var openClawState: OpenClawConnectionWizardState = .searching
+    private var openClawStepStarted = false
     private var isChangingStoredKey = false
     private var isMovingApplication = false
     private var microphoneTimer: Timer?
@@ -147,15 +171,34 @@ final class OnboardingWizardController: NSWindowController {
     private var inputLevelMeter: InputLevelMeterView?
     private var previewStatusLabel: NSTextField?
     private var apiKeyField: NSSecureTextField?
+    private var openClawTokenField: NSSecureTextField?
+    private var openClawEndpointField: NSTextField?
     private var hotKeyRecorder: HotKeyRecorderView?
     private var hotKeyStatusLabel: NSTextField?
     private var microphoneHelpIsExpanded = false
     private var relocationStatusMessage: String?
+    private lazy var openClawWizard = OpenClawConnectionWizard(
+        tester: openClawTester,
+        tokenProvider: { [weak self] in
+            self?.resolvedOpenClawToken()
+        },
+        retryScheduler: retryScheduler
+    )
 
     init(
         profileProvider: @escaping () -> [VoiceProfile],
         credentialStore: VoiceCredentialStoring = APIKeyStore.shared,
         apiKeyVerifier: APIKeyVerifying = OpenAIAPIKeyVerifier(),
+        userDefaults: UserDefaults = .standard,
+        openClawTester: OpenClawConnectionTesting = OpenClawConnectionTester(),
+        retryScheduler: @escaping OnboardingRetryScheduler = { delay, action in
+            let workItem = DispatchWorkItem(block: action)
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + delay,
+                execute: workItem
+            )
+            return workItem
+        },
         applicationLocationProvider: @escaping (
         ) -> ApplicationLocationState = {
             ApplicationLocationState.detect(
@@ -186,6 +229,19 @@ final class OnboardingWizardController: NSWindowController {
         self.profileProvider = profileProvider
         self.credentialStore = credentialStore
         self.apiKeyVerifier = apiKeyVerifier
+        self.userDefaults = userDefaults
+        self.openClawTester = openClawTester
+        self.retryScheduler = retryScheduler
+        selectedServices =
+            OnboardingServicePreferences.selectedServices(
+                defaults: userDefaults
+            )
+            ?? OnboardingServicePreferences.inferredServices(
+                from: profileProvider()
+            )
+        openClawEndpoint = profileProvider().first(where: {
+            $0.providerID == .openClaw
+        })?.endpointURL ?? ""
         self.applicationLocationProvider =
             applicationLocationProvider
         self.microphoneAuthorizationProvider =
@@ -200,7 +256,7 @@ final class OnboardingWizardController: NSWindowController {
                 x: 0,
                 y: 0,
                 width: 620,
-                height: 520
+                height: 900
             ),
             styleMask: [
                 .titled,
@@ -242,18 +298,30 @@ final class OnboardingWizardController: NSWindowController {
     }
 
     var groundTruthSnapshot: OnboardingGroundTruth {
-        let profile = profileProvider().first
+        let profiles = profileProvider()
+        let openAIProfile = profiles.first {
+            $0.providerID == .openAIRealtime
+        }
         return OnboardingGroundTruth(
             applicationLocation:
                 applicationLocationProvider(),
-            requiresAPIKey:
-                profile?.providerID.requiresAPIKey == true,
-            hasAPIKey: profile.map {
+            selectedServices: selectedServices,
+            hasOpenAIAPIKey: openAIProfile.map {
                 credentialStore.hasAPIKey(for: $0)
             } ?? false,
+            hasOpenClawConnection:
+                OnboardingServicePreferences
+                    .hasOpenClawConnection(
+                        defaults: userDefaults
+                    ),
             microphoneAuthorization:
                 microphoneAuthorizationProvider(),
-            hasHotKey: profile?.hotKey != nil
+            hasHotKeysForSelectedServices:
+                OnboardingHotKeyPolicy
+                    .hasHotKeysForEverySelectedChannel(
+                        profiles: profiles,
+                        selectedServices: selectedServices
+                    )
         )
     }
 
@@ -262,7 +330,9 @@ final class OnboardingWizardController: NSWindowController {
     }
 
     func showInitial() {
+        beginWizardSession()
         handledSteps.removeAll()
+        handledHotKeyProfileIDs.removeAll()
         currentStep = OnboardingFlowPolicy.initialStep(
             groundTruth: groundTruthSnapshot
         )
@@ -270,7 +340,9 @@ final class OnboardingWizardController: NSWindowController {
     }
 
     func showReentrant() {
+        beginWizardSession()
         handledSteps.removeAll()
+        handledHotKeyProfileIDs.removeAll()
         currentStep = OnboardingFlowPolicy.reentryStep(
             groundTruth: groundTruthSnapshot
         )
@@ -278,10 +350,42 @@ final class OnboardingWizardController: NSWindowController {
     }
 
     private func showAndRender() {
+        if [.microphone, .hotKey, .done].contains(currentStep) {
+            ensureSelectedChannels()
+        }
         render()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    private func beginWizardSession() {
+        confirmedServicesThisSession.removeAll()
+        let profiles = profileProvider()
+        guard let persisted =
+            OnboardingServicePreferences.selectedServices(
+                defaults: userDefaults
+            ) else {
+            selectedServices =
+                OnboardingServicePreferences.inferredServices(
+                    from: profiles
+                )
+            return
+        }
+
+        let providersWithChannels = Set(
+            profiles.map(\.providerID)
+        )
+        let reconciled = Set(persisted.filter {
+            providersWithChannels.contains($0.providerID)
+        })
+        selectedServices = reconciled
+        if reconciled != persisted {
+            OnboardingServicePreferences.saveSelectedServices(
+                reconciled,
+                defaults: userDefaults
+            )
+        }
     }
 
     private func buildWindow() {
@@ -322,11 +426,18 @@ final class OnboardingWizardController: NSWindowController {
         if currentStep != .hotKey {
             stopMicrophonePreview()
         }
+        if currentStep != .openClawConnect {
+            openClawWizard.leave()
+            openClawStepStarted = false
+        }
         contentStack.arrangedSubviews.forEach {
             contentStack.removeArrangedSubview($0)
             $0.removeFromSuperview()
         }
         apiKeyField = nil
+        openClawTokenField = nil
+        openClawEndpointField = nil
+        openClawApprovalCommand = nil
         hotKeyRecorder = nil
         hotKeyStatusLabel = nil
         inputLevelMeter = nil
@@ -337,8 +448,12 @@ final class OnboardingWizardController: NSWindowController {
             renderLocation()
         case .welcome:
             renderWelcome()
+        case .services:
+            renderServices()
         case .apiKey:
             renderAPIKey()
+        case .openClawConnect:
+            renderOpenClawConnect()
         case .microphone:
             renderMicrophone()
         case .hotKey:
@@ -408,6 +523,95 @@ final class OnboardingWizardController: NSWindowController {
         )
     }
 
+    private func renderServices() {
+        addIcon(named: "point.3.connected.trianglepath.dotted")
+        addTitle("What would you like to connect?")
+        addBody("Choose one or both. You can add more voice channels later.")
+
+        contentStack.addArrangedSubview(serviceCard(
+            service: .openAI,
+            title: "OpenAI",
+            description: "Fast, natural voice conversations with OpenAI."
+        ))
+        contentStack.addArrangedSubview(serviceCard(
+            service: .openClaw,
+            title: "OpenClaw",
+            description: "Talk with your own OpenClaw assistant and tools."
+        ))
+
+        if selectedServices.isEmpty {
+            addStatus(
+                "Choose at least one service to continue.",
+                color: .systemRed
+            )
+        }
+
+        addFlexibleSpace()
+        let continueButton = addFooter(
+            primaryTitle: "Continue",
+            primaryAction: #selector(continueFromServices),
+            secondaryTitle: "Set up later",
+            secondaryAction: #selector(closeWizard)
+        )
+        continueButton.isEnabled =
+            selectedServices.isEmpty == false
+    }
+
+    private func serviceCard(
+        service: OnboardingService,
+        title: String,
+        description: String
+    ) -> NSView {
+        let checkbox = NSButton(
+            checkboxWithTitle: title,
+            target: self,
+            action: #selector(toggleService(_:))
+        )
+        checkbox.state = selectedServices.contains(service)
+            ? .on
+            : .off
+        checkbox.tag = OnboardingService.allCases.firstIndex(
+            of: service
+        ) ?? 0
+        checkbox.font = NSFont.systemFont(
+            ofSize: 16,
+            weight: .semibold
+        )
+
+        let detail = NSTextField(
+            wrappingLabelWithString: description
+        )
+        detail.textColor = .secondaryLabelColor
+        detail.font = NSFont.systemFont(ofSize: 13)
+        detail.maximumNumberOfLines = 2
+
+        let stack = NSStackView(views: [checkbox, detail])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(
+            top: 14,
+            left: 14,
+            bottom: 14,
+            right: 14
+        )
+        let box = NSBox()
+        box.boxType = .custom
+        box.borderWidth = 1
+        box.cornerRadius = 10
+        box.borderColor = selectedServices.contains(service)
+            ? .controlAccentColor
+            : .separatorColor
+        box.contentView = stack
+        box.translatesAutoresizingMaskIntoConstraints = false
+        box.heightAnchor.constraint(equalToConstant: 88).isActive = true
+        box.widthAnchor.constraint(
+            equalTo: contentStack.widthAnchor,
+            constant: -84
+        ).isActive = true
+        return box
+    }
+
     private func renderAPIKey() {
         addIcon(named: "key.fill")
         addTitle("Connect OpenAI")
@@ -415,7 +619,9 @@ final class OnboardingWizardController: NSWindowController {
             "Verify your API key before VoiceKey saves it."
         )
 
-        guard let profile = profileProvider().first else {
+        guard let profile = profileProvider().first(where: {
+            $0.providerID == .openAIRealtime
+        }) else {
             addStatus(
                 "Add a voice channel in Settings first.",
                 color: .systemRed
@@ -522,6 +728,220 @@ final class OnboardingWizardController: NSWindowController {
         }
     }
 
+    private func renderOpenClawConnect() {
+        addIcon(named: "link.circle.fill")
+        addTitle("Connect OpenClaw")
+
+        switch openClawState {
+        case .searching:
+            addBody("Looking for OpenClaw on this Mac…")
+            addSpinner(label: "Searching…")
+            addSkipFooter()
+        case .testing:
+            addBody("Checking your OpenClaw connection…")
+            addSpinner(label: "Connecting…")
+            addSkipFooter()
+        case let .needsToken(message):
+            addBody(message)
+            let field = NSSecureTextField()
+            field.placeholderString = Self.openClawTokenPlaceholder
+            field.stringValue = enteredOpenClawToken
+            field.delegate = self
+            field.font = NSFont.monospacedSystemFont(
+                ofSize: 13,
+                weight: .regular
+            )
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.heightAnchor.constraint(
+                equalToConstant: 30
+            ).isActive = true
+            openClawTokenField = field
+            contentStack.addArrangedSubview(field)
+            field.widthAnchor.constraint(
+                equalTo: contentStack.widthAnchor,
+                constant: -84
+            ).isActive = true
+            let hint = addStatus(
+                "You can find the gateway token on the Mac where OpenClaw runs.",
+                color: .secondaryLabelColor
+            )
+            hint.maximumNumberOfLines = 2
+            addFlexibleSpace()
+            addFooter(
+                primaryTitle: "Save & Retry",
+                primaryAction: #selector(saveOpenClawTokenAndRetry),
+                secondaryTitle: "Skip for now",
+                secondaryAction: #selector(skipCurrentStep)
+            )
+        case .needsEndpoint:
+            addBody(
+                "OpenClaw wasn’t reachable nearby. Enter the address of your gateway."
+            )
+            let field = NSTextField()
+            field.placeholderString = "https://gateway.example.com"
+            field.stringValue = openClawEndpoint
+            field.delegate = self
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.heightAnchor.constraint(
+                equalToConstant: 30
+            ).isActive = true
+            openClawEndpointField = field
+            contentStack.addArrangedSubview(field)
+            field.widthAnchor.constraint(
+                equalTo: contentStack.widthAnchor,
+                constant: -84
+            ).isActive = true
+            addStatus(
+                "VoiceKey accepts http, https, ws, or wss addresses.",
+                color: .secondaryLabelColor
+            )
+            addFlexibleSpace()
+            addFooter(
+                primaryTitle: "Test Gateway",
+                primaryAction: #selector(testOpenClawEndpoint),
+                secondaryTitle: "Skip for now",
+                secondaryAction: #selector(skipCurrentStep)
+            )
+        case let .pairingWait(reason, requestID, remediationHint):
+            addBody("OpenClaw needs your approval")
+            if let requestID, requestID.isEmpty == false {
+                addStatus(
+                    "Current request: \(requestID)",
+                    color: .labelColor
+                )
+                let command = "openclaw devices approve \(requestID)"
+                let commandField = NSTextField(
+                    labelWithString: command
+                )
+                commandField.isSelectable = true
+                commandField.font = NSFont.monospacedSystemFont(
+                    ofSize: 13,
+                    weight: .regular
+                )
+                commandField.lineBreakMode = .byTruncatingMiddle
+                let copyButton = NSButton(
+                    title: "Copy",
+                    target: self,
+                    action: #selector(copyOpenClawApprovalCommand)
+                )
+                openClawApprovalCommand = command
+                copyButton.bezelStyle = .rounded
+                let row = NSStackView(
+                    views: [commandField, copyButton]
+                )
+                row.orientation = .horizontal
+                row.spacing = 10
+                contentStack.addArrangedSubview(row)
+                row.widthAnchor.constraint(
+                    equalTo: contentStack.widthAnchor,
+                    constant: -84
+                ).isActive = true
+            } else {
+                addStatus(
+                    "Waiting for a current approval request…",
+                    color: .secondaryLabelColor
+                )
+            }
+            if let remediationHint, remediationHint.isEmpty == false {
+                let hint = addStatus(
+                    remediationHint,
+                    color: .secondaryLabelColor
+                )
+                hint.maximumNumberOfLines = 3
+            } else if let reason, reason.isEmpty == false {
+                addStatus(
+                    "Approval reason: \(reason)",
+                    color: .secondaryLabelColor
+                )
+            }
+            addStatus(
+                "VoiceKey checks again automatically.",
+                color: .secondaryLabelColor
+            )
+            addFlexibleSpace()
+            addFooter(
+                primaryTitle: "Retry Now",
+                primaryAction: #selector(retryOpenClawConnection),
+                secondaryTitle: "Skip for now",
+                secondaryAction: #selector(skipCurrentStep)
+            )
+        case let .success(serverVersion):
+            addBody("OpenClaw is connected.")
+            addStatus(
+                "Gateway version \(serverVersion)",
+                color: .systemGreen
+            )
+            addFlexibleSpace()
+            addFooter(
+                primaryTitle: "Continue",
+                primaryAction: #selector(advance),
+                secondaryTitle: nil,
+                secondaryAction: nil
+            )
+        case let .failed(message):
+            addBody("VoiceKey couldn’t connect to OpenClaw.")
+            let status = addStatus(
+                message,
+                color: .systemRed
+            )
+            status.maximumNumberOfLines = 4
+            addFlexibleSpace()
+            addFooter(
+                primaryTitle: "Retry",
+                primaryAction: #selector(retryOpenClawConnection),
+                secondaryTitle: "Skip for now",
+                secondaryAction: #selector(skipCurrentStep)
+            )
+        }
+
+        guard openClawStepStarted == false else { return }
+        openClawStepStarted = true
+        openClawWizard.onStateChange = { [weak self] state in
+            guard let self else { return }
+            self.openClawState = state
+            if case .success = state {
+                OnboardingServicePreferences
+                    .setHasOpenClawConnection(
+                        true,
+                        defaults: self.userDefaults
+                    )
+                self.delegate?
+                    .onboardingControllerGroundTruthDidChange(
+                        self
+                    )
+            }
+            guard self.currentStep == .openClawConnect else {
+                return
+            }
+            self.render()
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.currentStep == .openClawConnect else {
+                return
+            }
+            self.openClawWizard.begin(
+                endpointURL: self.openClawEndpoint
+            )
+        }
+    }
+
+    private func addSpinner(label: String) {
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.startAnimation(nil)
+        let row = NSStackView(
+            views: [
+                spinner,
+                NSTextField(labelWithString: label)
+            ]
+        )
+        row.orientation = .horizontal
+        row.spacing = 8
+        contentStack.addArrangedSubview(row)
+    }
+
     private func renderMicrophone() {
         let status = microphoneAuthorizationProvider()
         switch status {
@@ -602,15 +1022,21 @@ final class OnboardingWizardController: NSWindowController {
     }
 
     private func renderHotKey() {
+        guard let profile = nextHotKeyProfile() else {
+            handledSteps.insert(.hotKey)
+            currentStep = .done
+            render()
+            return
+        }
         addIcon(named: "keyboard.fill")
-        addTitle("Choose your voice key")
+        addTitle("Choose a key for \(profile.name)")
         addBody(
             "Click the field, then press the shortcut you want to use."
         )
 
         let recorder = HotKeyRecorderView()
-        recorder.profileID = profileProvider().first?.id
-        recorder.hotKey = profileProvider().first?.hotKey
+        recorder.profileID = profile.id
+        recorder.hotKey = profile.hotKey
         recorder.translatesAutoresizingMaskIntoConstraints = false
         recorder.heightAnchor.constraint(
             equalToConstant: 58
@@ -682,24 +1108,20 @@ final class OnboardingWizardController: NSWindowController {
     private func renderDone() {
         addIcon(named: "checkmark.circle.fill")
         addTitle("VoiceKey is ready")
-        let hotKey = profileProvider().first?.hotKey
-        let hotKeyLabel = NSTextField(
-            labelWithString:
-                hotKey?.displayName
-                ?? "No shortcut set yet"
+        let selectedProviderIDs = Set(
+            selectedServices.map(\.providerID)
         )
-        hotKeyLabel.font = NSFont.monospacedSystemFont(
-            ofSize: 34,
-            weight: .semibold
-        )
-        hotKeyLabel.alignment = .center
-        hotKeyLabel.translatesAutoresizingMaskIntoConstraints =
-            false
-        contentStack.addArrangedSubview(hotKeyLabel)
-        hotKeyLabel.widthAnchor.constraint(
-            equalTo: contentStack.widthAnchor,
-            constant: -84
-        ).isActive = true
+        for profile in profileProvider() where
+            selectedProviderIDs.contains(profile.providerID) {
+            let row = NSTextField(
+                labelWithString: "\(profile.name): \(profile.hotKey?.displayName ?? "Set up later")"
+            )
+            row.font = NSFont.monospacedSystemFont(
+                ofSize: 18,
+                weight: .semibold
+            )
+            contentStack.addArrangedSubview(row)
+        }
         addBody("VoiceKey lives in your menu bar.")
         addFlexibleSpace()
         addFooter(
@@ -791,12 +1213,13 @@ final class OnboardingWizardController: NSWindowController {
         contentStack.addArrangedSubview(spacer)
     }
 
+    @discardableResult
     private func addFooter(
         primaryTitle: String,
         primaryAction: Selector,
         secondaryTitle: String?,
         secondaryAction: Selector?
-    ) {
+    ) -> NSButton {
         let spacer = NSView()
         spacer.setContentHuggingPriority(
             NSLayoutConstraint.Priority(1),
@@ -812,12 +1235,11 @@ final class OnboardingWizardController: NSWindowController {
             )
         }
         views.append(spacer)
-        views.append(
-            actionButton(
-                title: primaryTitle,
-                action: primaryAction
-            )
+        let primaryButton = actionButton(
+            title: primaryTitle,
+            action: primaryAction
         )
+        views.append(primaryButton)
         let row = NSStackView(views: views)
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -828,6 +1250,7 @@ final class OnboardingWizardController: NSWindowController {
             equalTo: contentStack.widthAnchor,
             constant: -84
         ).isActive = true
+        return primaryButton
     }
 
     private func addSkipFooter() {
@@ -868,13 +1291,64 @@ final class OnboardingWizardController: NSWindowController {
         return button
     }
 
+    @objc private func toggleService(_ sender: NSButton) {
+        guard OnboardingService.allCases.indices.contains(
+            sender.tag
+        ) else {
+            return
+        }
+        let service = OnboardingService.allCases[sender.tag]
+        if sender.state == .on {
+            selectedServices.insert(service)
+        } else {
+            selectedServices.remove(service)
+        }
+        OnboardingServicePreferences.saveSelectedServices(
+            selectedServices,
+            defaults: userDefaults
+        )
+        render()
+    }
+
+    @objc private func continueFromServices() {
+        guard selectedServices.isEmpty == false else { return }
+        confirmServices(selectedServices)
+        advance()
+    }
+
+    func confirmServices(
+        _ services: Set<OnboardingService>
+    ) {
+        selectedServices = services
+        OnboardingServicePreferences.saveSelectedServices(
+            services,
+            defaults: userDefaults
+        )
+        confirmedServicesThisSession = services
+        ensureSelectedChannels()
+    }
+
     @objc private func advance() {
         handledSteps.insert(currentStep)
-        currentStep = OnboardingFlowPolicy.nextStep(
+        var nextStep = OnboardingFlowPolicy.nextStep(
             after: currentStep,
             groundTruth: groundTruthSnapshot,
             handledSteps: handledSteps
         )
+        if [.services, .apiKey, .openClawConnect].contains(
+            currentStep
+        ),
+           [.services, .apiKey, .openClawConnect].contains(
+               nextStep
+           ) == false {
+            ensureSelectedChannels()
+            nextStep = OnboardingFlowPolicy.nextStep(
+                after: currentStep,
+                groundTruth: groundTruthSnapshot,
+                handledSteps: handledSteps
+            )
+        }
+        currentStep = nextStep
         delegate?.onboardingControllerGroundTruthDidChange(
             self
         )
@@ -882,6 +1356,20 @@ final class OnboardingWizardController: NSWindowController {
     }
 
     @objc private func skipCurrentStep() {
+        if currentStep == .hotKey {
+            guard let profile = nextHotKeyProfile() else {
+                currentStep = .done
+                render()
+                return
+            }
+            handledHotKeyProfileIDs.insert(profile.id)
+            if nextHotKeyProfile() == nil {
+                handledSteps.insert(.hotKey)
+                currentStep = .done
+            }
+            render()
+            return
+        }
         guard OnboardingFlowPolicy.canSkip(
             currentStep,
             groundTruth: groundTruthSnapshot
@@ -925,6 +1413,66 @@ final class OnboardingWizardController: NSWindowController {
 
     @objc private func closeWizard() {
         close()
+    }
+
+    @objc private func saveOpenClawTokenAndRetry() {
+        guard let field = openClawTokenField else { return }
+        let token = field.stringValue.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        enteredOpenClawToken = token
+        guard token.isEmpty == false else {
+            openClawState = .needsToken(
+                message: "Paste a gateway token to continue."
+            )
+            render()
+            return
+        }
+        let profile = profileProvider().first {
+            $0.providerID == .openClaw
+        } ?? defaultProfile(for: .openClaw)
+        do {
+            try credentialStore.setAPIKey(token, for: profile)
+            enteredOpenClawToken = ""
+            delegate?.onboardingController(
+                self,
+                didUpdateCredentialsFor: profile
+            )
+            delegate?.onboardingControllerGroundTruthDidChange(
+                self
+            )
+            openClawWizard.retry(endpointURL: openClawEndpoint)
+        } catch {
+            openClawState = .failed(
+                message: "Couldn’t save the gateway token: \(error.localizedDescription)"
+            )
+            render()
+        }
+    }
+
+    @objc private func testOpenClawEndpoint() {
+        guard let field = openClawEndpointField else { return }
+        openClawEndpoint = field.stringValue.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard openClawEndpoint.isEmpty == false else {
+            openClawState = .needsEndpoint
+            render()
+            return
+        }
+        openClawWizard.retry(endpointURL: openClawEndpoint)
+    }
+
+    @objc private func retryOpenClawConnection() {
+        openClawWizard.retry(endpointURL: openClawEndpoint)
+    }
+
+    @objc private func copyOpenClawApprovalCommand() {
+        guard let command = openClawApprovalCommand else {
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
     }
 
     @objc private func changeStoredKey() {
@@ -1110,11 +1658,61 @@ final class OnboardingWizardController: NSWindowController {
         }
 
         handledSteps.insert(.hotKey)
+        handledHotKeyProfileIDs.insert(profile.id)
         delegate?.onboardingControllerGroundTruthDidChange(
             self
         )
-        currentStep = .done
+        if nextHotKeyProfile() == nil {
+            currentStep = .done
+        }
         render()
+    }
+
+    private func nextHotKeyProfile() -> VoiceProfile? {
+        OnboardingHotKeyPolicy.nextProfile(
+            in: profileProvider(),
+            selectedServices: selectedServices,
+            handledProfileIDs: handledHotKeyProfileIDs
+        )
+    }
+
+    private func ensureSelectedChannels() {
+        guard confirmedServicesThisSession.isEmpty == false else {
+            return
+        }
+        delegate?.onboardingController(
+            self,
+            ensureChannelsFor: confirmedServicesThisSession,
+            openClawEndpoint: openClawEndpoint
+        )
+    }
+
+    private func defaultProfile(
+        for service: OnboardingService
+    ) -> VoiceProfile {
+        let provider = service.providerID
+        return VoiceProfile(
+            name: service == .openAI ? "OpenAI" : "OpenClaw",
+            providerID: provider,
+            hotKey: nil,
+            model: provider.defaultModel,
+            voice: provider.defaultVoice,
+            instructions: "",
+            endpointURL: service == .openClaw
+                ? openClawEndpoint
+                : ""
+        )
+    }
+
+    private func resolvedOpenClawToken() -> String? {
+        let profile = profileProvider().first {
+            $0.providerID == .openClaw
+        } ?? defaultProfile(for: .openClaw)
+        return OpenClawTokenResolver.resolveGatewayToken(
+            apiKeyProvider: {
+                self.credentialStore.apiKey(for: profile)
+            }
+        )
     }
 
     private func startMicrophonePreview() {
@@ -1170,8 +1768,7 @@ final class OnboardingWizardController: NSWindowController {
 
 extension OnboardingWizardController: NSTextFieldDelegate {
     func controlTextDidChange(_ obj: Notification) {
-        guard let field = obj.object as? NSSecureTextField,
-              field === apiKeyField else {
+        guard let field = obj.object as? NSTextField else {
             return
         }
         let trimmed = field.stringValue.trimmingCharacters(
@@ -1180,9 +1777,15 @@ extension OnboardingWizardController: NSTextFieldDelegate {
         if trimmed != field.stringValue {
             field.stringValue = trimmed
         }
-        enteredAPIKey = trimmed
-        if verificationState != .idle {
-            verificationState = .idle
+        if field === apiKeyField {
+            enteredAPIKey = trimmed
+            if verificationState != .idle {
+                verificationState = .idle
+            }
+        } else if field === openClawTokenField {
+            enteredOpenClawToken = trimmed
+        } else if field === openClawEndpointField {
+            openClawEndpoint = trimmed
         }
     }
 }
@@ -1191,6 +1794,8 @@ extension OnboardingWizardController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         microphoneTimer?.invalidate()
         microphoneTimer = nil
+        openClawWizard.leave()
+        openClawStepStarted = false
         hotKeyRecorder?.cancelRecording()
         stopMicrophonePreview()
     }
