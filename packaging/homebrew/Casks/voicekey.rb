@@ -1,6 +1,6 @@
 cask "voicekey" do
-  version "0.2.1"
-  sha256 "367b9207c9d5f7fcb45af26670cf9781f978ad1049b85c895408da1a837e3d17"
+  version "0.2.2"
+  sha256 "f2ae698c59bdc8fdd83d801ad59496f46589bf9925eea30c3f9b4d66189f3fb0"
 
   url "https://github.com/jamiezigelbaum/VoiceKey/releases/download/v#{version}/VoiceKey-#{version}-macOS.dmg"
   name "VoiceKey"
