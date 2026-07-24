@@ -113,11 +113,6 @@ final class SettingsAutoApplyTests: XCTestCase {
         let instructions = try XCTUnwrap(views.compactMap {
             $0 as? NSTextView
         }.first(where: { $0.isRichText == false }))
-        let webSearch = try XCTUnwrap(views.compactMap {
-            $0 as? NSButton
-        }.first(where: {
-            $0.title == "Enable OpenAI web search (hosted tool)"
-        }))
         let speaker = try XCTUnwrap(views.compactMap {
             $0 as? NSPopUpButton
         }.first(where: { popup in
@@ -152,8 +147,6 @@ final class SettingsAutoApplyTests: XCTestCase {
             Notification(name: NSText.didEndEditingNotification,
                          object: instructions)
         )
-        webSearch.state = .on
-        sendAction(for: webSearch)
         speaker.selectItem(withTitle: "Always on")
         sendAction(for: speaker)
         key.stringValue = "openai-secret"
@@ -222,6 +215,252 @@ final class SettingsAutoApplyTests: XCTestCase {
             })?.providerID,
             .custom
         )
+    }
+
+    func testCredentialFieldUsesOwnerCopyAndMasksStoredKeyUntilChange()
+        throws {
+        let profile = VoiceProfile.defaultOpenAI()
+        let credentials = InMemoryCredentialStore()
+        credentials.apiKeys[profile.id] = "raw-secret"
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: credentials,
+            saveProfiles: { _ in }
+        )
+
+        XCTAssertEqual(
+            controller.credentialFieldSnapshot,
+            CredentialFieldSnapshot(
+                placeholder: "Paste key here",
+                caption:
+                    "API keys are stored in Apple keychain and shared across channels of this provider.",
+                renderedValue: "••••••••••••",
+                isEnabled: false,
+                isChangeVisible: true
+            )
+        )
+        XCTAssertFalse(
+            controller.credentialFieldSnapshot.renderedValue
+                .contains("raw-secret")
+        )
+
+        let change = try XCTUnwrap(
+            descendantButtons(
+                in: controller.window?.contentView
+            ).first(where: {
+                $0.title == "Change"
+                    && $0.isHidden == false
+            })
+        )
+        sendAction(for: change)
+
+        XCTAssertEqual(
+            controller.credentialFieldSnapshot.renderedValue,
+            ""
+        )
+        XCTAssertTrue(
+            controller.credentialFieldSnapshot.isEnabled
+        )
+        XCTAssertFalse(
+            controller.credentialFieldSnapshot
+                .isChangeVisible
+        )
+    }
+
+    func testToolsAreRemovedAndAdvancedMCPIsCollapsedByDefault()
+        throws {
+        let controller = SettingsWindowController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+        let views = descendantViews(
+            in: controller.window?.contentView
+        )
+        let visibleText = views.compactMap {
+            ($0 as? NSTextField)?.stringValue
+        }
+        let buttonTitles = views.compactMap {
+            ($0 as? NSButton)?.title
+        }
+
+        XCTAssertEqual(
+            controller.advancedDisclosureSnapshot,
+            AdvancedDisclosureSnapshot(
+                isVisible: true,
+                isExpanded: false
+            )
+        )
+        XCTAssertFalse(visibleText.contains("Tools"))
+        XCTAssertFalse(
+            buttonTitles.contains(
+                "Enable OpenAI web search (hosted tool)"
+            )
+        )
+
+        let advanced = try XCTUnwrap(
+            views.compactMap { $0 as? NSButton }
+                .first(where: { $0.title == "Advanced" })
+        )
+        advanced.state = .on
+        sendAction(for: advanced)
+        XCTAssertTrue(
+            controller.advancedDisclosureSnapshot
+                .isExpanded
+        )
+    }
+
+    func testPermissionsSnapshotIsDerivedLive() {
+        var microphone =
+            MicrophoneAuthorizationState.notDetermined
+        var accessibility = false
+        let controller = SettingsWindowController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: {
+                microphone
+            },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: {
+                accessibility
+            },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+
+        XCTAssertEqual(
+            controller.permissionsSnapshot,
+            SettingsPermissionsSnapshot(
+                microphone: PermissionRowSnapshot(
+                    isReady: false,
+                    status: "Needs access",
+                    actionTitle: "Enable"
+                ),
+                accessibility: PermissionRowSnapshot(
+                    isReady: false,
+                    status: "Needs access",
+                    actionTitle: "Open Settings"
+                )
+            )
+        )
+
+        microphone = .authorized
+        accessibility = true
+        XCTAssertEqual(
+            controller.permissionsSnapshot,
+            SettingsPermissionsSnapshot(
+                microphone: PermissionRowSnapshot(
+                    isReady: true,
+                    status: "Ready",
+                    actionTitle: nil
+                ),
+                accessibility: PermissionRowSnapshot(
+                    isReady: true,
+                    status: "Ready",
+                    actionTitle: nil
+                )
+            )
+        )
+    }
+
+    func testPermissionPolicyDistinguishesDeniedAndRestricted() {
+        XCTAssertEqual(
+            SettingsPermissionPolicy.microphone(.denied),
+            PermissionRowSnapshot(
+                isReady: false,
+                status: "Turned off",
+                actionTitle: "Open Settings"
+            )
+        )
+        XCTAssertEqual(
+            SettingsPermissionPolicy.microphone(.restricted),
+            PermissionRowSnapshot(
+                isReady: false,
+                status: "Blocked by account or MDM",
+                actionTitle: "Open Settings"
+            )
+        )
+    }
+
+    func testPermissionRowsRequestOrOpenTheirExactPane()
+        throws {
+        var microphone =
+            MicrophoneAuthorizationState.notDetermined
+        var microphoneRequestCount = 0
+        var accessibilityRequestCount = 0
+        var openedURLs: [URL] = []
+        var accessibility = true
+        let controller = SettingsWindowController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: {
+                microphone
+            },
+            requestMicrophoneAccess: { _ in
+                microphoneRequestCount += 1
+            },
+            isAccessibilityTrusted: {
+                accessibility
+            },
+            requestAccessibilityAccess: {
+                accessibilityRequestCount += 1
+            },
+            openSystemSettingsURL: {
+                openedURLs.append($0)
+            }
+        )
+
+        var visibleButtons = descendantButtons(
+            in: controller.window?.contentView
+        ).filter {
+            $0.isHidden == false
+                && ["Enable", "Open Settings"].contains(
+                    $0.title
+                )
+        }
+        sendAction(for: try XCTUnwrap(
+            visibleButtons.first(where: {
+                $0.title == "Enable"
+            })
+        ))
+        XCTAssertEqual(microphoneRequestCount, 1)
+
+        microphone = .denied
+        controller.showAndFocus()
+        visibleButtons = descendantButtons(
+            in: controller.window?.contentView
+        ).filter {
+            $0.isHidden == false
+                && $0.title == "Open Settings"
+        }
+        sendAction(for: try XCTUnwrap(
+            visibleButtons.first
+        ))
+        XCTAssertEqual(
+            openedURLs.last?.absoluteString,
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        )
+
+        microphone = .authorized
+        accessibility = false
+        controller.showAndFocus()
+        visibleButtons = descendantButtons(
+            in: controller.window?.contentView
+        ).filter {
+            $0.isHidden == false
+                && $0.title == "Open Settings"
+        }
+        sendAction(for: try XCTUnwrap(
+            visibleButtons.first
+        ))
+        XCTAssertEqual(accessibilityRequestCount, 1)
+        XCTAssertEqual(
+            openedURLs.last?.absoluteString,
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        )
+        controller.close()
     }
 
     func testFocusedTextFieldCommitsLatestFieldEditorValueOnClose() throws {
@@ -425,7 +664,9 @@ final class SettingsAutoApplyTests: XCTestCase {
         let events = SettingsCommitRecorder()
         let credentials = InMemoryCredentialStore()
         credentials.events = events
-        let profile = VoiceProfile.defaultOpenAI()
+        var profile = VoiceProfile.defaultOpenAI()
+        // WO-N ruling: compatibility storage is always true for OpenAI.
+        profile.webSearchEnabled = true
         var next = profile
         let serverID = UUID()
         next.mcpServers = [
@@ -458,7 +699,9 @@ final class SettingsAutoApplyTests: XCTestCase {
         let events = SettingsCommitRecorder()
         let credentials = InMemoryCredentialStore()
         credentials.events = events
-        let profile = VoiceProfile.defaultOpenAI()
+        var profile = VoiceProfile.defaultOpenAI()
+        // WO-N ruling: rollback storage also keeps web search true.
+        profile.webSearchEnabled = true
         var next = profile
         let firstServerID = UUID()
         let failingServerID = UUID()

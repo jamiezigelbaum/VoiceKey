@@ -125,11 +125,11 @@ enum OpenAIRealtimeRequestBuilder {
         // (verified live: it rejects "web_search" as an invalid value — that
         // is a Responses API hosted tool, not a Realtime one). Web search is
         // therefore delivered as a remote MCP server that the Realtime API
-        // executes server-side; the web-search toggle injects the Exa MCP
+        // executes server-side. OpenAI Realtime always injects the Exa MCP
         // endpoint (validated live: anonymous, exposes web_search_exa /
         // web_fetch_exa), keeping the "tools live in the channel" invariant.
         var tools: [[String: Any]] = []
-        if configuration.webSearchEnabled {
+        if configuration.providerID == .openAIRealtime {
             tools.append(Self.exaWebSearchTool)
         }
         tools += configuration.mcpServers.map { server in

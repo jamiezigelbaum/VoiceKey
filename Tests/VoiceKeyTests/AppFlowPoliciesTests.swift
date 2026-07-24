@@ -319,7 +319,9 @@ final class APIKeyStoreProfileScopeTests: XCTestCase {
         )
     }
 
-    func testSharedCredentialNoteIsOnlyVisibleForSharedProviders() {
+    func testOwnerCredentialCaptionIsVisibleForEveryKeyField() {
+        let caption =
+            "API keys are stored in Apple keychain and shared across channels of this provider."
         let shared = SettingsWindowController(
             profiles: [VoiceProfile.defaultOpenAI()],
             credentialStore: PolicyTestCredentialStore(),
@@ -328,8 +330,7 @@ final class APIKeyStoreProfileScopeTests: XCTestCase {
         XCTAssertTrue(
             descendantLabels(in: shared.window?.contentView)
                 .contains(where: {
-                    $0.stringValue ==
-                        "Shared across channels of this provider."
+                    $0.stringValue == caption
                         && $0.isHidden == false
                 })
         )
@@ -339,11 +340,10 @@ final class APIKeyStoreProfileScopeTests: XCTestCase {
             credentialStore: PolicyTestCredentialStore(),
             saveProfiles: { _ in }
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             descendantLabels(in: custom.window?.contentView)
                 .contains(where: {
-                    $0.stringValue ==
-                        "Shared across channels of this provider."
+                    $0.stringValue == caption
                         && $0.isHidden == false
                 })
         )

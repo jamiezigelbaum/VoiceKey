@@ -120,13 +120,13 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         configureApplicationMenu()
         configureMenuBar()
         registerAllHotKeys()
-        if selectedProfile != nil {
+        if let selectedProfile {
             configureProvider()
-            if OnboardingFlowPolicy.firstIncompleteStep(
-                groundTruth: onboardingGroundTruth
-            ) != .done {
-                // Incomplete setup owns readiness until the user supplies
-                // live ground truth. Do not turn an intentional skip into a
+            if selectedProfile.providerID.requiresAPIKey,
+               APIKeyStore.shared.hasAPIKey(
+                   for: selectedProfile
+               ) == false {
+                // Do not turn an intentional onboarding skip into a
                 // missing-key error on the next launch.
                 updateStatus(.ready)
             } else {
@@ -161,7 +161,8 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             mcpServers: [.openAIRealtime, .custom].contains(profile.providerID)
                 ? profile.mcpServers
                 : [],
-            webSearchEnabled: profile.providerID == .openAIRealtime && profile.webSearchEnabled,
+            webSearchEnabled:
+                profile.providerID == .openAIRealtime,
             speakerModePreference: profile.speakerModePreference
         )
     }

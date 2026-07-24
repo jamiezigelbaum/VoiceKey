@@ -93,7 +93,7 @@ enum VoiceProviderID: String, CaseIterable, Codable, Equatable {
         case .chatGPTWeb:
             return "Use Show Provider to sign in"
         case .openAIRealtime, .geminiLive, .deepgramVoiceAgent, .custom, .openClaw:
-            return "Stored in macOS Keychain"
+            return "Paste key here"
         }
     }
 
