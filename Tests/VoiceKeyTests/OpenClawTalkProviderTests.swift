@@ -122,6 +122,38 @@ final class OpenClawTalkProviderTests: XCTestCase {
         XCTAssertEqual(params["reason"] as? String, "user-interrupted")
     }
 
+    func testAgentControlSteerFrameMatchesClosedGatewaySchema() throws {
+        let frame = OpenClawTalkRequestBuilder.agentControlSteerFrame(
+            id: "9",
+            relaySessionID: "relay-1",
+            text: "How is it going?",
+            mode: "status"
+        )
+
+        XCTAssertEqual(frame["type"] as? String, "req")
+        XCTAssertEqual(frame["id"] as? String, "9")
+        XCTAssertEqual(frame["method"] as? String, "talk.session.steer")
+        let params = try dictionary(frame["params"])
+        XCTAssertEqual(params["sessionId"] as? String, "relay-1")
+        XCTAssertEqual(params["sessionKey"] as? String, "agent:voice:voicekey")
+        XCTAssertEqual(params["text"] as? String, "How is it going?")
+        XCTAssertEqual(params["mode"] as? String, "status")
+        XCTAssertEqual(Set(params.keys), ["sessionId", "sessionKey", "text", "mode"])
+    }
+
+    func testAgentControlSteerFrameOmitsAbsentMode() throws {
+        let frame = OpenClawTalkRequestBuilder.agentControlSteerFrame(
+            id: "9",
+            relaySessionID: "relay-1",
+            text: "Keep going.",
+            mode: nil
+        )
+
+        let params = try dictionary(frame["params"])
+        XCTAssertNil(params["mode"])
+        XCTAssertEqual(Set(params.keys), ["sessionId", "sessionKey", "text"])
+    }
+
     func testClientToolCallFrameMatchesGatewayContract() throws {
         let frame = try XCTUnwrap(OpenClawTalkRequestBuilder.clientToolCallFrame(
             id: "9",
@@ -265,7 +297,7 @@ final class OpenClawTalkProviderTests: XCTestCase {
         let frame = #"{"type":"res","id":"7","ok":true,"payload":{"ok":true}}"#
         XCTAssertEqual(
             OpenClawTalkEventMapper.actions(from: frame, sessionID: "session-1"),
-            [.requestSucceeded(id: "7", runID: nil)]
+            [.requestSucceeded(id: "7", runID: nil, resultJSON: #"{"ok":true}"#)]
         )
     }
 
@@ -415,6 +447,21 @@ final class OpenClawTalkProviderTests: XCTestCase {
                 )),
                 .providerEvent(.diagnostic(
                     "OpenClaw tool call 'openclaw_agent_consult' received."
+                ))
+            ]
+        )
+    }
+
+    func testAgentControlEnvelopeDefersItsSingleModeDiagnosticToProvider() {
+        let frame = talkEventFrame(#"{"relaySessionId":"session-1","type":"toolCall","callId":"control-1","name":"openclaw_agent_control","args":{"mode":"status","text":"Progress?"}}"#)
+
+        XCTAssertEqual(
+            OpenClawTalkEventMapper.actions(from: frame, sessionID: "session-1"),
+            [
+                .toolCall(OpenClawTalkToolCall(
+                    name: "openclaw_agent_control",
+                    callID: "control-1",
+                    argumentsJSON: #"{"mode":"status","text":"Progress?"}"#
                 ))
             ]
         )

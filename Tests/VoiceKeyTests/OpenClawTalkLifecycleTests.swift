@@ -365,6 +365,308 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
         XCTAssertEqual(audioEngine.startCount, 1)
     }
 
+    func testAgentControlDuringActiveConsultForwardsResultWithoutDisturbingConsult() throws {
+        let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
+        let watchdogs = ManualWatchdogScheduler()
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            sockets: [socket],
+            watchdogs: watchdogs
+        )
+
+        let ready = expectation(description: "session ready")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            ready.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [ready], timeout: 1)
+
+        socket.push(text: toolCallEnvelope(callID: "consult-call"))
+        waitForStateQueue()
+        let consultStart = try XCTUnwrap(socket.sentFrames.last {
+            $0["method"] as? String == "talk.client.toolCall"
+        })
+        socket.push(text: successfulResponse(
+            id: try XCTUnwrap(consultStart["id"] as? String),
+            payload: #"{"runId":"run-active"}"#
+        ))
+        waitForStateQueue()
+        let watchdogScheduleCount = watchdogs.scheduledDelays.count
+        XCTAssertEqual(Array(watchdogs.scheduledDelays.suffix(2)), [45, 180])
+
+        let forwarded = expectation(description: "control diagnostic")
+        let steerSent = expectation(description: "control steer sent")
+        provider.onEvent = { event in
+            guard case .diagnostic("OpenClaw agent control 'status' forwarded.") = event else {
+                return
+            }
+            forwarded.fulfill()
+        }
+        socket.onSentMethod = { method, count in
+            if method == "talk.session.steer", count == 1 {
+                steerSent.fulfill()
+            }
+        }
+        socket.push(text: toolCallEnvelope(
+            callID: "control-call",
+            name: "openclaw_agent_control",
+            arguments: #"{"mode":"status","text":"  How is it going?  "}"#
+        ))
+        wait(for: [forwarded, steerSent], timeout: 1)
+
+        let steerFrame = try XCTUnwrap(socket.sentFrames.last {
+            $0["method"] as? String == "talk.session.steer"
+        })
+        let steerParams = try XCTUnwrap(steerFrame["params"] as? [String: Any])
+        XCTAssertEqual(steerParams["sessionId"] as? String, "relay-1")
+        XCTAssertEqual(steerParams["sessionKey"] as? String, "agent:voice:voicekey")
+        XCTAssertEqual(steerParams["text"] as? String, "How is it going?")
+        XCTAssertEqual(steerParams["mode"] as? String, "status")
+        XCTAssertEqual(
+            Set(steerParams.keys),
+            ["sessionId", "sessionKey", "text", "mode"]
+        )
+        XCTAssertEqual(watchdogs.scheduledDelays.count, watchdogScheduleCount)
+
+        socket.push(text: successfulResponse(
+            id: try XCTUnwrap(steerFrame["id"] as? String),
+            payload: #"{"status":"running","message":"Still working.","step":2}"#
+        ))
+        waitForStateQueue()
+
+        let controlSubmit = try XCTUnwrap(socket.sentFrames.last {
+            guard $0["method"] as? String == "talk.session.submitToolResult",
+                  let params = $0["params"] as? [String: Any] else {
+                return false
+            }
+            return params["callId"] as? String == "control-call"
+        })
+        let controlSubmitParams = try XCTUnwrap(controlSubmit["params"] as? [String: Any])
+        XCTAssertEqual(controlSubmitParams["sessionId"] as? String, "session-1")
+        let controlResult = try XCTUnwrap(controlSubmitParams["result"] as? [String: Any])
+        XCTAssertEqual(controlResult["status"] as? String, "running")
+        XCTAssertEqual(controlResult["message"] as? String, "Still working.")
+        XCTAssertEqual(controlResult["step"] as? Int, 2)
+        XCTAssertEqual(Set(controlResult.keys), ["status", "message", "step"])
+
+        let stillRunning = expectation(description: "original watchdog remains active")
+        provider.onEvent = { event in
+            guard case let .diagnostic(message) = event,
+                  message.contains("consult still running") else { return }
+            stillRunning.fulfill()
+        }
+        XCTAssertTrue(watchdogs.fireNextActive())
+        wait(for: [stillRunning], timeout: 1)
+
+        socket.push(text: chatLifecycle(
+            runID: "run-active",
+            state: "final",
+            message: #"{"text":"Original consult completed."}"#
+        ))
+        waitForStateQueue()
+        let consultSubmit = try XCTUnwrap(socket.sentFrames.last {
+            guard $0["method"] as? String == "talk.session.submitToolResult",
+                  let params = $0["params"] as? [String: Any] else {
+                return false
+            }
+            return params["callId"] as? String == "consult-call"
+        })
+        let consultSubmitParams = try XCTUnwrap(consultSubmit["params"] as? [String: Any])
+        XCTAssertEqual(
+            (consultSubmitParams["result"] as? [String: Any])?["result"] as? String,
+            "Original consult completed."
+        )
+
+        let listening = expectation(description: "consult completes normally")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            listening.fulfill()
+        }
+        socket.push(text: successfulResponse(
+            id: try XCTUnwrap(consultSubmit["id"] as? String)
+        ))
+        wait(for: [listening], timeout: 1)
+    }
+
+    func testAgentControlValidationFiltersModesAndAllowsMultipleCalls() throws {
+        let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            sockets: [socket],
+            watchdogs: ManualWatchdogScheduler()
+        )
+
+        let ready = expectation(description: "session ready")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            ready.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [ready], timeout: 1)
+
+        for (callID, arguments) in [
+            ("missing-text", #"{"mode":"status"}"#),
+            ("blank-text", #"{"mode":"status","text":"  "}"#)
+        ] {
+            socket.push(text: toolCallEnvelope(
+                callID: callID,
+                name: "openclaw_agent_control",
+                arguments: arguments
+            ))
+        }
+        waitForStateQueue()
+        XCTAssertEqual(socket.sentMethodCount("talk.session.steer"), 0)
+        for callID in ["missing-text", "blank-text"] {
+            let malformedSubmit = try XCTUnwrap(socket.sentFrames.last {
+                guard $0["method"] as? String == "talk.session.submitToolResult",
+                      let params = $0["params"] as? [String: Any] else {
+                    return false
+                }
+                return params["callId"] as? String == callID
+            })
+            XCTAssertEqual(
+                ((malformedSubmit["params"] as? [String: Any])?["result"] as? [String: Any])?["error"] as? String,
+                "Malformed OpenClaw Talk tool call."
+            )
+        }
+
+        socket.push(text: toolCallEnvelope(
+            callID: "unknown-mode",
+            name: "openclaw_agent_control",
+            arguments: #"{"mode":"pause","text":"Check progress."}"#
+        ))
+        socket.push(text: toolCallEnvelope(
+            callID: "known-mode",
+            name: "openclaw_agent_control",
+            arguments: #"{"mode":"followup","text":"Also inspect logs."}"#
+        ))
+        waitForStateQueue()
+
+        let steerFrames = socket.sentFrames.filter {
+            $0["method"] as? String == "talk.session.steer"
+        }
+        XCTAssertEqual(steerFrames.count, 2)
+        let unknownModeParams = try XCTUnwrap(steerFrames[0]["params"] as? [String: Any])
+        XCTAssertEqual(unknownModeParams["text"] as? String, "Check progress.")
+        XCTAssertNil(unknownModeParams["mode"])
+        XCTAssertEqual(
+            Set(unknownModeParams.keys),
+            ["sessionId", "sessionKey", "text"]
+        )
+        let knownModeParams = try XCTUnwrap(steerFrames[1]["params"] as? [String: Any])
+        XCTAssertEqual(knownModeParams["mode"] as? String, "followup")
+
+        for (index, frame) in steerFrames.enumerated() {
+            socket.push(text: successfulResponse(
+                id: try XCTUnwrap(frame["id"] as? String),
+                payload: #"{"accepted":true,"sequence":\#(index + 1)}"#
+            ))
+        }
+        waitForStateQueue()
+
+        let submittedCallIDs = socket.sentFrames.compactMap { frame -> String? in
+            guard frame["method"] as? String == "talk.session.submitToolResult",
+                  let params = frame["params"] as? [String: Any] else {
+                return nil
+            }
+            return params["callId"] as? String
+        }
+        XCTAssertTrue(submittedCallIDs.contains("unknown-mode"))
+        XCTAssertTrue(submittedCallIDs.contains("known-mode"))
+    }
+
+    func testAgentControlSteerFailureSubmitsGatewayError() throws {
+        let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            sockets: [socket],
+            watchdogs: ManualWatchdogScheduler()
+        )
+
+        let ready = expectation(description: "session ready")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            ready.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [ready], timeout: 1)
+
+        socket.push(text: toolCallEnvelope(
+            callID: "failed-control",
+            name: "openclaw_agent_control",
+            arguments: #"{"mode":"cancel","text":"Cancel it."}"#
+        ))
+        waitForStateQueue()
+        let steerFrame = try XCTUnwrap(socket.sentFrames.last {
+            $0["method"] as? String == "talk.session.steer"
+        })
+        socket.push(text: failedResponse(
+            id: try XCTUnwrap(steerFrame["id"] as? String),
+            message: "No active run."
+        ))
+        waitForStateQueue()
+
+        let submitFrame = try XCTUnwrap(socket.sentFrames.last {
+            guard $0["method"] as? String == "talk.session.submitToolResult",
+                  let params = $0["params"] as? [String: Any] else {
+                return false
+            }
+            return params["callId"] as? String == "failed-control"
+        })
+        XCTAssertEqual(
+            (((submitFrame["params"] as? [String: Any])?["result"] as? [String: Any])?["error"] as? String),
+            "No active run."
+        )
+    }
+
+    func testUnknownToolStillSubmitsUnsupportedRejection() throws {
+        let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            sockets: [socket],
+            watchdogs: ManualWatchdogScheduler()
+        )
+
+        let ready = expectation(description: "session ready")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            ready.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [ready], timeout: 1)
+
+        let rejected = expectation(description: "unknown tool rejected")
+        provider.onEvent = { event in
+            guard case let .diagnostic(message) = event,
+                  message.contains("rejected unsupported tool 'other_tool'") else {
+                return
+            }
+            rejected.fulfill()
+        }
+        socket.push(text: toolCallEnvelope(
+            callID: "unknown-call",
+            name: "other_tool",
+            arguments: #"{"text":"Do something."}"#
+        ))
+        wait(for: [rejected], timeout: 1)
+        waitForStateQueue()
+
+        XCTAssertEqual(socket.sentMethodCount("talk.session.steer"), 0)
+        XCTAssertEqual(socket.sentMethodCount("talk.client.toolCall"), 0)
+        let submitFrame = try XCTUnwrap(socket.sentFrames.last {
+            guard $0["method"] as? String == "talk.session.submitToolResult",
+                  let params = $0["params"] as? [String: Any] else {
+                return false
+            }
+            return params["callId"] as? String == "unknown-call"
+        })
+        XCTAssertEqual(
+            (((submitFrame["params"] as? [String: Any])?["result"] as? [String: Any])?["error"] as? String),
+            "Unsupported OpenClaw Talk tool."
+        )
+    }
+
     func testConsultToolProgressResetsWatchdogAndIgnoresForeignRuns() throws {
         let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
         let watchdogs = ManualWatchdogScheduler()
@@ -791,17 +1093,25 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
 
     private func toolCallEnvelope(
         callID: String,
+        name: String = "openclaw_agent_consult",
         arguments: String = #"{"question":"What now?"}"#
     ) -> String {
         """
         {"type":"event","event":"talk.event","payload":{"relaySessionId":"relay-1",\
-        "type":"toolCall","callId":"\(callID)","name":"openclaw_agent_consult",\
+        "type":"toolCall","callId":"\(callID)","name":"\(name)",\
         "args":\(arguments)}}
         """
     }
 
     private func successfulResponse(id: String, payload: String = #"{"ok":true}"#) -> String {
         #"{"type":"res","id":"\#(id)","ok":true,"payload":\#(payload)}"#
+    }
+
+    private func failedResponse(id: String, message: String) -> String {
+        """
+        {"type":"res","id":"\(id)","ok":false,\
+        "error":{"code":"agent-control-failed","message":"\(message)"}}
+        """
     }
 
     private func chatLifecycle(runID: String, state: String, message: String? = nil) -> String {

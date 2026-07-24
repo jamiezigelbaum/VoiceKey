@@ -28,7 +28,7 @@ enum OpenClawTalkEventAction: Equatable {
     case handshakeFailed(message: String)
     case toolCall(OpenClawTalkToolCall)
     case malformedToolCall(callID: String?, reason: String)
-    case requestSucceeded(id: String, runID: String?)
+    case requestSucceeded(id: String, runID: String?, resultJSON: String?)
     case requestFailed(id: String, message: String)
     case chatLifecycle(runID: String?, state: String?, text: String?, errorMessage: String?)
     case consultToolProgress(runID: String?, phase: String?, toolName: String?)
@@ -194,6 +194,30 @@ enum OpenClawTalkRequestBuilder {
                 "sessionId": sessionID,
                 "reason": reason
             ]
+        ]
+    }
+
+    static func agentControlSteerFrame(
+        id: String,
+        relaySessionID: String,
+        text: String,
+        mode: String?
+    ) -> [String: Any] {
+        var params: [String: Any] = [
+            "sessionId": relaySessionID,
+            "sessionKey": sessionKey,
+            "text": text
+        ]
+        if let mode {
+            params["mode"] = mode
+        }
+        return [
+            "type": "req",
+            "id": id,
+            "method": "talk.session.steer",
+            // Schema (gateway channels.ts, additionalProperties:false):
+            // sessionId, sessionKey?, text, mode? — no others.
+            "params": params
         ]
     }
 
@@ -565,7 +589,13 @@ enum OpenClawTalkEventMapper {
         default:
             let payload = object["payload"] as? [String: Any]
             let runID = (payload?["runId"] as? String) ?? (payload?["idempotencyKey"] as? String)
-            return [.requestSucceeded(id: id, runID: runID)]
+            return [
+                .requestSucceeded(
+                    id: id,
+                    runID: runID,
+                    resultJSON: payload.flatMap(normalizedArgumentsJSON)
+                )
+            ]
         }
     }
 
@@ -687,12 +717,18 @@ enum OpenClawTalkEventMapper {
             ]
         }
 
+        let toolCall = OpenClawTalkToolCall(
+            name: name,
+            callID: callID,
+            argumentsJSON: argumentsJSON
+        )
+        if name == "openclaw_agent_control" {
+            // The provider emits the control-specific diagnostic with its
+            // validated mode; avoid a second generic diagnostic for this call.
+            return [.toolCall(toolCall)]
+        }
         return [
-            .toolCall(OpenClawTalkToolCall(
-                name: name,
-                callID: callID,
-                argumentsJSON: argumentsJSON
-            )),
+            .toolCall(toolCall),
             .providerEvent(.diagnostic(
                 "OpenClaw tool call \(diagnosticToolName(name)) received."
             ))
@@ -930,6 +966,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     /// point, so a long wait is visibly progress rather than a hang.
     private static let consultProgressInterval: TimeInterval = 45
     private static let agentConsultToolName = "openclaw_agent_consult"
+    private static let agentControlToolName = "openclaw_agent_control"
+    private static let agentControlModes = Set(["status", "steer", "cancel", "followup"])
     private static let confirmationMarker = "VOICE_CONFIRMATION_REQUIRED:"
 
     private enum HandshakePhase: Equatable {
@@ -957,6 +995,10 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         var startRequestID: String
         var runID: String?
         var submitRequestID: String?
+    }
+
+    private struct AgentControlRequest {
+        var callID: String
     }
 
     private let stateQueue = DispatchQueue(label: "VoiceKey.OpenClawTalkProvider.state")
@@ -995,6 +1037,7 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     private var consultWatchdog: OpenClawTalkWatchdogCancellation?
     private var consultWatchdogGeneration = 0
     private var consultState: ConsultState?
+    private var agentControlRequests: [String: AgentControlRequest] = [:]
     private var startGeneration = 0
     private var isStarting = false
     private var isConnecting = false
@@ -1432,8 +1475,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
                 handleToolCall(toolCall)
             case let .malformedToolCall(callID, reason):
                 handleMalformedToolCall(callID: callID, reason: reason)
-            case let .requestSucceeded(id, runID):
-                handleRequestSucceeded(id: id, runID: runID)
+            case let .requestSucceeded(id, runID, resultJSON):
+                handleRequestSucceeded(id: id, runID: runID, resultJSON: resultJSON)
             case let .requestFailed(id, message):
                 handleRequestFailed(id: id, message: message)
             case let .chatLifecycle(runID, state, text, errorMessage):
@@ -1458,6 +1501,10 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     // MARK: - Agent consult tool calls
 
     private func handleToolCall(_ toolCall: OpenClawTalkToolCall) {
+        if toolCall.name == Self.agentControlToolName {
+            handleAgentControlToolCall(toolCall)
+            return
+        }
         guard toolCall.name == Self.agentConsultToolName else {
             emit(.diagnostic("OpenClaw Talk rejected unsupported tool '\(safeToolName(toolCall.name))'."))
             submitUntrackedToolResult(
@@ -1506,6 +1553,50 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         }
     }
 
+    private func handleAgentControlToolCall(_ toolCall: OpenClawTalkToolCall) {
+        guard let arguments = toolCall.decodedArguments() as? [String: Any],
+              let text = (arguments["text"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              text.isEmpty == false else {
+            handleMalformedToolCall(
+                callID: toolCall.callID,
+                reason: "OpenClaw agent control tool call requires non-empty text."
+            )
+            return
+        }
+
+        let requestedMode = arguments["mode"] as? String
+        let mode = requestedMode.flatMap {
+            Self.agentControlModes.contains($0) ? $0 : nil
+        }
+        guard let relaySessionID else {
+            submitUntrackedToolResult(
+                callID: toolCall.callID,
+                result: ["error": "OpenClaw relay session id is unavailable."]
+            )
+            return
+        }
+
+        let requestID = nextRequestID()
+        agentControlRequests[requestID] = AgentControlRequest(callID: toolCall.callID)
+        sendJSON(OpenClawTalkRequestBuilder.agentControlSteerFrame(
+            id: requestID,
+            relaySessionID: relaySessionID,
+            text: text,
+            mode: mode
+        )) { [weak self] error in
+            guard let self,
+                  let request = self.agentControlRequests.removeValue(forKey: requestID) else {
+                return
+            }
+            self.submitUntrackedToolResult(
+                callID: request.callID,
+                result: ["error": error.localizedDescription]
+            )
+        }
+        emit(.diagnostic("OpenClaw agent control '\(mode ?? "default")' forwarded."))
+    }
+
     private func handleMalformedToolCall(callID: String?, reason: String) {
         emit(.diagnostic(reason))
         guard let callID else { return }
@@ -1515,7 +1606,23 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         )
     }
 
-    private func handleRequestSucceeded(id: String, runID: String?) {
+    private func handleRequestSucceeded(id: String, runID: String?, resultJSON: String?) {
+        if let request = agentControlRequests.removeValue(forKey: id) {
+            guard let resultJSON,
+                  let result = OpenClawTalkToolCall(
+                    name: Self.agentControlToolName,
+                    callID: request.callID,
+                    argumentsJSON: resultJSON
+                  ).decodedArguments() as? [String: Any] else {
+                submitUntrackedToolResult(
+                    callID: request.callID,
+                    result: ["error": "OpenClaw agent control returned an invalid result."]
+                )
+                return
+            }
+            submitUntrackedToolResult(callID: request.callID, result: result)
+            return
+        }
         guard var consultState else { return }
         if id == consultState.startRequestID {
             guard let runID = runID?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1535,6 +1642,13 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     }
 
     private func handleRequestFailed(id: String, message: String) {
+        if let request = agentControlRequests.removeValue(forKey: id) {
+            submitUntrackedToolResult(
+                callID: request.callID,
+                result: ["error": message]
+            )
+            return
+        }
         guard let consultState else {
             emit(.diagnostic("OpenClaw request \(id) failed: \(message)"))
             return
@@ -1914,6 +2028,7 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         cancelHandshakeWatchdog()
         cancelConsultWatchdog()
         consultState = nil
+        agentControlRequests = [:]
         audioEngine.stop()
         disposeCurrentSocket()
         isStarting = false
