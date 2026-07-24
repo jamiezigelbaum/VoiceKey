@@ -1,10 +1,10 @@
 cask "voicekey" do
-  version "0.1.0"
-  sha256 "de6c80c0b0ab5c9ed79f0a0904f33df6658851bd31862d4c45d4189882890259"
+  version "0.2.0"
+  sha256 "df88a7b7701dd74a7450e07c7af6eea20de236a9760779359db54807eb3deff7"
 
   url "https://github.com/jamiezigelbaum/VoiceKey/releases/download/v#{version}/VoiceKey-#{version}-macOS.dmg"
   name "VoiceKey"
-  desc "Menu bar voice hotkeys for realtime AI providers"
+  desc "Menu bar hotkey for ChatGPT Voice"
   homepage "https://github.com/jamiezigelbaum/VoiceKey"
 
   auto_updates false
