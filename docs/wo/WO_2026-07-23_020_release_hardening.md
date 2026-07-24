@@ -1027,3 +1027,129 @@ original bugs by construction):**
 - Skip-and-flag standing authority applies; if a leg proves deeper than
   specced (e.g. first-run redesign), skip and flag rather than improvise
   product decisions.
+
+## WO-N: First-run onboarding wizard, credentials UX, Tools removal
+
+Fresh-hardware testing (zigelbot's Mac, 2026-07-24) exposed the first-run
+experience: an API-key error greeted the install, the credentials field
+was cryptic, the Tools section confused, and the (separately hotfixed)
+missing audio-input entitlement made the microphone appear broken.
+Owner rulings: modern setup wizard like mic-first apps ship; specific
+credentials-field copy; Tools section removed. A dedicated research pass
+(session records) grounded the wizard design in Wispr Flow, Superwhisper,
+VoiceInk, Raycast, Loom, Krisp, Descript flows plus Apple HIG and TCC
+mechanics.
+
+### Verified facts (do not re-investigate)
+
+1. Signed builds now carry com.apple.security.device.audio-input
+   (VoiceKey.entitlements; both signing scripts) — the wizard can assume
+   the mic prompt WORKS. AVCaptureDevice.requestAccess registers the app's
+   row in the Microphone pane and prompts exactly once; after denial only
+   the user can flip it in System Settings. Deep link:
+   x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone
+   (test on the min deployment target; an alternate Ventura+ form exists).
+2. Translocation: an app launched from a DMG/quarantine runs from a
+   randomized read-only path (executable path contains "/AppTranslocation/")
+   and TCC grants don't stick; a Finder move to /Applications clears it.
+   Programmatic move+relaunch is the AppMover/LetsMove pattern.
+3. HIG: priming screens must not mirror the system alert nor use an
+   "Allow" button label; one permission per screen, tied to visible value;
+   launch-time asks acceptable only when the resource is core (mic is).
+4. Existing first-run machinery: FirstRunSettingsLifecycle +
+   openSettingsOnFirstRunIfNeeded + hasOpenedSettingsKey
+   (VoiceKeyAppDelegate); fresh installs get a hotkey-less default channel
+   (WO-M item 9). The wizard REPLACES this machinery.
+5. Grants can be reset by OS/app updates: wizard steps must derive state
+   from live ground truth (keychain key present? authorizationStatus?
+   hotkey registered?) — never a stored "done" flag per step.
+6. The dev-signing identity is stable (TCC grants survive rebuilds).
+
+### Required behavior
+
+**Leg A — onboarding wizard:**
+1. A paged wizard in its own titled window (menu-bar app: activate
+   properly so it can become key). Sequence:
+   (0) Location gate: if the executable path contains /AppTranslocation/
+       or the bundle is outside /Applications, a single blocking card —
+       "VoiceKey needs to live in Applications so macOS can remember its
+       permissions" — with one Move to Applications button (programmatic
+       move + relaunch) and a Quit alternative. No other step reachable
+       while translocated. Skippable only via a small "continue anyway"
+       link when merely outside /Applications but NOT translocated.
+   (1) Welcome: one sentence of value ("Map a key to a voice AI"), Get
+       Started, and a visible "Set up later" escape.
+   (2) API key: field placeholder "Paste key here" (owner's copy),
+       monospaced, paste-trimming; caption "API keys are stored in Apple
+       keychain and shared across channels of this provider." (owner's
+       copy); a Verify button making one cheap live authenticated call
+       (models list) with spinner → "Key works" / specific failure copy;
+       after save the field renders grayed dots (masked, never the raw
+       key) with a Change button. "Skip for now" allowed → menu shows a
+       "Finish setup" state instead of error statuses.
+   (3) Microphone priming: custom card (mic icon, "VoiceKey needs your
+       microphone to hear you"), button labeled "Enable Microphone"
+       (never "Allow") triggering AVCaptureDevice.requestAccess; on
+       grant auto-advance immediately and show a live input-level meter
+       as proof (the engine's inputActivity provides levels). On denial
+       or pre-denied: recovery card with Open System Settings deep link,
+       1s-interval live re-check (plus app-activation notification) that
+       auto-advances when authorized, and a "Still not working?"
+       disclosure covering the no-row case (relaunch from /Applications)
+       and .restricted ("your account or MDM profile blocks microphone
+       access").
+   (4) Hotkey capture: recording well with live combo rendering, using
+       the existing recorder; conflict feedback inline (Carbon refusal →
+       honest message per WO-M item 10).
+   (5) Live test: "Press your hotkey and say hello" against the user's
+       first channel; show the level meter and the live transcript; on
+       failure, action buttons (Open Sound Settings, Restart VoiceKey),
+       never prose alone.
+   (6) Done: hotkey shown big, "VoiceKey lives in your menu bar."
+2. Re-entrant: a "Setup Assistant…" menu item opens the wizard at the
+   first incomplete step. Step completion is ALWAYS derived live (fact
+   5): key in keychain, mic authorizationStatus, hotkey present,
+   translocation state. Every step except the location gate is
+   skippable.
+3. The wizard replaces openSettingsOnFirstRunIfNeeded and the
+   activation-failure Settings-opening for the no-key case on FRESH
+   installs; existing users with working channels never see it uninvited.
+4. Copy tone throughout: verbs and outcomes, no jargon (never "TCC",
+   "entitlement", "grant").
+
+**Leg B — settings surface:**
+5. Credentials field (all providers with keys): placeholder "Paste key
+   here"; caption exactly "API keys are stored in Apple keychain and
+   shared across channels of this provider."; saved state renders the
+   field as grayed dots with a Change action (single "Stored in macOS
+   Keychain" placeholder text removed everywhere).
+6. Tools section removed: web search is ALWAYS on for OpenAI Realtime
+   channels (webSearchEnabled remains in storage for compatibility but
+   the builder treats openai-realtime as always-enabled; keep the stored
+   field written true on save so a downgrade behaves). The
+   per-channel MCP servers list moves into a collapsed "Advanced"
+   disclosure at the bottom of the provider section, collapsed by
+   default, containing ONLY the MCP list controls.
+7. A Descript-style permissions panel in Settings (small section or
+   Troubleshooting window): live green/red rows for Microphone and
+   Accessibility with per-row action buttons (request / open pane),
+   states derived live.
+
+### Acceptance
+
+- Wizard state machine unit tests: step derivation from ground-truth
+  fakes (translocated/not, key present/absent, mic
+  notDetermined/denied/authorized/restricted, hotkey present/absent);
+  gate blocking; re-entry at first incomplete step; skip semantics.
+- Credentials: placeholder/caption/masked-state tests; verify-call state
+  machine with a stubbed endpoint (success, auth failure, network
+  failure copy).
+- Web search always-on: builder test that openai-realtime sessions carry
+  the Exa MCP tool regardless of the stored flag; Advanced disclosure
+  collapsed by default.
+- Existing 340 tests green (update Save-era/first-run tests
+  deliberately, naming the ruling).
+- swift build && swift test; CoreAudio skip-and-flag.
+- Skip-and-flag standing authority; the live-test step (5) may be
+  flagged partial if driving a real session in the wizard needs deeper
+  provider surgery — ship the wizard without it rather than hack it.
