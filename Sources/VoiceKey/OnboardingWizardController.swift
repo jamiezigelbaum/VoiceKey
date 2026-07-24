@@ -154,6 +154,8 @@ final class OnboardingWizardController: NSWindowController {
     private var handledSteps: Set<OnboardingStep> = []
     private var handledHotKeyProfileIDs: Set<UUID> = []
     private var selectedServices: Set<OnboardingService>
+    private var confirmedServicesThisSession:
+        Set<OnboardingService> = []
     private var verificationState: APIKeyVerificationState = .idle
     private var enteredAPIKey = ""
     private var enteredOpenClawToken = ""
@@ -328,6 +330,7 @@ final class OnboardingWizardController: NSWindowController {
     }
 
     func showInitial() {
+        beginWizardSession()
         handledSteps.removeAll()
         handledHotKeyProfileIDs.removeAll()
         currentStep = OnboardingFlowPolicy.initialStep(
@@ -337,6 +340,7 @@ final class OnboardingWizardController: NSWindowController {
     }
 
     func showReentrant() {
+        beginWizardSession()
         handledSteps.removeAll()
         handledHotKeyProfileIDs.removeAll()
         currentStep = OnboardingFlowPolicy.reentryStep(
@@ -353,6 +357,35 @@ final class OnboardingWizardController: NSWindowController {
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    private func beginWizardSession() {
+        confirmedServicesThisSession.removeAll()
+        let profiles = profileProvider()
+        guard let persisted =
+            OnboardingServicePreferences.selectedServices(
+                defaults: userDefaults
+            ) else {
+            selectedServices =
+                OnboardingServicePreferences.inferredServices(
+                    from: profiles
+                )
+            return
+        }
+
+        let providersWithChannels = Set(
+            profiles.map(\.providerID)
+        )
+        let reconciled = Set(persisted.filter {
+            providersWithChannels.contains($0.providerID)
+        })
+        selectedServices = reconciled
+        if reconciled != persisted {
+            OnboardingServicePreferences.saveSelectedServices(
+                reconciled,
+                defaults: userDefaults
+            )
+        }
     }
 
     private func buildWindow() {
@@ -1279,12 +1312,20 @@ final class OnboardingWizardController: NSWindowController {
 
     @objc private func continueFromServices() {
         guard selectedServices.isEmpty == false else { return }
+        confirmServices(selectedServices)
+        advance()
+    }
+
+    func confirmServices(
+        _ services: Set<OnboardingService>
+    ) {
+        selectedServices = services
         OnboardingServicePreferences.saveSelectedServices(
-            selectedServices,
+            services,
             defaults: userDefaults
         )
+        confirmedServicesThisSession = services
         ensureSelectedChannels()
-        advance()
     }
 
     @objc private func advance() {
@@ -1636,9 +1677,12 @@ final class OnboardingWizardController: NSWindowController {
     }
 
     private func ensureSelectedChannels() {
+        guard confirmedServicesThisSession.isEmpty == false else {
+            return
+        }
         delegate?.onboardingController(
             self,
-            ensureChannelsFor: selectedServices,
+            ensureChannelsFor: confirmedServicesThisSession,
             openClawEndpoint: openClawEndpoint
         )
     }

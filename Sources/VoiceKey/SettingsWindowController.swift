@@ -2392,7 +2392,7 @@ final class SettingsWindowController: NSWindowController {
                 case .deviceTokenMismatch:
                     succeeded = false
                     self.showOpenClawConnectionTestFailure(
-                        "OpenClaw’s saved device approval changed. Retry to refresh it."
+                        "OpenClaw’s saved device approval is no longer valid. Re-pair this Mac in OpenClaw, then try again."
                     )
                 case let .unreachable(endpoints):
                     succeeded = false
@@ -2405,7 +2405,9 @@ final class SettingsWindowController: NSWindowController {
                         message
                     )
                 }
-                self.saveOpenClawConnectionFact(succeeded)
+                if succeeded {
+                    self.saveOpenClawConnectionFact(true)
+                }
                 self.delegate?.settingsController(
                     self,
                     didUpdateCredentialsFor: profile

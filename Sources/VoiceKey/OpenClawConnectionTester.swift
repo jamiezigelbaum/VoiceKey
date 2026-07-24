@@ -174,6 +174,8 @@ private final class OpenClawConnectionTestRun: OpenClawConnectionTestCancellatio
     private var socket: OpenClawTalkWebSocket?
     private var watchdog: OpenClawTalkWatchdogCancellation?
     private var isFinished = false
+    private var omitDeviceTokenForConnect = false
+    private var hasRetriedWithoutDeviceToken = false
 
     init(
         endpoints: [String],
@@ -276,6 +278,10 @@ private final class OpenClawConnectionTestRun: OpenClawConnectionTestCancellatio
         }
 
         if let outcome = OpenClawConnectionOutcomeMapper.outcome(from: text) {
+            if outcome == .deviceTokenMismatch,
+               retryConnectWithoutDeviceToken() {
+                return
+            }
             finish(outcome)
             return
         }
@@ -293,7 +299,9 @@ private final class OpenClawConnectionTestRun: OpenClawConnectionTestCancellatio
                 token: token,
                 clientVersion: clientVersion,
                 scopes: credentials.operatorScopes,
-                deviceToken: credentials.operatorToken,
+                deviceToken: omitDeviceTokenForConnect
+                    ? nil
+                    : credentials.operatorToken,
                 deviceProof: proof
             )
         } else {
@@ -317,6 +325,18 @@ private final class OpenClawConnectionTestRun: OpenClawConnectionTestCancellatio
                 self.connectToNextEndpoint()
             }
         }
+    }
+
+    private func retryConnectWithoutDeviceToken() -> Bool {
+        guard deviceCredentials != nil,
+              hasRetriedWithoutDeviceToken == false else {
+            return false
+        }
+        hasRetriedWithoutDeviceToken = true
+        omitDeviceTokenForConnect = true
+        endpointIndex = max(0, endpointIndex - 1)
+        connectToNextEndpoint()
+        return true
     }
 
     private func makeDeviceProof(

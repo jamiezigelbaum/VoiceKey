@@ -384,6 +384,101 @@ final class OnboardingFlowPolicyTests: XCTestCase {
     }
 }
 
+final class OnboardingWizardControllerServiceTests:
+    XCTestCase {
+    func testReentryDropsDeletedServiceAndDoesNotRecreateChannel() {
+        let defaults = makeDefaults()
+        OnboardingServicePreferences.saveSelectedServices(
+            [.openAI, .openClaw],
+            defaults: defaults
+        )
+        OnboardingServicePreferences.setHasOpenClawConnection(
+            true,
+            defaults: defaults
+        )
+        let delegate = OnboardingChannelRecordingDelegate(
+            profiles: [VoiceProfile.defaultOpenAI()]
+        )
+        let controller = OnboardingWizardController(
+            profileProvider: { delegate.profiles },
+            credentialStore: OnboardingCredentialStore(
+                hasAPIKey: true
+            ),
+            userDefaults: defaults,
+            applicationLocationProvider: { .applications },
+            microphoneAuthorizationProvider: { .authorized }
+        )
+        controller.delegate = delegate
+        defer { controller.close() }
+
+        controller.showReentrant()
+
+        XCTAssertEqual(controller.currentStepSnapshot, .done)
+        XCTAssertEqual(
+            OnboardingServicePreferences.selectedServices(
+                defaults: defaults
+            ),
+            [.openAI]
+        )
+        XCTAssertTrue(delegate.ensureRequests.isEmpty)
+        XCTAssertFalse(delegate.profiles.contains {
+            $0.providerID == .openClaw
+        })
+    }
+
+    func testFreshServiceConfirmationStillCreatesSelectedChannels() {
+        let defaults = makeDefaults()
+        let delegate = OnboardingChannelRecordingDelegate(
+            profiles: [VoiceProfile.defaultOpenAI()]
+        )
+        let controller = OnboardingWizardController(
+            profileProvider: { delegate.profiles },
+            credentialStore: OnboardingCredentialStore(),
+            userDefaults: defaults,
+            applicationLocationProvider: { .applications },
+            microphoneAuthorizationProvider: { .authorized }
+        )
+        controller.delegate = delegate
+        defer { controller.close() }
+
+        controller.confirmServices([.openAI, .openClaw])
+
+        XCTAssertEqual(
+            delegate.ensureRequests,
+            [[.openAI, .openClaw]]
+        )
+        XCTAssertEqual(
+            delegate.profiles.filter {
+                $0.providerID == .openAIRealtime
+            }.count,
+            1
+        )
+        XCTAssertEqual(
+            delegate.profiles.filter {
+                $0.providerID == .openClaw
+            }.count,
+            1
+        )
+        XCTAssertEqual(
+            OnboardingServicePreferences.selectedServices(
+                defaults: defaults
+            ),
+            [.openAI, .openClaw]
+        )
+    }
+
+    private func makeDefaults() -> UserDefaults {
+        let suiteName =
+            "OnboardingWizardControllerServiceTests-\(UUID())"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        return defaults
+    }
+}
+
 final class OnboardingServicePreferencesTests: XCTestCase {
     private var defaults: UserDefaults!
     private var suiteName: String!
@@ -688,6 +783,24 @@ final class OpenClawConnectionWizardTests: XCTestCase {
             .success(serverVersion: "2026.7.1-2")
         )
     }
+
+    func testDeviceTokenMismatchCopyRequiresRepairInsteadOfPromisingRefresh() {
+        let tester = FakeOpenClawConnectionTester()
+        let wizard = OpenClawConnectionWizard(
+            tester: tester,
+            tokenProvider: { "token" }
+        )
+
+        wizard.begin(endpointURL: "")
+        tester.completeNext(.deviceTokenMismatch)
+
+        XCTAssertEqual(
+            wizard.state,
+            .failed(
+                message: "OpenClaw’s saved device approval is no longer valid. Re-pair this Mac in OpenClaw, then try again."
+            )
+        )
+    }
 }
 
 final class APIKeyVerificationStateTests: XCTestCase {
@@ -912,6 +1025,82 @@ private final class FakeOnboardingRetryCancellation:
     func cancel() {
         isCancelled = true
     }
+}
+
+private final class OnboardingChannelRecordingDelegate:
+    OnboardingWizardControllerDelegate {
+    var profiles: [VoiceProfile]
+    private(set) var ensureRequests:
+        [Set<OnboardingService>] = []
+
+    init(profiles: [VoiceProfile]) {
+        self.profiles = profiles
+    }
+
+    func onboardingController(
+        _ controller: OnboardingWizardController,
+        didRecordHotKey hotKey: HotKeyConfiguration,
+        for profile: VoiceProfile
+    ) -> Bool {
+        false
+    }
+
+    func onboardingController(
+        _ controller: OnboardingWizardController,
+        isRecordingHotKey: Bool
+    ) {}
+
+    func onboardingController(
+        _ controller: OnboardingWizardController,
+        ensureChannelsFor services: Set<OnboardingService>,
+        openClawEndpoint: String
+    ) {
+        ensureRequests.append(services)
+        profiles = OnboardingChannelEnsurer.ensure(
+            services: services,
+            openClawEndpoint: openClawEndpoint,
+            in: profiles
+        )
+    }
+}
+
+private final class OnboardingCredentialStore:
+    VoiceCredentialStoring {
+    private let hasAPIKeyValue: Bool
+
+    init(hasAPIKey: Bool = false) {
+        hasAPIKeyValue = hasAPIKey
+    }
+
+    func hasAPIKey(for profile: VoiceProfile) -> Bool {
+        hasAPIKeyValue
+    }
+
+    func apiKey(for profile: VoiceProfile) -> String? {
+        nil
+    }
+
+    func setAPIKey(
+        _ apiKey: String,
+        for profile: VoiceProfile
+    ) throws {}
+
+    func deleteAPIKey(for profile: VoiceProfile) throws {}
+
+    func authorizationToken(
+        forMCPServer id: UUID
+    ) -> String? {
+        nil
+    }
+
+    func setAuthorizationToken(
+        _ token: String,
+        forMCPServer id: UUID
+    ) throws {}
+
+    func deleteAuthorizationToken(
+        forMCPServer id: UUID
+    ) throws {}
 }
 
 private final class StubOnboardingURLProtocol:

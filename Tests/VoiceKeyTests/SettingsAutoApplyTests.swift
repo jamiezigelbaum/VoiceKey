@@ -886,6 +886,28 @@ final class SettingsAutoApplyTests: XCTestCase {
         )
         XCTAssertEqual(savedFacts, [true])
 
+        sendAction(for: button)
+        tester.complete(.unreachable(
+            endpointsTried: ["wss://gateway.example.com"]
+        ))
+        XCTAssertEqual(
+            controller.openClawConnectionTestSnapshot.status,
+            "Gateway unreachable (1 addresses tried)."
+        )
+        XCTAssertEqual(
+            savedFacts,
+            [true],
+            "A failed test must not downgrade a prior connection fact."
+        )
+
+        sendAction(for: button)
+        tester.complete(.deviceTokenMismatch)
+        XCTAssertEqual(
+            controller.openClawConnectionTestSnapshot.status,
+            "OpenClaw’s saved device approval is no longer valid. Re-pair this Mac in OpenClaw, then try again."
+        )
+        XCTAssertEqual(savedFacts, [true])
+
         controller.profiles = [
             VoiceProfile.defaultOpenAI()
         ]

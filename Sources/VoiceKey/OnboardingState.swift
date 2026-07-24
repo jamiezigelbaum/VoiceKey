@@ -458,7 +458,7 @@ final class OpenClawConnectionWizard {
             )
         case .deviceTokenMismatch:
             state = .failed(
-                message: "OpenClaw’s saved device approval changed. Retry to refresh it."
+                message: "OpenClaw’s saved device approval is no longer valid. Re-pair this Mac in OpenClaw, then try again."
             )
         case .unreachable:
             state = .needsEndpoint
