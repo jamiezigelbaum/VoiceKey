@@ -187,3 +187,26 @@ v2026.7.1-2 by replaying VoiceKey's exact connect frames (probe on the Air).
   API key → OpenClaw connect → microphone → hotkey (×2 channels) → done.
 - Your final message is the work-order summary (commits, behavior per leg,
   verification, anything skipped-and-flagged).
+
+## Review record (2026-07-24)
+
+Independent fresh-context review (spec + diff only): MERGE-AFTER-FIXES.
+Secret hygiene, one-shot retry guards, outcome mapping, flow/re-entry, and
+main-thread discipline verified clean. Pre-merge fixes applied via follow-up
+Codex run: (1) tester mirrors the provider's one-shot no-deviceToken retry +
+honest mismatch copy; (2) channel-ensuring gated to services confirmed this
+session, persisted selection reconciled against deletions; (3) Settings
+"Test Connection" no longer downgrades the stored connection fact on failure.
+
+Deferred fast-follow findings (accepted, not blocking):
+- Hotkey ground truth requires every selected-provider channel to have a
+  hotkey; an intentionally hotkey-less second channel retitles the menu to
+  "Finish Setup…" each launch.
+- Upgraded installs show "Finish Setup…" until one OpenClaw test succeeds;
+  token presence could seed the connection fact instead.
+- Tester lifecycle nits: cancelled runs linger in the runs dictionary
+  (bounded memory, no socket leak); per-endpoint watchdog isn't
+  generation-guarded (worst case a spurious unreachable).
+- OnboardingChannelEnsurer may rewrite an existing OpenClaw channel's
+  endpointURL with the wizard-tested endpoint (arguably intended; deserves
+  a guard or comment).
