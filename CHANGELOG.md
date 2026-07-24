@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.2.1 - 2026-07-24
+
+Auto-apply settings, voice-channel UX overhaul, and reliability sweep.
+
+- Settings now auto-apply: every change (fields, toggles, add/duplicate/
+  delete channel, API keys, MCP servers) commits immediately — the Save
+  button is gone, and closing the window can no longer discard edits.
+  Deleting a channel takes effect at its confirmation dialog and releases
+  its hotkey instantly.
+- "Profiles" are now "voice channels" throughout, ordered by hotkey in the
+  menu and picker, with add/duplicate/delete controls and plain-language
+  provider descriptions ("OpenAI Realtime API" vs "ChatGPT (web)").
+- Fixes 19 reliability issues found in an adversarial review, including:
+  typed API keys being silently discarded on channel switch; a live
+  session's menu state being clobbered by another channel's failed start
+  (which could then stop the wrong session); custom-endpoint channels
+  sharing one API-key slot (now per-channel, with migration); phantom
+  hotkey registrations from unsaved channels; stuck "stopping" states
+  (now watchdogged); menu shortcut glyphs showing the wrong key; "Clear
+  Session Log" not clearing the on-disk transcript; and honest reporting
+  when a shortcut cannot work globally without Accessibility access.
+- Failed session starts now open Settings focused on the misconfigured
+  channel instead of failing silently; fresh installs are guided to record
+  a hotkey rather than defaulting to F16 (absent on laptop keyboards).
+- OpenAI Realtime channels default to gpt-realtime-2.1, and the OpenAI
+  web-search tool loads faster; the model speaks tool results reliably
+  after server-side calls.
+- Speaker mode (open-speaker echo protection with energy-gated barge-in,
+  introduced for OpenAI channels in 0.2.0) now also protects OpenClaw
+  Talk channels; consult timeouts are idle-based with live per-tool
+  progress, so long agent tasks are never cut off while visibly working.
+- The ChatGPT (web) channel drives chatgpt.com more precisely (per-host
+  browser identity, native clicks), though GPT-Live voice remains
+  unsupported inside embedded windows (documented in
+  docs/CHATGPT_WEB_CHANNEL_STATUS.md); dev builds are Developer-ID signed
+  so permission grants persist across rebuilds.
+- New sessions carry no default assistant instructions (the app no longer
+  tells assistants they are "VoiceKey").
+
 ## 0.2.0 - 2026-07-17
 
 Voice profiles, an OpenClaw Talk provider, and UX overhaul.
