@@ -359,6 +359,64 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
         XCTAssertEqual(audioEngine.startCount, 1)
     }
 
+    func testConsultToolProgressResetsWatchdogAndIgnoresForeignRuns() throws {
+        let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
+        let watchdogs = ManualWatchdogScheduler()
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            sockets: [socket],
+            watchdogs: watchdogs
+        )
+
+        let ready = expectation(description: "session ready")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            ready.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [ready], timeout: 1)
+
+        let clientRequest = expectation(description: "consult request sent")
+        socket.onSentMethod = { method, count in
+            if method == "talk.client.toolCall", count == 1 {
+                clientRequest.fulfill()
+            }
+        }
+        socket.push(text: toolCallEnvelope(callID: "call-progress"))
+        wait(for: [clientRequest], timeout: 1)
+        let clientFrame = try XCTUnwrap(socket.sentFrames.last {
+            $0["method"] as? String == "talk.client.toolCall"
+        })
+        socket.push(text: successfulResponse(
+            id: try XCTUnwrap(clientFrame["id"] as? String),
+            payload: #"{"runId":"run-progress"}"#
+        ))
+        waitForStateQueue()
+        let scheduledBeforeProgress = watchdogs.scheduledDelays.count
+
+        let toolDiagnostic = expectation(description: "tool diagnostic")
+        provider.onEvent = { event in
+            if case let .diagnostic(message) = event,
+               message.contains("running tool 'web_search'") {
+                toolDiagnostic.fulfill()
+            }
+        }
+        socket.push(text: #"{"type":"event","event":"agent","payload":{"runId":"run-progress","stream":"tool","data":{"phase":"start","name":"web_search"}}}"#)
+        wait(for: [toolDiagnostic], timeout: 1)
+        // Progress re-arms the watchdog pair (45s reassurance + 180s idle kill).
+        XCTAssertEqual(
+            Array(watchdogs.scheduledDelays.suffix(2)), [45, 180]
+        )
+        XCTAssertGreaterThan(watchdogs.scheduledDelays.count, scheduledBeforeProgress)
+
+        // A different run's tool events must not touch our watchdog.
+        let countAfterOurs = watchdogs.scheduledDelays.count
+        socket.push(text: #"{"type":"event","event":"agent","payload":{"runId":"someone-else","stream":"tool","data":{"phase":"start","name":"exec"}}}"#)
+        waitForStateQueue()
+        XCTAssertEqual(watchdogs.scheduledDelays.count, countAfterOurs)
+        withExtendedLifetime(provider) {}
+    }
+
     func testConsultTimeoutSubmitsFailureWithoutNeedsAttention() throws {
         let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
         let watchdogs = ManualWatchdogScheduler()

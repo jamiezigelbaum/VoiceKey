@@ -31,6 +31,7 @@ enum OpenClawTalkEventAction: Equatable {
     case requestSucceeded(id: String, runID: String?)
     case requestFailed(id: String, message: String)
     case chatLifecycle(runID: String?, state: String?, text: String?, errorMessage: String?)
+    case consultToolProgress(runID: String?, phase: String?, toolName: String?)
     /// The gateway rejected connect as NOT_PAIRED because the requested scopes
     /// exceed the device's approved set; it closes the socket (1008), so the
     /// provider must reconnect and retry with exactly these approved scopes.
@@ -102,7 +103,10 @@ enum OpenClawTalkRequestBuilder {
                     "id": clientID,
                     "version": clientVersion,
                     "platform": "macos",
-                    "mode": clientMode
+                    "mode": clientMode,
+                    // tool-events: chat.send auto-registers this connection for
+                    // per-tool agent events (stream:"tool") on consult runs.
+                    "caps": ["tool-events"]
                 ],
                 "role": role,
                 "scopes": ["operator.talk", "operator.write", "operator.read"],
@@ -134,7 +138,8 @@ enum OpenClawTalkRequestBuilder {
                     "id": clientID,
                     "version": clientVersion,
                     "platform": "macos",
-                    "mode": clientMode
+                    "mode": clientMode,
+                    "caps": ["tool-events"]
                 ],
                 "role": role,
                 "scopes": scopes,
@@ -467,8 +472,23 @@ enum OpenClawTalkEventMapper {
                         errorMessage: payload?["errorMessage"] as? String
                     )
                 ]
+            case "agent":
+                // Per-tool progress for consult runs (requires the
+                // "tool-events" connect cap). Wire shape verified against
+                // gateway source v2026.7.1: payload {runId, stream:"tool",
+                // data:{phase, name, toolCallId}}.
+                guard let payload = object["payload"] as? [String: Any],
+                      payload["stream"] as? String == "tool" else { return [] }
+                let data = payload["data"] as? [String: Any]
+                return [
+                    .consultToolProgress(
+                        runID: payload["runId"] as? String,
+                        phase: data?["phase"] as? String,
+                        toolName: data?["name"] as? String
+                    )
+                ]
             default:
-                // health/tick/agent/heartbeat frames are not talk traffic.
+                // health/tick/heartbeat frames are not talk traffic.
                 return []
             }
         default:
@@ -1419,6 +1439,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
                     text: text,
                     errorMessage: errorMessage
                 )
+            case let .consultToolProgress(runID, phase, toolName):
+                handleConsultToolProgress(runID: runID, phase: phase, toolName: toolName)
             case let .providerEvent(event):
                 if case .status(.listening) = event, consultState != nil {
                     emit(.status(.thinking))
@@ -1649,6 +1671,27 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         consultWatchdogGeneration += 1
         consultWatchdog?.cancel()
         consultWatchdog = nil
+    }
+
+    /// Per-tool progress from the consult run (gateway "agent" events with
+    /// stream "tool", delivered because we connect with the tool-events cap).
+    /// Progress proves the agent is working, so the timeout watchdog resets:
+    /// it exists to unstick a DEAD run, and must never kill a progressing one.
+    private func handleConsultToolProgress(
+        runID: String?,
+        phase: String?,
+        toolName: String?
+    ) {
+        guard let consultState,
+              let runID,
+              runID == consultState.runID,
+              consultState.submitRequestID == nil,
+              isStopping == false else { return }
+        if phase == "start", let toolName, toolName.isEmpty == false {
+            emit(.diagnostic("OpenClaw consult running tool '\(safeToolName(toolName))'."))
+        }
+        emit(.status(.thinking))
+        scheduleConsultWatchdog(runID: runID)
     }
 
     private func finishConsult() {
