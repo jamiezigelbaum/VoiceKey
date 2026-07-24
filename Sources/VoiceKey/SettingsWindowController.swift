@@ -404,17 +404,6 @@ final class SettingsWindowController: NSWindowController {
         }
     }
 
-    func showFirstRunHotKeyPrompt() {
-        guard let profileID = workingProfiles.first?.id else {
-            showAndFocus()
-            return
-        }
-        showActivationFailure(
-            for: profileID,
-            failure: .missingHotKey
-        )
-    }
-
     func beginHotKeyRecording() {
         recorderView.beginRecording()
     }

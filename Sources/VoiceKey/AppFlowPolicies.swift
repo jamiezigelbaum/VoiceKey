@@ -243,36 +243,6 @@ enum HotKeyFallbackPolicy {
     }
 }
 
-struct FirstRunSettingsLifecycle: Equatable {
-    private(set) var hasBeenShown = false
-    private(set) var isComplete = false
-
-    mutating func didShow(hasHotKey: Bool) -> Bool {
-        hasBeenShown = true
-        return completeIfAllowed(hasHotKey: hasHotKey)
-    }
-
-    mutating func profilesDidChange(hasHotKey: Bool) -> Bool {
-        completeIfAllowed(hasHotKey: hasHotKey)
-    }
-
-    mutating func didClose() -> Bool {
-        guard hasBeenShown, isComplete == false else { return false }
-        isComplete = true
-        return true
-    }
-
-    private mutating func completeIfAllowed(
-        hasHotKey: Bool
-    ) -> Bool {
-        guard hasBeenShown, hasHotKey, isComplete == false else {
-            return false
-        }
-        isComplete = true
-        return true
-    }
-}
-
 enum ProviderEventAttribution {
     static func handler(
         providerID: VoiceProviderID,

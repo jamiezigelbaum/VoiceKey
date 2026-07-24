@@ -160,35 +160,6 @@ final class StopWatchdogTests: XCTestCase {
     }
 }
 
-final class FirstRunSettingsLifecycleTests: XCTestCase {
-    func testFlagCannotCompleteBeforeWindowIsShown() {
-        var lifecycle = FirstRunSettingsLifecycle()
-
-        XCTAssertFalse(
-            lifecycle.profilesDidChange(hasHotKey: true)
-        )
-        XCTAssertFalse(lifecycle.isComplete)
-    }
-
-    func testShownWindowCompletesAfterHotKeyExists() {
-        var lifecycle = FirstRunSettingsLifecycle()
-
-        XCTAssertFalse(lifecycle.didShow(hasHotKey: false))
-        XCTAssertTrue(
-            lifecycle.profilesDidChange(hasHotKey: true)
-        )
-        XCTAssertTrue(lifecycle.isComplete)
-    }
-
-    func testDeliberateCloseCompletesAfterShow() {
-        var lifecycle = FirstRunSettingsLifecycle()
-
-        XCTAssertFalse(lifecycle.didShow(hasHotKey: false))
-        XCTAssertTrue(lifecycle.didClose())
-        XCTAssertTrue(lifecycle.isComplete)
-    }
-}
-
 final class HotKeyFallbackPolicyTests: XCTestCase {
     func testTrustedPathHonestlyClaimsFallbackWithoutPrompt() {
         var promptCount = 0

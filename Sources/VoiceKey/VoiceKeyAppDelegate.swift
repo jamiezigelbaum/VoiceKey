@@ -48,9 +48,10 @@ enum ActiveVoiceProfileLifecycle {
 
 final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private static let hotKeyDebounceInterval: TimeInterval = 0.25
-    private static let hasOpenedSettingsKey = "HasOpenedSettings.v1"
     private static let microphonePrivacySettingsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
 
+    private let isFreshInstallAtLaunch =
+        VoiceProfileStore.isFreshInstall()
     private var profiles: [VoiceProfile] = VoiceProfileStore.load()
     private var providerConfiguration = VoiceSessionConfiguration.default
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -60,7 +61,8 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private var activeProfileID: UUID?
     private var currentStatus: ProviderStatus = .loading
     private var appOwnedAttention: AppOwnedAttentionState?
-    private var firstRunSettingsLifecycle: FirstRunSettingsLifecycle?
+    private var onboardingWizardController:
+        OnboardingWizardController?
     private var settingsWindowController: SettingsWindowController?
     private var sessionLogWindowController: SessionLogWindowController?
     private var voiceProvider: RealtimeVoiceProvider?
@@ -104,6 +106,11 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private let copySessionLogMenuItem = NSMenuItem(title: "Copy Session Log", action: #selector(copySessionLog), keyEquivalent: "")
     private let clearSessionLogMenuItem = NSMenuItem(title: "Clear Session Log", action: #selector(clearSessionLog), keyEquivalent: "")
     private let copyDiagnosticsMenuItem = NSMenuItem(title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: "")
+    private let setupAssistantMenuItem = NSMenuItem(
+        title: "Setup Assistant…",
+        action: #selector(showSetupAssistant),
+        keyEquivalent: ""
+    )
     private let settingsMenuItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -115,11 +122,20 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         registerAllHotKeys()
         if selectedProfile != nil {
             configureProvider()
-            voiceProvider?.prepare()
+            if OnboardingFlowPolicy.firstIncompleteStep(
+                groundTruth: onboardingGroundTruth
+            ) != .done {
+                // Incomplete setup owns readiness until the user supplies
+                // live ground truth. Do not turn an intentional skip into a
+                // missing-key error on the next launch.
+                updateStatus(.ready)
+            } else {
+                voiceProvider?.prepare()
+            }
         } else {
             updateStatus(.ready)
         }
-        openSettingsOnFirstRunIfNeeded()
+        openOnboardingOnFirstRunIfNeeded()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -182,7 +198,13 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private func rebuildMenu() {
         // Shared menu items move between menu instances; detach them from the
         // previous menu first because NSMenu refuses items owned by another menu.
-        for item in [statusMenuItem, checkProviderConnectionMenuItem, troubleshootingMenuItem, settingsMenuItem] {
+        for item in [
+            statusMenuItem,
+            checkProviderConnectionMenuItem,
+            troubleshootingMenuItem,
+            setupAssistantMenuItem,
+            settingsMenuItem
+        ] {
             item.menu?.removeItem(item)
         }
 
@@ -224,6 +246,9 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         }
         troubleshootingMenuItem.submenu = troubleshootingMenu
         menu.addItem(troubleshootingMenuItem)
+
+        setupAssistantMenuItem.target = self
+        menu.addItem(setupAssistantMenuItem)
 
         settingsMenuItem.target = self
         settingsMenuItem.keyEquivalentModifierMask = [.command]
@@ -343,6 +368,8 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         localHotKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self,
                   self.settingsWindowController?.window?.isKeyWindow != true,
+                  self.onboardingWizardController?.window?.isKeyWindow
+                    != true,
                   let profileID = self.profileID(matchingKeyEvent: event) else {
                 return event
             }
@@ -438,6 +465,13 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             ),
             provider: profile.providerID
         )
+        if isFreshInstallAtLaunch,
+           OnboardingFlowPolicy.firstIncompleteStep(
+               groundTruth: onboardingGroundTruth
+           ) != .done {
+            presentOnboarding(initial: false)
+            return
+        }
         let preservesStatus =
             ProfileActivationPolicy.preservesGlobalStatus(
                 requestedProfileID: profile.id,
@@ -615,6 +649,10 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         presentSettings(focusedOn: nil, failure: nil)
     }
 
+    @objc private func showSetupAssistant() {
+        presentOnboarding(initial: false)
+    }
+
     private func presentSettings(
         focusedOn profileID: UUID?,
         failure: ProfileActivationFailure?
@@ -634,35 +672,61 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func openSettingsOnFirstRunIfNeeded() {
-        guard VoiceProfileStore.isFreshInstall(),
-              UserDefaults.standard.bool(forKey: Self.hasOpenedSettingsKey) == false else { return }
-        firstRunSettingsLifecycle = FirstRunSettingsLifecycle()
+    private func openOnboardingOnFirstRunIfNeeded() {
+        guard isFreshInstallAtLaunch else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.registerAllHotKeys()
-            let controller = self.settingsWindowController
-                ?? SettingsWindowController(profiles: self.profiles)
-            controller.delegate = self
-            controller.profiles = self.profiles
-            self.settingsWindowController = controller
-            controller.showFirstRunHotKeyPrompt()
-            let hasHotKey = self.profiles.contains(where: {
-                $0.hotKey != nil
-            })
-            if self.firstRunSettingsLifecycle?
-                .didShow(hasHotKey: hasHotKey) == true {
-                self.markFirstRunSettingsComplete()
-            }
+            self?.presentOnboarding(initial: true)
         }
     }
 
-    private func markFirstRunSettingsComplete() {
-        UserDefaults.standard.set(
-            true,
-            forKey: Self.hasOpenedSettingsKey
+    private func presentOnboarding(initial: Bool) {
+        let controller = onboardingWizardController
+            ?? OnboardingWizardController(
+                profileProvider: { [weak self] in
+                    self?.profiles ?? []
+                }
+            )
+        controller.delegate = self
+        onboardingWizardController = controller
+        if initial {
+            controller.showInitial()
+        } else {
+            controller.showReentrant()
+        }
+    }
+
+    private var onboardingGroundTruth:
+        OnboardingGroundTruth {
+        let profile = profiles.first
+        let microphoneAuthorization:
+            MicrophoneAuthorizationState
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .notDetermined:
+            microphoneAuthorization = .notDetermined
+        case .denied:
+            microphoneAuthorization = .denied
+        case .authorized:
+            microphoneAuthorization = .authorized
+        case .restricted:
+            microphoneAuthorization = .restricted
+        @unknown default:
+            microphoneAuthorization = .restricted
+        }
+        return OnboardingGroundTruth(
+            applicationLocation:
+                ApplicationLocationState.detect(
+                    executableURL: Bundle.main.executableURL,
+                    bundleURL: Bundle.main.bundleURL
+                ),
+            requiresAPIKey:
+                profile?.providerID.requiresAPIKey == true,
+            hasAPIKey: profile.map {
+                APIKeyStore.shared.hasAPIKey(for: $0)
+            } ?? false,
+            microphoneAuthorization:
+                microphoneAuthorization,
+            hasHotKey: profile?.hotKey != nil
         )
-        firstRunSettingsLifecycle = nil
     }
 
     @objc private func quit() {
@@ -731,6 +795,15 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateMenuContent() {
+        let setupStep =
+            OnboardingFlowPolicy.firstIncompleteStep(
+                groundTruth: onboardingGroundTruth
+            )
+        setupAssistantMenuItem.title =
+            setupStep == .done
+            ? "Setup Assistant…"
+            : "Finish Setup…"
+
         for profile in profiles {
             guard let item = profileMenuItems[profile.id] else { continue }
             item.title = profileMenuTitle(for: profile)
@@ -862,14 +935,7 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
                 updateProviderConfiguration(configuration)
             }
         }
-        if firstRunSettingsLifecycle?
-            .profilesDidChange(
-                hasHotKey: profiles.contains(where: {
-                    $0.hotKey != nil
-                })
-            ) == true {
-            markFirstRunSettingsComplete()
-        }
+        updateMenuContent()
     }
 
     private func resetProviderForEmptyProfiles() {
@@ -929,19 +995,15 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
         )
     }
 
-    func settingsControllerDidClose(
-        _ controller: SettingsWindowController
-    ) {
-        if firstRunSettingsLifecycle?.didClose() == true {
-            markFirstRunSettingsComplete()
-        }
-    }
-
     // Carbon hotkeys are consumed system-wide before any window sees them,
     // so while the recorder is capturing, suspend every registration:
     // otherwise pressing an already-assigned key toggles that profile's
     // session instead of reaching the recorder (and its conflict check).
     func settingsController(_ controller: SettingsWindowController, isRecordingHotKey: Bool) {
+        setHotKeyRecording(isRecordingHotKey)
+    }
+
+    private func setHotKeyRecording(_ isRecordingHotKey: Bool) {
         if isRecordingHotKey {
             hotKeys.removeAll()
             carbonRegisteredProfileIDs.removeAll()
@@ -950,5 +1012,64 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
                 registerHotKey(for: profile)
             }
         }
+    }
+}
+
+extension VoiceKeyAppDelegate:
+    OnboardingWizardControllerDelegate {
+    func onboardingController(
+        _ controller: OnboardingWizardController,
+        didRecordHotKey hotKey: HotKeyConfiguration,
+        for profile: VoiceProfile
+    ) -> Bool {
+        let accepted = HotKeyRecordingLifecycle.register(
+            hotKey,
+            for: profile,
+            committedProfiles: profiles,
+            register: { [weak self] candidate in
+                self?.registerHotKey(for: candidate) == true
+            }
+        )
+        guard accepted,
+              let index = profiles.firstIndex(where: {
+                  $0.id == profile.id
+              }) else {
+            return false
+        }
+
+        profiles[index].hotKey = hotKey
+        profiles = VoiceProfileStore.sortedByHotKey(profiles)
+        VoiceProfileStore.save(profiles)
+        registerAllHotKeys()
+        rebuildMenu()
+        if APIKeyStore.shared.hasAPIKey(
+            for: profiles.first(where: {
+                $0.id == profile.id
+            }) ?? profile
+        ) {
+            voiceProvider?.prepare()
+        }
+        return true
+    }
+
+    func onboardingController(
+        _ controller: OnboardingWizardController,
+        didUpdateCredentialsFor profile: VoiceProfile
+    ) {
+        voiceProvider?.prepare()
+        updateMenuContent()
+    }
+
+    func onboardingController(
+        _ controller: OnboardingWizardController,
+        isRecordingHotKey: Bool
+    ) {
+        setHotKeyRecording(isRecordingHotKey)
+    }
+
+    func onboardingControllerGroundTruthDidChange(
+        _ controller: OnboardingWizardController
+    ) {
+        updateMenuContent()
     }
 }
