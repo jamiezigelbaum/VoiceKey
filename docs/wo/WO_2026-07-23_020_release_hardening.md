@@ -759,3 +759,86 @@ fast replies all clean); Castor showed the failure in the same session.
 - `swift build` and `swift test` green; CoreAudio-dependent tests
   skip-and-flag if the sandbox lacks devices.
 - Skip-and-flag standing authority applies.
+
+## WO-J: Voice-channel settings overhaul
+
+Jamie's asks (2026-07-24): "profile" is confusing — the unit is a VOICE
+CHANNEL; channels should be addable/removable/duplicable; the OpenAI vs
+ChatGPT distinction is unclear in Settings; and Castor's model/voice
+should be selectable rather than grayed out.
+
+### Verified facts (do not re-investigate)
+
+1. Storage: profiles persist as JSON **Data** in UserDefaults key
+   `VoiceProfiles.v1` (VoiceProfile.swift; VoiceProfileStore.load uses
+   defaults.data(forKey:)). The KEY and the Codable shape must NOT be
+   renamed — no migration this close to launch. Rename is user-visible
+   language only.
+2. Provider reality: `openai-realtime` = OpenAI Realtime API (user's API
+   key, models like gpt-realtime-2.1, Exa web-search MCP, per-profile
+   voice); `chatgpt-web` = chatgpt.com in a webview (user's ChatGPT
+   subscription, GPT-Live when the account has it, no API key, model/voice
+   controlled by OpenAI's product). They are not redundant; the UI must
+   make that obvious at a glance.
+3. Gateway scope contract (ground-truthed in gateway source
+   method-scopes.ts, v2026.7.1): `sessions.patch` restricted to
+   label/pin/archive-class fields under operator.write; **any request
+   carrying `model` (or thinkingLevel/fastMode) requires operator.admin —
+   fail closed.** Gateway config mutation (talk voice) is likewise not
+   available to a write-scoped operator. VoiceKey's paired device presents
+   scopes [operator.talk, operator.write] (approved set; see
+   OpenClawTalkProvider connect handling). Therefore: OpenClaw
+   channel model/voice are EDITABLE only if the device's approved scopes
+   include operator.admin; otherwise they are read-only informational.
+4. The OpenClaw channel's consult session is
+   `OpenClawTalkRequestBuilder.sessionKey` = "agent:voice:voicekey"; its
+   model is pinned gateway-side (agents.list voice agent, gpt-5.6-luna).
+   The talk voice is `talk.realtime.providers.openai.voice` (currently
+   cedar). Valid Realtime voices (live-probed 2026-07-24): alloy, ash,
+   ballad, coral, echo, sage, shimmer, verse, marin, cedar.
+5. 273 tests green at WO time; Settings window code is
+   SettingsWindowController.swift (profile list + per-provider panels
+   already exist, incl. speaker-mode preference from WO-H/I).
+
+### Required behavior
+
+1. **Terminology**: every user-visible "profile" becomes "voice channel"
+   (Settings window title/labels/buttons, menu items, alerts, tooltips,
+   diagnostics VISIBLE to users). Code identifiers, UserDefaults keys, and
+   log-file wire terms stay unchanged.
+2. **Channel list UX** in Settings: Add Channel (provider picker with a
+   one-line plain-language description per provider), Duplicate Channel
+   (copies everything except the hotkey, which starts unassigned), Delete
+   Channel (confirmation; active-session channel handled via the existing
+   active-profile reconcile lifecycle).
+3. **Provider clarity**: display names and descriptions —
+   "OpenAI Realtime API — your OpenAI API key; pick model & voice; web
+   search via MCP" and "ChatGPT (web) — your ChatGPT subscription in a
+   window; GPT-Live voice when available; OpenAI controls model & voice".
+   Existing channels keep their user-given names.
+4. **OpenClaw channel panel**: replace the grayed model/voice fields with
+   an "OpenClaw runtime" info section showing the consult session key, its
+   pinned model, and the gateway talk voice, clearly labeled as managed by
+   the gateway. Populate via a lightweight gateway query over the existing
+   paired-device connection where feasible (sessions.list is available to
+   operator.read/write); otherwise show the statically-known values with a
+   "as of <date>" caption. IF AND ONLY IF the device's gateway-approved
+   scopes include operator.admin: render pickers (voice: the 10 probed
+   values; model: free-form provider/model string with the current value
+   prefilled) that apply via sessions.patch / config.patch, with explicit
+   error surfacing on denial. No scope escalation attempts; never retry a
+   denied call.
+5. Keep the WO-H speaker-mode preference control where it is, relabeled
+   consistently with the new terminology.
+
+### Acceptance
+
+- Unit tests: rename coverage on the key user-visible strings; duplicate
+  drops the hotkey and generates a fresh id; delete reconciles the active
+  channel; provider descriptions present; OpenClaw panel renders read-only
+  info without admin scope and pickers with a stubbed admin-scoped
+  connection; no UserDefaults key or Codable field renamed
+  (VoiceProfileStore round-trip test with pre-WO fixture data).
+- `swift build` and `swift test` green; CoreAudio-dependent tests
+  skip-and-flag if the sandbox lacks devices.
+- Skip-and-flag standing authority applies.
