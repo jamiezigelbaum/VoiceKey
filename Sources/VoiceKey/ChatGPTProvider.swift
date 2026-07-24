@@ -19,7 +19,7 @@ final class ChatGPTProvider: NSObject {
             self?.refreshStatusAfterNavigation()
         }
         windowController.onDiagnostic = { [weak self] message in
-            self?.log(message)
+            self?.logDiagnostic(message)
         }
     }
 
@@ -143,12 +143,12 @@ final class ChatGPTProvider: NSObject {
             guard let self else { return }
             let point = ProbeResult(result)
             if point.state == "clickable", let x = point.x, let y = point.y {
-                self.log("Native-clicking ChatGPT Voice control: \(point.label ?? "unknown")")
+                self.logDiagnostic("Native-clicking ChatGPT Voice control: \(point.label ?? "unknown")")
                 if self.windowController.nativeClickInWebView(x: x, y: y) {
                     self.observeVoiceStartedAfterSingleClick()
                     return
                 }
-                self.log("Native click failed; falling back to a DOM click.")
+                self.logDiagnostic("Native click failed; falling back to a DOM click.")
             }
             self.clickStartButtonOnceViaDOM()
         }
@@ -184,12 +184,12 @@ final class ChatGPTProvider: NSObject {
             guard let self else { return }
             let point = ProbeResult(result)
             if point.state == "clickable", let x = point.x, let y = point.y {
-                self.log("Native-clicking ChatGPT Voice stop control: \(point.label ?? "unknown")")
+                self.logDiagnostic("Native-clicking ChatGPT Voice stop control: \(point.label ?? "unknown")")
                 if self.windowController.nativeClickInWebView(x: x, y: y) {
                     self.observeVoiceStoppedAfterSingleClick()
                     return
                 }
-                self.log("Native stop click failed; falling back to a DOM click.")
+                self.logDiagnostic("Native stop click failed; falling back to a DOM click.")
             }
             self.clickStopButtonOnceViaDOM()
         }
@@ -370,6 +370,13 @@ final class ChatGPTProvider: NSObject {
             let stopLabel = dictionary["stopLabel"] as? String ?? "none"
             self.updateDebug("\(context): state \(state), stop \(stopLabel), start \(startLabel)")
         }
+    }
+
+    /// log() alone disappears into unified-log redaction; diagnostics that
+    /// matter for debugging must ALSO reach the session log.
+    private func logDiagnostic(_ message: String) {
+        log(message)
+        onDebugChange?(message)
     }
 
     private func log(_ message: String) {

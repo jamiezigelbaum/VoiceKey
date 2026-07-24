@@ -101,7 +101,16 @@ final class WebWindowController: NSObject, NSWindowDelegate, WKNavigationDelegat
 
     @discardableResult
     func nativeClickInWebView(x: Double, y: Double) -> Bool {
-        show()
+        // A native click needs the window ordered front so the CGEvent
+        // hit-tests into it — but NOT visible: the near-invisible
+        // hidden-interaction mode satisfies both the gesture requirement
+        // and the no-window UX. Only a window the user already has fully
+        // open stays that way.
+        if window.isVisible && window.alphaValue >= 1 {
+            window.orderFrontRegardless()
+        } else {
+            prepareForHiddenInteraction()
+        }
         let webPoint = Self.appKitPointForDOMPoint(
             x: x,
             y: y,
