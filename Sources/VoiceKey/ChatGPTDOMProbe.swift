@@ -64,12 +64,20 @@ enum ChatGPTDOMProbe {
         return collectDOMElements().map(describeDOMElement);
       }
 
+      // "start voice" overrides the dictation blacklist: the 2026 GPT-Live
+      // UI reuses the composer-speech-button testid (historically the
+      // dictation mic) for the REAL voice-mode button, labeled "Start
+      // Voice" ("Start dictation" is a separate control). Evidence: control
+      // inventory 2026-07-24.
+      const explicitVoiceStart = (text) => /start voice|voice mode/.test(text);
+      const excludedAsDictation = (text) => dictationOnly(text) && !explicitVoiceStart(text);
+
       function findVoiceStartElement(elements) {
         return elements.find((element) => {
           if (!visible(element)) return false;
           const text = textFor(element);
           if (!hasVoice(text)) return false;
-          if (dictationOnly(text) || stopIntent(text)) return false;
+          if (excludedAsDictation(text) || stopIntent(text)) return false;
           return hasStartIntent(text);
         }) || null;
       }
@@ -80,7 +88,7 @@ enum ChatGPTDOMProbe {
           if (!visible(description)) return false;
           const text = textFor(description);
           if (!hasVoice(text)) return false;
-          if (dictationOnly(text) || stopIntent(text)) return false;
+          if (excludedAsDictation(text) || stopIntent(text)) return false;
           return hasStartIntent(text);
         }) || null;
       }
@@ -130,6 +138,17 @@ enum ChatGPTDOMProbe {
       function isLoginRequired(elements, href, bodyText) {
         const currentURL = normalize(href);
         if (currentURL.includes('/auth/login') || currentURL.includes('/login')) return true;
+        // The logged-out 2026 shell ships a WORKING composer, so the old
+        // "login buttons and no composer" heuristic misses it. The explicit
+        // auth-shell markers are authoritative (control inventory
+        // 2026-07-24: modal-no-auth-login, login-form, login-button).
+        const hasAuthShellMarker = elements.some((element) => hasAny(textFor(element), [
+          'modal-no-auth-login',
+          'login-form',
+          'login-button',
+          'signup-button'
+        ]));
+        if (hasAuthShellMarker) return true;
         const pageText = normalize(bodyText);
         const hasLoginAction = elements.some((element) => visible(element) && loginIntent(textFor(element)));
         const hasComposer = elements.some((element) => hasAny(textFor(element), ['composer', 'send message', 'attach file']));
