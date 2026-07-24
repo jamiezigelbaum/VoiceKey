@@ -250,6 +250,27 @@ enum ChatGPTDOMProbe {
     })();
     """
 
+    /// Logs what the served page ACTUALLY contains when the probe fails —
+    /// selector fixes must come from this inventory, never from guessed
+    /// labels (the Safari-UA switch changed the served DOM, 2026-07-24).
+    static let controlInventoryScript = """
+    (() => {
+      \(coreScript)
+      const labels = VoiceKeyProbe.collectElements()
+        .filter((element) => element.visible !== false && element.width > 0 && element.height > 0)
+        .map((element) => [element.ariaLabel, element.dataTestId, element.title, (element.text || '').slice(0, 40)]
+          .filter(Boolean).join('~'))
+        .filter((label) => label.trim().length > 0)
+        .slice(0, 40);
+      return {
+        state: 'inventory',
+        title: document.title,
+        url: window.location.href,
+        labels: labels.join(' | ')
+      };
+    })();
+    """
+
     static let diagnosticScript = """
     (() => {
       \(coreScript)

@@ -251,10 +251,24 @@ final class ChatGPTProvider: NSObject {
     ) {
         guard remainingAttempts > 0 else {
             updateStatus(.needsAttention(message))
+            logControlInventory()
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
             retry(remainingAttempts - 1)
+        }
+    }
+
+    /// On terminal probe failure, record what the served page actually
+    /// contains so selector fixes come from evidence, not guesses.
+    private func logControlInventory() {
+        windowController.runJavaScript(ChatGPTDOMProbe.controlInventoryScript) { [weak self] result in
+            guard let self,
+                  let dictionary = result as? [String: Any] else { return }
+            let title = dictionary["title"] as? String ?? "?"
+            let url = dictionary["url"] as? String ?? "?"
+            let labels = dictionary["labels"] as? String ?? ""
+            self.log("ChatGPT control inventory — title: \(title) | url: \(url) | controls: \(labels)")
         }
     }
 
