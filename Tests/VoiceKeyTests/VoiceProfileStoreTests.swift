@@ -92,8 +92,9 @@ final class VoiceProfileStoreTests: XCTestCase {
         let profile = try XCTUnwrap(profiles.first)
         XCTAssertEqual(profile.name, "OpenAI")
         XCTAssertEqual(profile.providerID, .openAIRealtime)
-        XCTAssertEqual(profile.hotKey, HotKeyConfiguration.defaultVoiceToggle)
-        XCTAssertEqual(profile.hotKey?.keyCode, UInt32(kVK_F16))
+        // WO-M ruling: a fresh install explains recording a shortcut
+        // instead of silently claiming F16.
+        XCTAssertNil(profile.hotKey)
         XCTAssertEqual(profile.model, VoiceProviderID.openAIRealtime.defaultModel)
         XCTAssertEqual(profile.voice, VoiceProviderID.openAIRealtime.defaultVoice)
         XCTAssertEqual(profile.instructions, VoiceSessionConfiguration.defaultInstructions)
@@ -161,6 +162,7 @@ final class VoiceProfileStoreTests: XCTestCase {
         let profile = try XCTUnwrap(profiles.first)
         XCTAssertEqual(profile.providerID, .openAIRealtime)
         XCTAssertEqual(profile.name, VoiceProviderID.openAIRealtime.displayName)
+        // Legacy installs already have a profile set, so they retain F16.
         XCTAssertEqual(profile.hotKey, HotKeyConfiguration.defaultVoiceToggle)
         XCTAssertEqual(profile.model, VoiceProviderID.openAIRealtime.defaultModel)
         XCTAssertEqual(profile.voice, VoiceProviderID.openAIRealtime.defaultVoice)

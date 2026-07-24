@@ -84,7 +84,7 @@ enum ProviderStatus: Equatable {
     }
 
     var allowsVoiceToggleWhileReady: Bool {
-        self != .stopping
+        true
     }
 
     var detail: String? {

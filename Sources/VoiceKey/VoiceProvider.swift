@@ -349,6 +349,7 @@ struct VoiceProviderMenuState: Equatable {
 }
 
 struct VoiceSessionConfiguration: Equatable {
+    var profileID: UUID? = nil
     var providerID: VoiceProviderID
     var model: String
     var voice: String

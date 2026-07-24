@@ -14,7 +14,12 @@ enum VoiceProviderFactory {
         case .custom:
             return OpenAIRealtimeProvider(
                 configuration: configuration,
-                apiKeyProvider: { apiKeyStore.apiKey(for: .custom) }
+                apiKeyProvider: {
+                    apiKey(
+                        for: configuration,
+                        store: apiKeyStore
+                    )
+                }
             )
         case .openClaw:
             return OpenClawTalkProvider(
@@ -32,5 +37,15 @@ enum VoiceProviderFactory {
         case .deepgramVoiceAgent:
             return DeepgramVoiceAgentProvider()
         }
+    }
+
+    static func apiKey(
+        for configuration: VoiceSessionConfiguration,
+        store: APIKeyStore
+    ) -> String? {
+        store.apiKey(
+            for: configuration.providerID,
+            profileID: configuration.profileID
+        )
     }
 }

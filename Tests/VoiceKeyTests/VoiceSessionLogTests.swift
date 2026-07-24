@@ -143,4 +143,58 @@ final class VoiceSessionLogFileTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: retainedLog.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: unrelatedFile.path))
     }
+
+    func testClearTodayTruncatesOnlyTodaysSessionFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "VoiceSessionLogFileTests-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let today = Date(timeIntervalSince1970: 1_800_000_000)
+        let olderFile = directory.appendingPathComponent(
+            "session-2027-01-01.log"
+        )
+        try Data("older session".utf8).write(to: olderFile)
+        let logFile = VoiceSessionLogFile(
+            directory: directory,
+            retentionDays: 3_650
+        )
+        logFile.append(
+            .diagnostic("today"),
+            provider: .openAIRealtime,
+            timestamp: today
+        )
+
+        logFile.clearToday(timestamp: today)
+        logFile.waitForPendingWrites()
+
+        let calendar = Calendar(identifier: .gregorian)
+        let components = calendar.dateComponents(
+            in: TimeZone(identifier: "UTC")!,
+            from: today
+        )
+        let todayFile = directory.appendingPathComponent(
+            String(
+                format: "session-%04d-%02d-%02d.log",
+                components.year!,
+                components.month!,
+                components.day!
+            )
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: todayFile),
+            Data()
+        )
+        XCTAssertEqual(
+            try String(contentsOf: olderFile, encoding: .utf8),
+            "older session"
+        )
+    }
 }

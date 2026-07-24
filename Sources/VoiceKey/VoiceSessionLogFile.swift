@@ -72,6 +72,23 @@ final class VoiceSessionLogFile {
         }
     }
 
+    func clearToday(timestamp: Date = Date()) {
+        let fileURL = directory.appendingPathComponent(
+            "session-\(Self.dayFormatter.string(from: timestamp)).log"
+        )
+        queue.async {
+            guard FileManager.default.fileExists(
+                atPath: fileURL.path
+            ), let handle = try? FileHandle(
+                forWritingTo: fileURL
+            ) else {
+                return
+            }
+            defer { try? handle.close() }
+            try? handle.truncate(atOffset: 0)
+        }
+    }
+
     func waitForPendingWrites() {
         queue.sync {}
     }

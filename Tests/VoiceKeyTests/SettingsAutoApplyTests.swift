@@ -1,0 +1,825 @@
+@testable import VoiceKey
+import AppKit
+import Carbon
+import XCTest
+
+final class SettingsAutoApplyTests: XCTestCase {
+    func testEveryProfileFieldAutoAppliesAndRoundTripsAfterClose() throws {
+        let defaults = try makeDefaults()
+        defer { removeDefaults(defaults) }
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.hotKey = nil
+        let controller = makeController(
+            profiles: [profile],
+            defaults: defaults
+        )
+
+        XCTAssertTrue(controller.apply(.name("Research")))
+        XCTAssertTrue(controller.apply(.model("gpt-realtime-custom")))
+        XCTAssertTrue(controller.apply(.voice("coral")))
+        XCTAssertTrue(controller.apply(.instructions("Be exact.")))
+        XCTAssertTrue(controller.apply(
+            .endpointURL("wss://api.example.com/realtime")
+        ))
+        XCTAssertTrue(controller.apply(.webSearchEnabled(true)))
+        XCTAssertTrue(controller.apply(
+            .speakerModePreference(.alwaysOn)
+        ))
+        controller.windowWillClose(
+            Notification(name: NSWindow.willCloseNotification)
+        )
+
+        let reopened = try XCTUnwrap(
+            VoiceProfileStore.load(defaults: defaults).first
+        )
+        XCTAssertEqual(reopened.name, "Research")
+        XCTAssertEqual(reopened.model, "gpt-realtime-custom")
+        XCTAssertEqual(reopened.voice, "coral")
+        XCTAssertEqual(reopened.instructions, "Be exact.")
+        XCTAssertEqual(
+            reopened.endpointURL,
+            "wss://api.example.com/realtime"
+        )
+        XCTAssertTrue(reopened.webSearchEnabled)
+        XCTAssertEqual(reopened.speakerModePreference, .alwaysOn)
+    }
+
+    func testProviderPopupChangeAutoAppliesAndRoundTrips() throws {
+        let defaults = try makeDefaults()
+        defer { removeDefaults(defaults) }
+        let profile = VoiceProfile.defaultOpenAI()
+        let controller = makeController(
+            profiles: [profile],
+            defaults: defaults
+        )
+
+        XCTAssertTrue(controller.apply(.provider(.custom)))
+        XCTAssertTrue(controller.apply(
+            .endpointURL("wss://custom.example.com/realtime")
+        ))
+        controller.windowWillClose(
+            Notification(name: NSWindow.willCloseNotification)
+        )
+
+        let reopened = try XCTUnwrap(
+            VoiceProfileStore.load(defaults: defaults).first
+        )
+        XCTAssertEqual(reopened.providerID, .custom)
+        XCTAssertEqual(
+            reopened.endpointURL,
+            "wss://custom.example.com/realtime"
+        )
+    }
+
+    func testAppKitControlEventsAutoApplyBeforeWindowClose() throws {
+        let defaults = try makeDefaults()
+        defer { removeDefaults(defaults) }
+        var openAI = VoiceProfile.defaultOpenAI(name: "OpenAI")
+        openAI.hotKey = .defaultVoiceToggle
+        var providerTarget = VoiceProfile.defaultOpenAI(
+            name: "Provider target"
+        )
+        providerTarget.hotKey = nil
+        let credentials = InMemoryCredentialStore()
+        let controller = makeController(
+            profiles: [openAI, providerTarget],
+            defaults: defaults,
+            credentials: credentials
+        )
+        let views = descendantViews(in: controller.window?.contentView)
+        let name = try XCTUnwrap(views.compactMap {
+            $0 as? NSTextField
+        }.first(where: {
+            $0.placeholderString ==
+                VoiceChannelUIStrings.channelNamePlaceholder
+        }))
+        let model = try XCTUnwrap(views.compactMap {
+            $0 as? NSTextField
+        }.first(where: {
+            $0.placeholderString ==
+                VoiceProviderID.openAIRealtime.defaultModel
+        }))
+        let voice = try XCTUnwrap(views.compactMap {
+            $0 as? NSComboBox
+        }.first)
+        let endpoint = try XCTUnwrap(views.compactMap {
+            $0 as? NSTextField
+        }.first(where: {
+            $0.placeholderString == "wss://localhost:8080"
+        }))
+        let key = try XCTUnwrap(views.compactMap {
+            $0 as? NSSecureTextField
+        }.first)
+        let instructions = try XCTUnwrap(views.compactMap {
+            $0 as? NSTextView
+        }.first(where: { $0.isRichText == false }))
+        let webSearch = try XCTUnwrap(views.compactMap {
+            $0 as? NSButton
+        }.first(where: {
+            $0.title == "Enable OpenAI web search (hosted tool)"
+        }))
+        let speaker = try XCTUnwrap(views.compactMap {
+            $0 as? NSPopUpButton
+        }.first(where: { popup in
+            popup.itemArray.contains(where: {
+                ($0.representedObject as? String) ==
+                    OpenAISpeakerModePreference.alwaysOn.rawValue
+            })
+        }))
+
+        name.stringValue = "Event-driven"
+        controller.controlTextDidEndEditing(
+            Notification(name: NSControl.textDidEndEditingNotification,
+                         object: name)
+        )
+        model.stringValue = "event-model"
+        controller.controlTextDidEndEditing(
+            Notification(name: NSControl.textDidEndEditingNotification,
+                         object: model)
+        )
+        voice.stringValue = "echo"
+        controller.comboBoxSelectionDidChange(
+            Notification(name: NSComboBox.selectionDidChangeNotification,
+                         object: voice)
+        )
+        endpoint.stringValue = "wss://events.example.com/realtime"
+        controller.controlTextDidEndEditing(
+            Notification(name: NSControl.textDidEndEditingNotification,
+                         object: endpoint)
+        )
+        instructions.string = "Commit from the text view."
+        controller.textDidEndEditing(
+            Notification(name: NSText.didEndEditingNotification,
+                         object: instructions)
+        )
+        webSearch.state = .on
+        sendAction(for: webSearch)
+        speaker.selectItem(withTitle: "Always on")
+        sendAction(for: speaker)
+        key.stringValue = "openai-secret"
+        controller.controlTextDidEndEditing(
+            Notification(name: NSControl.textDidEndEditingNotification,
+                         object: key)
+        )
+
+        let profilePopup = try XCTUnwrap(views.compactMap {
+            $0 as? NSPopUpButton
+        }.first(where: { popup in
+            popup.itemArray.contains(where: {
+                ($0.representedObject as? String) ==
+                    providerTarget.id.uuidString
+            })
+        }))
+        profilePopup.selectItem(withTitle: "Provider target")
+        sendAction(for: profilePopup)
+        let providerPopup = try XCTUnwrap(views.compactMap {
+            $0 as? NSPopUpButton
+        }.first(where: { popup in
+            popup.itemArray.contains(where: {
+                ($0.representedObject as? String) ==
+                    VoiceProviderID.custom.rawValue
+            })
+        }))
+        let customIndex = try XCTUnwrap(
+            providerPopup.itemArray.firstIndex(where: {
+                ($0.representedObject as? String) ==
+                    VoiceProviderID.custom.rawValue
+            })
+        )
+        providerPopup.selectItem(at: customIndex)
+        sendAction(for: providerPopup)
+        controller.windowWillClose(
+            Notification(name: NSWindow.willCloseNotification)
+        )
+
+        let reopened = VoiceProfileStore.load(defaults: defaults)
+        let reopenedOpenAI = try XCTUnwrap(reopened.first(where: {
+            $0.id == openAI.id
+        }))
+        XCTAssertEqual(reopenedOpenAI.name, "Event-driven")
+        XCTAssertEqual(reopenedOpenAI.model, "event-model")
+        XCTAssertEqual(reopenedOpenAI.voice, "echo")
+        XCTAssertEqual(
+            reopenedOpenAI.endpointURL,
+            "wss://events.example.com/realtime"
+        )
+        XCTAssertEqual(
+            reopenedOpenAI.instructions,
+            "Commit from the text view."
+        )
+        XCTAssertTrue(reopenedOpenAI.webSearchEnabled)
+        XCTAssertEqual(
+            reopenedOpenAI.speakerModePreference,
+            .alwaysOn
+        )
+        XCTAssertEqual(
+            credentials.apiKey(for: reopenedOpenAI),
+            "openai-secret"
+        )
+        XCTAssertEqual(
+            reopened.first(where: {
+                $0.id == providerTarget.id
+            })?.providerID,
+            .custom
+        )
+    }
+
+    func testFocusedTextFieldCommitsLatestFieldEditorValueOnClose() throws {
+        let defaults = try makeDefaults()
+        defer { removeDefaults(defaults) }
+        let profile = VoiceProfile.defaultOpenAI()
+        let controller = makeController(
+            profiles: [profile],
+            defaults: defaults
+        )
+        controller.showWindow(nil)
+        let nameField = try XCTUnwrap(
+            findTextField(
+                in: controller.window?.contentView,
+                placeholder: VoiceChannelUIStrings.channelNamePlaceholder
+            )
+        )
+        nameField.selectText(nil)
+        let editor = try XCTUnwrap(nameField.currentEditor())
+        editor.string = "Focused close value"
+
+        controller.windowWillClose(
+            Notification(name: NSWindow.willCloseNotification)
+        )
+
+        XCTAssertEqual(
+            VoiceProfileStore.load(defaults: defaults).first?.name,
+            "Focused close value"
+        )
+    }
+
+    func testInvalidEndpointStaysInlineAndDoesNotOverwriteCommittedValue()
+        throws {
+        let defaults = try makeDefaults()
+        defer { removeDefaults(defaults) }
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.providerID = .custom
+        profile.endpointURL = "wss://working.example.com/realtime"
+        VoiceProfileStore.save([profile], defaults: defaults)
+        let controller = makeController(
+            profiles: [profile],
+            defaults: defaults
+        )
+
+        XCTAssertFalse(controller.apply(.endpointURL("not a URL")))
+
+        XCTAssertEqual(
+            VoiceProfileStore.load(defaults: defaults).first?.endpointURL,
+            "wss://working.example.com/realtime"
+        )
+        XCTAssertTrue(
+            descendantViews(in: controller.window?.contentView)
+                .compactMap { $0 as? NSTextField }
+                .contains(where: {
+                    $0.stringValue ==
+                        "Use ws://, wss://, http://, or https:// with a host."
+                        && $0.isHidden == false
+                })
+        )
+    }
+
+    func testAddDuplicateDeleteEachAutoApply() throws {
+        let defaults = try makeDefaults()
+        defer { removeDefaults(defaults) }
+        let original = VoiceProfile.defaultOpenAI(name: "Original")
+        let controller = makeController(
+            profiles: [original],
+            defaults: defaults
+        )
+        let added = VoiceChannelOperations.makeChannel(
+            provider: .openClaw,
+            existingNames: [original.name]
+        )
+
+        XCTAssertTrue(controller.commitNewProfile(added))
+        let duplicate = try XCTUnwrap(
+            controller.commitDuplicateProfile(added.id)
+        )
+        XCTAssertTrue(controller.commitDeleteProfile(added.id))
+
+        let reopened = VoiceProfileStore.load(defaults: defaults)
+        XCTAssertEqual(
+            Set(reopened.map(\.id)),
+            Set([original.id, duplicate.id])
+        )
+        XCTAssertFalse(reopened.contains(where: { $0.id == added.id }))
+    }
+
+    func testHotKeyCommitUsesSortedProfileArrayForSaveAndDelegate() {
+        var f18 = VoiceProfile.defaultOpenAI(name: "F18")
+        f18.hotKey = makeFunctionHotKey(
+            keyCode: UInt32(kVK_F18),
+            number: 18
+        )
+        var unassigned = VoiceProfile.defaultOpenAI(name: "Unassigned")
+        unassigned.hotKey = nil
+        let recorder = SettingsCommitRecorder()
+        let controller = SettingsWindowController(
+            profiles: [unassigned, f18],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { recorder.savedProfiles.append($0) }
+        )
+        let delegate = AutoApplySettingsDelegate()
+        controller.delegate = delegate
+
+        controller.handleRecordedHotKey(
+            .defaultVoiceToggle,
+            forProfileID: unassigned.id
+        )
+
+        let saved = recorder.savedProfiles.last
+        let delivered = delegate.profileUpdates.last
+        XCTAssertEqual(saved?.map(\.id), [unassigned.id, f18.id])
+        XCTAssertEqual(delivered, saved)
+        XCTAssertEqual(controller.profiles, saved)
+    }
+
+    func testAPIKeyEntryAndRemovalTargetCommittedProviderProfile() {
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.hotKey = nil
+        let credentials = InMemoryCredentialStore()
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: credentials,
+            saveProfiles: { _ in }
+        )
+
+        XCTAssertTrue(controller.apply(.provider(.custom)))
+        XCTAssertTrue(controller.commitAPIKey("custom-secret", for: profile.id))
+        XCTAssertEqual(credentials.apiKeyWrites.last?.provider, .custom)
+        XCTAssertEqual(credentials.apiKeyWrites.last?.profileID, profile.id)
+        XCTAssertTrue(controller.commitRemoveAPIKey(for: profile.id))
+        XCTAssertNil(credentials.apiKey(for: controller.profiles[0]))
+    }
+
+    func testMCPAddEditRemoveEachAutoApplyAndRoundTrip() throws {
+        let defaults = try makeDefaults()
+        defer { removeDefaults(defaults) }
+        let credentials = InMemoryCredentialStore()
+        let profile = VoiceProfile.defaultOpenAI()
+        let controller = makeController(
+            profiles: [profile],
+            defaults: defaults,
+            credentials: credentials
+        )
+        let serverID = UUID()
+
+        XCTAssertTrue(controller.commitMCPServer(
+            MCPServerConfiguration(
+                id: serverID,
+                label: "calendar",
+                urlString: "https://mcp.example.com"
+            ),
+            authorization: "first-token",
+            profileID: profile.id
+        ))
+        XCTAssertEqual(
+            VoiceProfileStore.load(defaults: defaults)
+                .first?.mcpServers.first?.label,
+            "calendar"
+        )
+        XCTAssertEqual(
+            credentials.authorizationToken(forMCPServer: serverID),
+            "first-token"
+        )
+
+        XCTAssertTrue(controller.commitMCPServer(
+            MCPServerConfiguration(
+                id: serverID,
+                label: "calendar edited",
+                urlString: "https://mcp.example.com/v2",
+                allowedTools: ["search"]
+            ),
+            authorization: "second-token",
+            profileID: profile.id
+        ))
+        XCTAssertEqual(
+            VoiceProfileStore.load(defaults: defaults)
+                .first?.mcpServers.first?.label,
+            "calendar edited"
+        )
+        XCTAssertEqual(
+            credentials.authorizationToken(forMCPServer: serverID),
+            "second-token"
+        )
+
+        XCTAssertTrue(controller.commitRemoveMCPServer(
+            serverID,
+            profileID: profile.id
+        ))
+        XCTAssertEqual(
+            VoiceProfileStore.load(defaults: defaults).first?.mcpServers,
+            []
+        )
+        XCTAssertNil(
+            credentials.authorizationToken(forMCPServer: serverID)
+        )
+    }
+
+    func testMCPBatchWritesProfilesBeforeTokens() {
+        let events = SettingsCommitRecorder()
+        let credentials = InMemoryCredentialStore()
+        credentials.events = events
+        let profile = VoiceProfile.defaultOpenAI()
+        var next = profile
+        let serverID = UUID()
+        next.mcpServers = [
+            MCPServerConfiguration(
+                id: serverID,
+                label: "tools",
+                urlString: "https://mcp.example.com"
+            )
+        ]
+
+        XCTAssertNoThrow(try SettingsAutoApplyPersistence.commit(
+            previousProfiles: [profile],
+            nextProfiles: [next],
+            authorizationMutations: [
+                MCPAuthorizationMutation(
+                    serverID: serverID,
+                    token: "token"
+                )
+            ],
+            saveProfiles: {
+                events.savedProfiles.append($0)
+                events.events.append("profiles")
+            },
+            credentialStore: credentials
+        ))
+        XCTAssertEqual(events.events, ["profiles", "token.set"])
+    }
+
+    func testMCPTokenFailureRollsBackProfileAndTokenBatch() {
+        let events = SettingsCommitRecorder()
+        let credentials = InMemoryCredentialStore()
+        credentials.events = events
+        let profile = VoiceProfile.defaultOpenAI()
+        var next = profile
+        let firstServerID = UUID()
+        let failingServerID = UUID()
+        next.mcpServers = [
+            MCPServerConfiguration(
+                id: firstServerID,
+                label: "first",
+                urlString: "https://first.example.com"
+            ),
+            MCPServerConfiguration(
+                id: failingServerID,
+                label: "second",
+                urlString: "https://second.example.com"
+            )
+        ]
+        credentials.tokens[firstServerID] = "old-first"
+        credentials.tokens[failingServerID] = "old-second"
+        credentials.failingToken = "new-second"
+
+        XCTAssertThrowsError(try SettingsAutoApplyPersistence.commit(
+            previousProfiles: [profile],
+            nextProfiles: [next],
+            authorizationMutations: [
+                MCPAuthorizationMutation(
+                    serverID: firstServerID,
+                    token: "new-first"
+                ),
+                MCPAuthorizationMutation(
+                    serverID: failingServerID,
+                    token: "new-second"
+                )
+            ],
+            saveProfiles: {
+                events.savedProfiles.append($0)
+                events.events.append("profiles")
+            },
+            credentialStore: credentials
+        ))
+        XCTAssertEqual(events.savedProfiles, [[next], [profile]])
+        XCTAssertEqual(
+            credentials.authorizationToken(
+                forMCPServer: firstServerID
+            ),
+            "old-first"
+        )
+        XCTAssertEqual(
+            credentials.authorizationToken(
+                forMCPServer: failingServerID
+            ),
+            "old-second"
+        )
+    }
+
+    func testInvalidMCPFieldsDoNotCommit() {
+        let profile = VoiceProfile.defaultOpenAI()
+        let recorder = SettingsCommitRecorder()
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { recorder.savedProfiles.append($0) }
+        )
+
+        XCTAssertFalse(controller.commitMCPServer(
+            MCPServerConfiguration(
+                label: "",
+                urlString: "https://mcp.example.com"
+            ),
+            authorization: nil,
+            profileID: profile.id
+        ))
+        XCTAssertFalse(controller.commitMCPServer(
+            MCPServerConfiguration(
+                label: "tools",
+                urlString: "not-a-url"
+            ),
+            authorization: nil,
+            profileID: profile.id
+        ))
+        XCTAssertTrue(recorder.savedProfiles.isEmpty)
+        XCTAssertEqual(controller.profiles.first?.mcpServers, [])
+    }
+
+    func testOpenClawLoadAndApplyUseSameCommittedEndpoint() throws {
+        let defaults = try makeDefaults()
+        defer { removeDefaults(defaults) }
+        var profile = VoiceProfile(
+            name: "OpenClaw",
+            providerID: .openClaw,
+            model: "",
+            voice: "",
+            endpointURL: "ws://old.example.com"
+        )
+        let firstService = EndpointRecordingRuntimeService()
+        let first = SettingsWindowController(
+            profiles: [profile],
+            openClawRuntimeService: firstService,
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { VoiceProfileStore.save($0, defaults: defaults) }
+        )
+        XCTAssertTrue(first.apply(
+            .endpointURL("ws://new.example.com")
+        ))
+
+        profile = try XCTUnwrap(
+            VoiceProfileStore.load(defaults: defaults).first
+        )
+        let reopenedService = EndpointRecordingRuntimeService()
+        let reopened = SettingsWindowController(
+            profiles: [profile],
+            openClawRuntimeService: reopenedService,
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { VoiceProfileStore.save($0, defaults: defaults) }
+        )
+        reopened.applyOpenClawRuntimeSettings()
+
+        XCTAssertEqual(
+            reopenedService.loadEndpoints,
+            ["ws://new.example.com"]
+        )
+        XCTAssertEqual(
+            reopenedService.applyEndpoints,
+            ["ws://new.example.com"]
+        )
+    }
+
+    func testWindowDefaultsTallEnoughAndHasNoSaveButton() {
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.mcpServers = [
+            MCPServerConfiguration(
+                label: "tools",
+                urlString: "https://mcp.example.com"
+            )
+        ]
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+        let sizing = controller.windowSizingSnapshot
+
+        XCTAssertGreaterThanOrEqual(
+            sizing.contentHeight,
+            sizing.formHeight
+        )
+        XCTAssertFalse(
+            descendantButtons(in: controller.window?.contentView)
+                .contains(where: { $0.title == "Save" })
+        )
+        XCTAssertTrue(
+            controller.window?.styleMask.contains(.resizable) == true
+        )
+    }
+
+    private func makeController(
+        profiles: [VoiceProfile],
+        defaults: UserDefaults,
+        credentials: InMemoryCredentialStore =
+            InMemoryCredentialStore()
+    ) -> SettingsWindowController {
+        SettingsWindowController(
+            profiles: profiles,
+            credentialStore: credentials,
+            saveProfiles: {
+                VoiceProfileStore.save($0, defaults: defaults)
+            }
+        )
+    }
+
+    private func makeDefaults() throws -> UserDefaults {
+        let name = "VoiceKeyTests.\(UUID().uuidString)"
+        return try XCTUnwrap(UserDefaults(suiteName: name))
+    }
+
+    private func removeDefaults(_ defaults: UserDefaults) {
+        for key in defaults.dictionaryRepresentation().keys {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    private func findTextField(
+        in view: NSView?,
+        placeholder: String
+    ) -> NSTextField? {
+        guard let view else { return nil }
+        if let field = view as? NSTextField,
+           field.placeholderString == placeholder {
+            return field
+        }
+        for subview in view.subviews {
+            if let match = findTextField(
+                in: subview,
+                placeholder: placeholder
+            ) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    private func descendantButtons(in view: NSView?) -> [NSButton] {
+        guard let view else { return [] }
+        var buttons = view.subviews.flatMap(descendantButtons(in:))
+        if let button = view as? NSButton {
+            buttons.insert(button, at: 0)
+        }
+        return buttons
+    }
+
+    private func descendantViews(in view: NSView?) -> [NSView] {
+        guard let view else { return [] }
+        return [view] + view.subviews.flatMap(descendantViews(in:))
+    }
+
+    private func sendAction(for control: NSControl) {
+        guard let action = control.action else {
+            XCTFail("Expected control action")
+            return
+        }
+        XCTAssertTrue(NSApplication.shared.sendAction(
+            action,
+            to: control.target,
+            from: control
+        ))
+    }
+
+    private func makeFunctionHotKey(
+        keyCode: UInt32,
+        number: Int
+    ) -> HotKeyConfiguration {
+        HotKeyConfiguration(
+            keyCode: keyCode,
+            carbonModifiers: 0,
+            menuKeyEquivalent: "",
+            menuModifierMask: [],
+            displayName: "F\(number)",
+            mainKeyDisplayName: "F\(number)"
+        )
+    }
+}
+
+private final class AutoApplySettingsDelegate:
+    SettingsWindowControllerDelegate {
+    var profileUpdates: [[VoiceProfile]] = []
+
+    func settingsController(
+        _ controller: SettingsWindowController,
+        didUpdateProfiles profiles: [VoiceProfile]
+    ) {
+        profileUpdates.append(profiles)
+    }
+
+    func settingsController(
+        _ controller: SettingsWindowController,
+        didRecordHotKey hotKey: HotKeyConfiguration,
+        for profile: VoiceProfile
+    ) -> Bool {
+        true
+    }
+
+    func settingsControllerDidUpdateCredentials(
+        _ controller: SettingsWindowController
+    ) {}
+
+    func settingsController(
+        _ controller: SettingsWindowController,
+        isRecordingHotKey: Bool
+    ) {}
+}
+
+private final class SettingsCommitRecorder {
+    var savedProfiles: [[VoiceProfile]] = []
+    var events: [String] = []
+}
+
+private enum InMemoryCredentialError: Error {
+    case rejected
+}
+
+private final class InMemoryCredentialStore: VoiceCredentialStoring {
+    struct APIKeyWrite: Equatable {
+        var provider: VoiceProviderID
+        var profileID: UUID
+    }
+
+    var apiKeys: [UUID: String] = [:]
+    var tokens: [UUID: String] = [:]
+    var apiKeyWrites: [APIKeyWrite] = []
+    var failingToken: String?
+    weak var events: SettingsCommitRecorder?
+
+    func hasAPIKey(for profile: VoiceProfile) -> Bool {
+        apiKey(for: profile) != nil
+    }
+
+    func apiKey(for profile: VoiceProfile) -> String? {
+        apiKeys[profile.id]
+    }
+
+    func setAPIKey(_ apiKey: String, for profile: VoiceProfile) throws {
+        apiKeys[profile.id] = apiKey
+        apiKeyWrites.append(APIKeyWrite(
+            provider: profile.providerID,
+            profileID: profile.id
+        ))
+    }
+
+    func deleteAPIKey(for profile: VoiceProfile) throws {
+        apiKeys[profile.id] = nil
+    }
+
+    func authorizationToken(forMCPServer id: UUID) -> String? {
+        tokens[id]
+    }
+
+    func setAuthorizationToken(
+        _ token: String,
+        forMCPServer id: UUID
+    ) throws {
+        events?.events.append("token.set")
+        if token == failingToken {
+            throw InMemoryCredentialError.rejected
+        }
+        tokens[id] = token
+    }
+
+    func deleteAuthorizationToken(forMCPServer id: UUID) throws {
+        events?.events.append("token.delete")
+        tokens[id] = nil
+    }
+}
+
+private final class EndpointRecordingRuntimeService:
+    OpenClawRuntimeSettingsServing {
+    let approvedScopes: Set<String> = ["operator.admin"]
+    var loadEndpoints: [String] = []
+    var applyEndpoints: [String] = []
+
+    func load(
+        endpointURL: String,
+        completion: @escaping (
+            Result<OpenClawRuntimeSettings, Error>
+        ) -> Void
+    ) {
+        loadEndpoints.append(endpointURL)
+        completion(.success(.staticFallback))
+    }
+
+    func apply(
+        model: String,
+        voice: String,
+        endpointURL: String,
+        completion: @escaping (
+            Result<OpenClawRuntimeSettings, Error>
+        ) -> Void
+    ) {
+        applyEndpoints.append(endpointURL)
+        completion(.success(OpenClawRuntimeSettings(
+            sessionKey: OpenClawTalkRequestBuilder.sessionKey,
+            model: model,
+            voice: voice,
+            source: .gateway
+        )))
+    }
+}

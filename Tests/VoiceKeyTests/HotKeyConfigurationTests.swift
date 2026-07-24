@@ -155,9 +155,9 @@ final class MenuBarIconStateTests: XCTestCase {
         XCTAssertTrue(ProviderStatus.speaking.allowsVoiceToggleWhileReady)
     }
 
-    func testVoiceToggleTitleDisablesWhileStopping() {
+    func testVoiceToggleRemainsEnabledWhileStopping() {
         XCTAssertEqual(ProviderStatus.stopping.voiceToggleTitle, "Stopping VoiceKey Voice")
-        XCTAssertFalse(ProviderStatus.stopping.allowsVoiceToggleWhileReady)
+        XCTAssertTrue(ProviderStatus.stopping.allowsVoiceToggleWhileReady)
     }
 }
 
@@ -311,7 +311,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         XCTAssertTrue(state.isToggleEnabled)
     }
 
-    func testProviderMenuStateForStoppingAPIProviderDisablesToggle() {
+    func testProviderMenuStateForStoppingAPIProviderKeepsToggleEnabled() {
         let state = VoiceProviderMenuState(
             provider: .openAIRealtime,
             readiness: .ready,
@@ -322,7 +322,7 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         )
 
         XCTAssertEqual(state.toggleTitle, "Stopping VoiceKey Voice")
-        XCTAssertFalse(state.isToggleEnabled)
+        XCTAssertTrue(state.isToggleEnabled)
     }
 
     func testProviderMenuStateForProviderSignIn() {
