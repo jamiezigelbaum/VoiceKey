@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import AVFoundation
 
 enum HotKeyRecordingLifecycle {
@@ -58,14 +59,28 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private var lastTrigger: [UUID: TimeInterval] = [:]
     private var activeProfileID: UUID?
     private var currentStatus: ProviderStatus = .loading
+    private var appOwnedAttention: AppOwnedAttentionState?
+    private var firstRunSettingsLifecycle: FirstRunSettingsLifecycle?
     private var settingsWindowController: SettingsWindowController?
     private var sessionLogWindowController: SessionLogWindowController?
     private var voiceProvider: RealtimeVoiceProvider?
+    private var providerGeneration = UUID()
     private var sessionLog = VoiceSessionLog()
     private let sessionLogFile = VoiceSessionLogFile()
     private var localHotKeyMonitor: Any?
     private var globalHotKeyMonitor: Any?
     private let iconAnimator = MenuBarIconAnimator()
+    private let stopWatchdog = StopWatchdog()
+    private var isAccessibilityTrusted: () -> Bool = {
+        AXIsProcessTrusted()
+    }
+    private var requestAccessibilityTrust: () -> Void = {
+        let options = [
+            kAXTrustedCheckOptionPrompt.takeUnretainedValue()
+                as String: true
+        ] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+    }
     private let statusMenuItem = NSMenuItem(title: "Status: Loading", action: nil, keyEquivalent: "")
     private var profileMenuItems: [UUID: NSMenuItem] = [:]
     private let checkProviderConnectionMenuItem = NSMenuItem(
@@ -98,8 +113,12 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         configureApplicationMenu()
         configureMenuBar()
         registerAllHotKeys()
-        configureProvider()
-        voiceProvider?.prepare()
+        if selectedProfile != nil {
+            configureProvider()
+            voiceProvider?.prepare()
+        } else {
+            updateStatus(.ready)
+        }
         openSettingsOnFirstRunIfNeeded()
     }
 
@@ -117,6 +136,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
     private func sessionConfiguration(for profile: VoiceProfile) -> VoiceSessionConfiguration {
         VoiceSessionConfiguration(
+            profileID: profile.id,
             providerID: profile.providerID,
             model: profile.model,
             voice: profile.voice,
@@ -288,9 +308,16 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
                 self?.triggerHotKey(for: profile.id)
             }
         ) else {
-            recordProviderEvent(.diagnostic(
-                "Hotkey \(configuration.displayName) for voice channel \"\(profile.name)\" could not be registered with Carbon; event monitor fallback active."
-            ))
+            let diagnostic = HotKeyFallbackPolicy.diagnostic(
+                hotKeyName: configuration.displayName,
+                profileName: profile.name,
+                isAccessibilityTrusted: isAccessibilityTrusted(),
+                requestAccessibilityTrust: requestAccessibilityTrust
+            )
+            recordProviderEvent(
+                .diagnostic(diagnostic),
+                provider: profile.providerID
+            )
             return false
         }
 
@@ -365,6 +392,12 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private func activate(profileID: UUID) {
         guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
 
+        if activeProfileID == profile.id,
+           currentStatus.isLiveSessionStatus {
+            voiceProvider?.toggleVoice()
+            return
+        }
+
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .denied, .restricted:
             presentMicrophoneAccessAlert()
@@ -375,10 +408,11 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             break
         }
 
-        guard isProfileReadyForVoice(profile) else { return }
-
-        if activeProfileID == profile.id {
-            voiceProvider?.toggleVoice()
+        if let failure = ProfileActivationPolicy.failure(
+            for: profile,
+            hasAPIKey: APIKeyStore.shared.hasAPIKey(for: profile)
+        ) {
+            handleActivationFailure(failure, for: profile)
             return
         }
 
@@ -393,29 +427,50 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         voiceProvider?.toggleVoice()
     }
 
-    private func isProfileReadyForVoice(_ profile: VoiceProfile) -> Bool {
-        if profile.providerID == .custom {
-            guard profile.endpointURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
-                updateStatus(.needsAttention("Set the endpoint URL in Settings"))
-                return false
-            }
-            return true
-        }
-
-        // OpenClaw resolves its gateway token and endpoint candidates at connect
-        // time and surfaces its own needsAttention statuses, so no Settings gate.
-        if profile.providerID == .openClaw {
-            return true
-        }
-
-        let readiness = profile.providerID.readiness(
-            hasAPIKey: APIKeyStore.shared.hasAPIKey(for: profile.providerID)
+    private func handleActivationFailure(
+        _ failure: ProfileActivationFailure,
+        for profile: VoiceProfile
+    ) {
+        let message = failure.settingsMessage
+        recordProviderEvent(
+            .diagnostic(
+                "Voice channel \"\(profile.name)\" could not start: \(message)"
+            ),
+            provider: profile.providerID
         )
-        guard readiness.allowsVoiceToggle else {
-            updateStatus(.needsAttention(readiness.settingsMessage))
-            return false
+        let preservesStatus =
+            ProfileActivationPolicy.preservesGlobalStatus(
+                requestedProfileID: profile.id,
+                activeProfileID: activeProfileID,
+                currentStatus: currentStatus
+            )
+        if preservesStatus == false {
+            appOwnedAttention = AppOwnedAttentionState(
+                profileID: profile.id,
+                failure: failure
+            )
+            updateStatus(
+                .needsAttention(message),
+                clearsAppOwnedAttention: false
+            )
         }
-        return true
+        presentActivationFailureAlert(
+            channelName: profile.name,
+            message: message
+        )
+        presentSettings(focusedOn: profile.id, failure: failure)
+    }
+
+    private func presentActivationFailureAlert(
+        channelName: String,
+        message: String
+    ) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "“\(channelName)” Isn’t Ready"
+        alert.informativeText = message
+        alert.addButton(withTitle: "Open Settings")
+        alert.runModal()
     }
 
     private func presentMicrophoneAccessAlert() {
@@ -434,18 +489,34 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private func configureProvider() {
         // Never replace a provider without stopping it first: an abandoned provider
         // keeps its audio engine (microphone + playback) and WebSocket alive.
+        providerGeneration = UUID()
+        stopWatchdog.cancel()
         voiceProvider?.stopVoice()
 
         let provider = VoiceProviderFactory.makeProvider(for: providerConfiguration)
-        provider.onEvent = { [weak self] event in
-            self?.recordProviderEvent(event)
+        let wiredGeneration = providerGeneration
+        provider.onEvent = ProviderEventAttribution.handler(
+            providerID: provider.id
+        ) { [weak self] event, providerID in
+            guard let self else { return }
+            self.recordProviderEvent(event, provider: providerID)
             switch event {
             case let .status(status):
-                self?.updateStatus(status)
+                guard ProviderStatusAdoptionPolicy.shouldAdopt(
+                    wiredGeneration: wiredGeneration,
+                    currentGeneration: self.providerGeneration
+                ) else {
+                    return
+                }
+                self.updateStatus(
+                    status,
+                    sourceProviderID: providerID,
+                    sourceProviderGeneration: wiredGeneration
+                )
             case let .diagnostic(message):
-                self?.statusMenuItem.toolTip = message
+                self.statusMenuItem.toolTip = message
             case let .transcript(delta):
-                self?.statusMenuItem.toolTip = delta
+                self.statusMenuItem.toolTip = delta
             }
         }
 
@@ -454,23 +525,30 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateProviderConfiguration(_ configuration: VoiceSessionConfiguration) {
+        let previousConfiguration = providerConfiguration
         providerConfiguration = configuration
 
-        if voiceProvider?.id == configuration.providerID {
-            voiceProvider?.update(configuration: configuration)
-        } else {
+        if ProviderReplacementPolicy.requiresReplacement(
+            current: previousConfiguration,
+            next: configuration,
+            currentProviderID: voiceProvider?.id
+        ) {
             // configureProvider() stops the outgoing provider before replacing it.
             configureProvider()
             voiceProvider?.prepare()
+        } else {
+            voiceProvider?.update(configuration: configuration)
         }
         updateMenuContent()
     }
 
     @objc private func showProvider() {
+        guard profiles.isEmpty == false else { return }
         voiceProvider?.showProviderInterface()
     }
 
     @objc private func reloadProvider() {
+        guard profiles.isEmpty == false else { return }
         voiceProvider?.reloadProviderInterface()
     }
 
@@ -484,7 +562,9 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let provider = profile.providerID
-        let readiness = provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider))
+        let readiness = provider.readiness(
+            hasAPIKey: APIKeyStore.shared.hasAPIKey(for: profile)
+        )
         guard readiness == .ready else {
             updateStatus(.needsAttention(readiness.settingsMessage))
             return
@@ -512,6 +592,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func clearSessionLog() {
+        sessionLogFile.clearToday()
         sessionLog.clear()
         sessionLogWindowController?.update(text: sessionLog.displayText)
         updateMenuContent()
@@ -531,28 +612,72 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSettings() {
+        presentSettings(focusedOn: nil, failure: nil)
+    }
+
+    private func presentSettings(
+        focusedOn profileID: UUID?,
+        failure: ProfileActivationFailure?
+    ) {
         registerAllHotKeys()
         let controller = settingsWindowController ?? SettingsWindowController(profiles: profiles)
         controller.delegate = self
         controller.profiles = profiles
         settingsWindowController = controller
-        controller.showAndFocus()
+        if let profileID, let failure {
+            controller.showActivationFailure(
+                for: profileID,
+                failure: failure
+            )
+        } else {
+            controller.showAndFocus()
+        }
     }
 
     private func openSettingsOnFirstRunIfNeeded() {
         guard VoiceProfileStore.isFreshInstall(),
               UserDefaults.standard.bool(forKey: Self.hasOpenedSettingsKey) == false else { return }
-        UserDefaults.standard.set(true, forKey: Self.hasOpenedSettingsKey)
+        firstRunSettingsLifecycle = FirstRunSettingsLifecycle()
         DispatchQueue.main.async { [weak self] in
-            self?.showSettings()
+            guard let self else { return }
+            self.registerAllHotKeys()
+            let controller = self.settingsWindowController
+                ?? SettingsWindowController(profiles: self.profiles)
+            controller.delegate = self
+            controller.profiles = self.profiles
+            self.settingsWindowController = controller
+            controller.showFirstRunHotKeyPrompt()
+            let hasHotKey = self.profiles.contains(where: {
+                $0.hotKey != nil
+            })
+            if self.firstRunSettingsLifecycle?
+                .didShow(hasHotKey: hasHotKey) == true {
+                self.markFirstRunSettingsComplete()
+            }
         }
+    }
+
+    private func markFirstRunSettingsComplete() {
+        UserDefaults.standard.set(
+            true,
+            forKey: Self.hasOpenedSettingsKey
+        )
+        firstRunSettingsLifecycle = nil
     }
 
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
     }
 
-    private func updateStatus(_ status: ProviderStatus) {
+    private func updateStatus(
+        _ status: ProviderStatus,
+        sourceProviderID: VoiceProviderID? = nil,
+        sourceProviderGeneration: UUID? = nil,
+        clearsAppOwnedAttention: Bool = true
+    ) {
+        if clearsAppOwnedAttention {
+            appOwnedAttention = nil
+        }
         currentStatus = status
         statusMenuItem.title = "Status: \(status.menuTitle)"
         if let detail = status.detail {
@@ -561,6 +686,26 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         updateIconAnimation()
         updateStatusItemTooltip()
         updateMenuContent()
+        stopWatchdog.statusDidChange(
+            status,
+            providerID: sourceProviderID ?? voiceProvider?.id
+        ) { [weak self] providerID in
+            guard let self,
+                  self.voiceProvider?.id == providerID,
+                  self.providerGeneration ==
+                    (sourceProviderGeneration
+                        ?? self.providerGeneration),
+                  self.currentStatus == .stopping else {
+                return
+            }
+            self.recordProviderEvent(
+                .diagnostic(
+                    "Provider did not finish stopping within 10 seconds; forcing the app back to Ready."
+                ),
+                provider: providerID
+            )
+            self.updateStatus(.ready)
+        }
     }
 
     private func profileMenuTitle(for profile: VoiceProfile) -> String {
@@ -578,7 +723,11 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func isProfileMenuItemEnabled(for profile: VoiceProfile) -> Bool {
-        profile.id != activeProfileID || currentStatus != .stopping
+        VoiceProfileMenuPolicy.isProfileItemEnabled(
+            profileID: profile.id,
+            activeProfileID: activeProfileID,
+            status: currentStatus
+        )
     }
 
     private func updateMenuContent() {
@@ -596,8 +745,16 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let state = providerMenuState()
-        showProviderMenuItem.isEnabled = state.isProviderInterfaceEnabled
-        reloadProviderMenuItem.isEnabled = state.isProviderInterfaceEnabled
+        let providerTargetsEnabled =
+            VoiceProfileMenuPolicy.providerTargetsEnabled(
+                hasProfiles: profiles.isEmpty == false
+            )
+        showProviderMenuItem.isEnabled =
+            providerTargetsEnabled
+            && state.isProviderInterfaceEnabled
+        reloadProviderMenuItem.isEnabled =
+            providerTargetsEnabled
+            && state.isProviderInterfaceEnabled
 
         let provider = selectedProfile?.providerID ?? providerConfiguration.providerID
         if state.isProviderInterfaceEnabled {
@@ -612,16 +769,21 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         checkProviderConnectionMenuItem.title = state.checkConnectionTitle
-        checkProviderConnectionMenuItem.isEnabled = state.isCheckConnectionEnabled
+        checkProviderConnectionMenuItem.isEnabled =
+            providerTargetsEnabled
+            && state.isCheckConnectionEnabled
         copySessionLogMenuItem.isEnabled = state.isCopySessionLogEnabled
         clearSessionLogMenuItem.isEnabled = state.isClearSessionLogEnabled
     }
 
     private func providerMenuState() -> VoiceProviderMenuState {
         let provider = selectedProfile?.providerID ?? providerConfiguration.providerID
+        let hasAPIKey = selectedProfile.map {
+            APIKeyStore.shared.hasAPIKey(for: $0)
+        } ?? APIKeyStore.shared.hasAPIKey(for: provider)
         return VoiceProviderMenuState(
             provider: provider,
-            readiness: provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)),
+            readiness: provider.readiness(hasAPIKey: hasAPIKey),
             currentStatus: currentStatus,
             supportsProviderInterface: voiceProvider?.capabilities.supportsProviderInterface == true,
             supportsConnectionCheck: voiceProvider?.capabilities.supportsConnectionCheck == true,
@@ -631,13 +793,16 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
     private func diagnosticsSnapshot() -> VoiceKeyDiagnosticsSnapshot {
         let provider = selectedProfile?.providerID ?? providerConfiguration.providerID
+        let hasAPIKey = selectedProfile.map {
+            APIKeyStore.shared.hasAPIKey(for: $0)
+        } ?? APIKeyStore.shared.hasAPIKey(for: provider)
         return VoiceKeyDiagnosticsSnapshot(
             provider: provider,
             configuration: providerConfiguration,
-            readiness: provider.readiness(hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)),
+            readiness: provider.readiness(hasAPIKey: hasAPIKey),
             hotKeys: profiles.map(hotKeyDiagnosticLine(for:)),
             currentStatus: currentStatus,
-            hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider),
+            hasAPIKey: hasAPIKey,
             supportsProviderInterface: voiceProvider?.capabilities.supportsProviderInterface == true,
             supportsConnectionCheck: voiceProvider?.capabilities.supportsConnectionCheck == true,
             hasSessionLog: sessionLog.isEmpty == false
@@ -650,13 +815,18 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         }
         let registration = carbonRegisteredProfileIDs.contains(profile.id)
             ? "Carbon registered"
-            : "event monitor only"
+            : isAccessibilityTrusted()
+                ? "trusted event-monitor fallback"
+                : "unavailable without Accessibility access"
         return "\(profile.name): \(hotKey.displayName) (\(registration))"
     }
 
-    private func recordProviderEvent(_ event: VoiceProviderEvent) {
-        sessionLog.append(event, provider: providerConfiguration.providerID)
-        sessionLogFile.append(event, provider: providerConfiguration.providerID)
+    private func recordProviderEvent(
+        _ event: VoiceProviderEvent,
+        provider: VoiceProviderID
+    ) {
+        sessionLog.append(event, provider: provider)
+        sessionLogFile.append(event, provider: provider)
         sessionLogWindowController?.update(text: sessionLog.displayText)
         updateMenuContent()
     }
@@ -664,22 +834,56 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
 extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
     func settingsController(_ controller: SettingsWindowController, didUpdateProfiles newProfiles: [VoiceProfile]) {
+        let sortedProfiles = VoiceProfileStore.sortedByHotKey(
+            newProfiles
+        )
+        if sortedProfiles.isEmpty {
+            profiles = []
+            resetProviderForEmptyProfiles()
+            registerAllHotKeys()
+            rebuildMenu()
+            return
+        }
+
         activeProfileID = ActiveVoiceProfileLifecycle.reconcile(
             activeProfileID: activeProfileID,
-            newProfiles: newProfiles,
+            newProfiles: sortedProfiles,
             provider: voiceProvider
         )
 
-        profiles = newProfiles
+        profiles = sortedProfiles
         registerAllHotKeys()
         rebuildMenu()
 
         if let selectedProfile {
             let configuration = sessionConfiguration(for: selectedProfile)
-            if configuration != providerConfiguration {
+            if voiceProvider == nil
+                || configuration != providerConfiguration {
                 updateProviderConfiguration(configuration)
             }
         }
+        if firstRunSettingsLifecycle?
+            .profilesDidChange(
+                hasHotKey: profiles.contains(where: {
+                    $0.hotKey != nil
+                })
+            ) == true {
+            markFirstRunSettingsComplete()
+        }
+    }
+
+    private func resetProviderForEmptyProfiles() {
+        providerGeneration = UUID()
+        stopWatchdog.cancel()
+        voiceProvider?.onEvent = nil
+        providerConfiguration =
+            EmptyProfileRuntimeLifecycle.reset(
+                provider: voiceProvider
+            )
+        voiceProvider = nil
+        activeProfileID = nil
+        appOwnedAttention = nil
+        updateStatus(.ready)
     }
 
     func settingsController(
@@ -697,8 +901,40 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
         )
     }
 
-    func settingsControllerDidUpdateCredentials(_ controller: SettingsWindowController) {
-        updateMenuContent()
+    func settingsController(
+        _ controller: SettingsWindowController,
+        didUpdateCredentialsFor profile: VoiceProfile
+    ) {
+        guard let committedProfile =
+                CredentialAttentionPolicy
+                    .profileAffectedByCredentialChange(
+                        attention: appOwnedAttention,
+                        changedProfile: profile,
+                        profiles: profiles
+                    ),
+              let nextStatus = CredentialAttentionPolicy.reconcile(
+                  attention: &appOwnedAttention,
+                  profile: committedProfile,
+                  hasAPIKey: APIKeyStore.shared.hasAPIKey(
+                      for: committedProfile
+                  ),
+                  currentStatus: currentStatus
+              ) else {
+            updateMenuContent()
+            return
+        }
+        updateStatus(
+            nextStatus,
+            clearsAppOwnedAttention: false
+        )
+    }
+
+    func settingsControllerDidClose(
+        _ controller: SettingsWindowController
+    ) {
+        if firstRunSettingsLifecycle?.didClose() == true {
+            markFirstRunSettingsComplete()
+        }
     }
 
     // Carbon hotkeys are consumed system-wide before any window sees them,

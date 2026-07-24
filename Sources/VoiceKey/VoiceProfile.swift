@@ -193,6 +193,8 @@ enum VoiceProfileStore {
     }
 
     private static func freshInstallProfile() -> VoiceProfile {
-        VoiceProfile.defaultOpenAI()
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.hotKey = nil
+        return profile
     }
 }
