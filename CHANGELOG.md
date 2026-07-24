@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.2 - 2026-07-24
+
+Critical fix: the microphone works on fresh installs.
+
+- v0.2.0 and v0.2.1 were signed with a hardened runtime but no
+  entitlements, which silently blocks all microphone access on any Mac
+  that hadn't previously granted it: macOS reported VoiceKey as denied
+  without ever showing the permission prompt, and the app never appeared
+  in System Settings > Privacy & Security > Microphone. All signed
+  builds now carry the audio-input entitlement, so the standard
+  permission prompt appears on first use. If you installed an earlier
+  version, update and start a voice session; macOS will ask for
+  microphone access normally.
+
 ## 0.2.1 - 2026-07-24
 
 Auto-apply settings, voice-channel UX overhaul, and reliability sweep.
