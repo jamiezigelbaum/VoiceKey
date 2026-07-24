@@ -3,6 +3,13 @@ import ApplicationServices
 import WebKit
 
 final class WebWindowController: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate {
+    /// Presented to every host EXCEPT Google's OAuth pages (see
+    /// decidePolicyFor): chatgpt.com strips GPT-Live's server-side tools
+    /// for bare-embed UAs, while Google's sign-in rejects embeds that
+    /// claim to be full Safari.
+    static let safariUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+
     let webView: WKWebView
     private let window: NSWindow
     private var visibleFrame: NSRect
@@ -23,8 +30,7 @@ final class WebWindowController: NSObject, NSWindowDelegate, WKNavigationDelegat
         // stripped; the same account in a real browser searched fine
         // (verified 2026-07-24). Safari's UA is the truthful closest match —
         // this IS WebKit on macOS.
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+        webView.customUserAgent = Self.safariUserAgent
         let initialWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1100, height: 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -129,6 +135,32 @@ final class WebWindowController: NSObject, NSWindowDelegate, WKNavigationDelegat
             self?.flushReadyCallbacks()
             self?.onNavigationFinished?()
         }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        // Per-host UA: Google's OAuth rejects embedded webviews presenting
+        // as full Safari ("Something went wrong" after account selection,
+        // observed 2026-07-24), but the SAME flow succeeded a day earlier
+        // under WKWebView's default UA. chatgpt.com, conversely, needs the
+        // Safari UA or GPT-Live's server-side tools are stripped. Serve
+        // each host the UA that works for it; auth cookies persist across
+        // the switch because the website data store is shared.
+        let host = navigationAction.request.url?.host?.lowercased() ?? ""
+        let isGoogleAuth = host == "accounts.google.com" || host.hasSuffix(".accounts.google.com")
+        let desiredAgent = isGoogleAuth ? nil : Self.safariUserAgent
+        if webView.customUserAgent != desiredAgent {
+            webView.customUserAgent = desiredAgent
+            onDiagnostic?(
+                isGoogleAuth
+                    ? "Using the default WebKit user agent for Google sign-in."
+                    : "Using the Safari user agent for \(host)."
+            )
+        }
+        decisionHandler(.allow)
     }
 
     func webView(
