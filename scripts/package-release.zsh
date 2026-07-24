@@ -34,7 +34,9 @@ fi
 
 if [[ -n "$SIGN_IDENTITY" ]]; then
   echo "Signing app with: $SIGN_IDENTITY"
-  codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$STAGE_DIR/$APP_NAME.app"
+  codesign --force --timestamp --options runtime \
+    --entitlements "$ROOT/VoiceKey.entitlements" \
+    --sign "$SIGN_IDENTITY" "$STAGE_DIR/$APP_NAME.app"
   codesign --verify --strict --verbose=2 "$STAGE_DIR/$APP_NAME.app"
 else
   echo "Skipping code signing. Set VOICEKEY_SIGN_IDENTITY to sign a public build."

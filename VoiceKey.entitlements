@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Hardened runtime (required for notarization) blocks microphone
+       capture unless this entitlement is present: without it TCC reports
+       the app as denied WITHOUT ever prompting and it never appears in
+       the Microphone pane (v0.2.0/v0.2.1 shipped this way — dead mic on
+       every fresh Mac; found on first fresh-hardware test 2026-07-24). -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+</dict>
+</plist>
