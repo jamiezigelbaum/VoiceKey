@@ -79,7 +79,27 @@ final class ChatGPTProvider: NSObject {
                 self.applySnapshot(probe, showAttention: true)
             default:
                 self.updateStatus(.needsAttention("Could not find an active ChatGPT Voice session to stop."))
+                // The active-voice UI is uncharted (GPT-Live shell): record
+                // what it actually shows so the stopIntent list can be
+                // fixed from evidence.
+                self.logControlInventory()
+                self.logMediaState()
             }
+        }
+    }
+
+    /// Whether audio is genuinely flowing in the page — WebKit suspends
+    /// media in hidden windows, which presents as a silent "active" call.
+    private func logMediaState() {
+        windowController.runJavaScript(ChatGPTDOMProbe.mediaStateScript) { [weak self] result in
+            guard let self,
+                  let dictionary = result as? [String: Any] else { return }
+            let visibility = dictionary["visibility"] as? String ?? "?"
+            let count = dictionary["elementCount"] as? Int ?? 0
+            let media = dictionary["mediaElements"] as? String ?? "[]"
+            let summary = "ChatGPT media state — visibility: \(visibility), media elements: \(count), detail: \(media)"
+            self.log(summary)
+            self.onDebugChange?(summary)
         }
     }
 
@@ -281,6 +301,16 @@ final class ChatGPTProvider: NSObject {
         status = newStatus
         log("Status: \(newStatus.menuTitle)\(newStatus.detail.map { " - \($0)" } ?? "")")
         onStatusChange?(newStatus)
+        if newStatus == .voiceActive {
+            // Self-document whether audio is actually flowing a few seconds
+            // into every "active" call — a silent-active session (WebKit
+            // suspending media in a hidden window) then shows up in the
+            // session log without user action.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                guard let self, self.status == .voiceActive else { return }
+                self.logMediaState()
+            }
+        }
     }
 
     private func updateDebug(_ action: String) {

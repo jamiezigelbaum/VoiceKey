@@ -290,6 +290,27 @@ enum ChatGPTDOMProbe {
     })();
     """
 
+    /// Media-state snapshot for a supposedly-active voice session: is
+    /// audio actually flowing, or did WebKit suspend it (hidden window)?
+    static let mediaStateScript = """
+    (() => {
+      const media = [...document.querySelectorAll('audio,video')].map((el) => ({
+        tag: el.tagName,
+        paused: el.paused,
+        muted: el.muted,
+        readyState: el.readyState,
+        srcObject: !!el.srcObject
+      }));
+      return {
+        state: 'mediaState',
+        visibility: document.visibilityState,
+        hidden: document.hidden,
+        mediaElements: JSON.stringify(media),
+        elementCount: media.length
+      };
+    })();
+    """
+
     static let diagnosticScript = """
     (() => {
       \(coreScript)
