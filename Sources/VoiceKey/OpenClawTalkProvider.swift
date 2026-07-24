@@ -18,7 +18,7 @@ struct OpenClawTalkToolCall: Equatable {
 enum OpenClawTalkEventAction: Equatable {
     case providerEvent(VoiceProviderEvent)
     case connectChallenge
-    case connected
+    case connected(deviceToken: String?)
     case sessionCreated(sessionID: String, relaySessionID: String)
     case sessionReady
     case audio(Data)
@@ -26,6 +26,13 @@ enum OpenClawTalkEventAction: Equatable {
     case stopPlayback
     case sessionClosed(reason: String?)
     case handshakeFailed(message: String)
+    case pairingRequired(
+        reason: String?,
+        requestID: String?,
+        remediationHint: String?,
+        message: String
+    )
+    case deviceTokenMismatch(message: String)
     case toolCall(OpenClawTalkToolCall)
     case malformedToolCall(callID: String?, reason: String)
     case requestSucceeded(id: String, runID: String?, resultJSON: String?)
@@ -35,7 +42,13 @@ enum OpenClawTalkEventAction: Equatable {
     /// The gateway rejected connect as NOT_PAIRED because the requested scopes
     /// exceed the device's approved set; it closes the socket (1008), so the
     /// provider must reconnect and retry with exactly these approved scopes.
-    case connectRetryWithScopes(scopes: [String], message: String)
+    case connectRetryWithScopes(
+        scopes: [String],
+        reason: String?,
+        requestID: String?,
+        remediationHint: String?,
+        message: String
+    )
 }
 
 enum OpenClawTalkRequestBuilder {
@@ -128,10 +141,14 @@ enum OpenClawTalkRequestBuilder {
         token: String,
         clientVersion: String,
         scopes: [String],
-        deviceToken: String,
+        deviceToken: String?,
         deviceProof: OpenClawDeviceProof
     ) -> [String: Any] {
-        [
+        var auth: [String: Any] = ["token": token]
+        if let deviceToken {
+            auth["deviceToken"] = deviceToken
+        }
+        return [
             "type": "req",
             "id": connectRequestID,
             "method": "connect",
@@ -154,7 +171,7 @@ enum OpenClawTalkRequestBuilder {
                     "signedAt": deviceProof.signedAtMs,
                     "nonce": deviceProof.nonce
                 ],
-                "auth": ["token": token, "deviceToken": deviceToken]
+                "auth": auth
             ]
         ]
     }
@@ -279,22 +296,49 @@ enum OpenClawTalkRequestBuilder {
 
 /// Resolves the gateway token without ever logging it: a token pasted in Settings
 /// (Keychain) wins; otherwise the first `*gateway-token*` file in the OpenClaw
-/// secrets directory is used (this machine's sparta-gateway-token lives there).
+/// secrets directory is used, followed by `gateway.auth.token` in secrets.json.
 enum OpenClawTokenResolver {
     static var defaultSecretsDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".openclaw/secrets", isDirectory: true)
     }
 
+    static var defaultSecretsJSONURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".openclaw/secrets.json")
+    }
+
+    static func resolveGatewayToken(
+        apiKeyProvider: () -> String?
+    ) -> String? {
+        resolveGatewayToken(
+            apiKeyProvider: apiKeyProvider,
+            secretsDirectory: defaultSecretsDirectory,
+            secretsJSONURL: defaultSecretsJSONURL
+        )
+    }
+
     static func resolveGatewayToken(
         apiKeyProvider: () -> String?,
-        secretsDirectory: URL = defaultSecretsDirectory
+        secretsDirectory: URL,
+        secretsJSONURL: URL? = nil
     ) -> String? {
         if let key = apiKeyProvider()?.trimmingCharacters(in: .whitespacesAndNewlines),
            key.isEmpty == false {
             return key
         }
-        return gatewayTokenFromSecretsDirectory(secretsDirectory)
+        if let token = gatewayTokenFromSecretsDirectory(secretsDirectory) {
+            return token
+        }
+        return secretsJSONURL.flatMap(gatewayTokenFromSecretsJSON)
+    }
+
+    static func discoveredGatewayToken() -> String? {
+        resolveGatewayToken(
+            apiKeyProvider: { nil },
+            secretsDirectory: defaultSecretsDirectory,
+            secretsJSONURL: defaultSecretsJSONURL
+        )
     }
 
     static func gatewayTokenFromSecretsDirectory(_ directory: URL) -> String? {
@@ -320,6 +364,18 @@ enum OpenClawTokenResolver {
             }
         }
         return nil
+    }
+
+    static func gatewayTokenFromSecretsJSON(_ file: URL) -> String? {
+        guard let data = try? Data(contentsOf: file),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let gateway = root["gateway"] as? [String: Any],
+              let auth = gateway["auth"] as? [String: Any],
+              let rawToken = auth["token"] as? String else {
+            return nil
+        }
+        let token = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        return token.isEmpty ? nil : token
     }
 }
 
@@ -543,16 +599,38 @@ enum OpenClawTalkEventMapper {
             return [.providerEvent(.diagnostic("OpenClaw response omitted a request id."))]
         }
 
-        guard (object["ok"] as? Bool) == true else {
+        if (object["ok"] as? Bool) == false || object["error"] != nil {
             let error = object["error"] as? [String: Any]
             let message = error?["message"] as? String ?? "OpenClaw gateway request failed."
             switch id {
             case OpenClawTalkRequestBuilder.connectRequestID:
+                let details = error?["details"] as? [String: Any]
+                if details?["code"] as? String == "AUTH_DEVICE_TOKEN_MISMATCH" {
+                    return [.deviceTokenMismatch(message: message)]
+                }
                 // The gateway rejects over-broad scope requests as NOT_PAIRED and
                 // reports the device's approved scope set; the provider reconnects
                 // and retries with exactly those scopes.
-                if let approvedScopes = approvedScopesForPairingRetry(error: error) {
-                    return [.connectRetryWithScopes(scopes: approvedScopes, message: message)]
+                if isPairingRequired(error: error) {
+                    let reason = details?["reason"] as? String
+                    let requestID = details?["requestId"] as? String
+                    let remediationHint = details?["remediationHint"] as? String
+                    if let approvedScopes = details?["approvedScopes"] as? [String],
+                       approvedScopes.isEmpty == false {
+                        return [.connectRetryWithScopes(
+                            scopes: approvedScopes,
+                            reason: reason,
+                            requestID: requestID,
+                            remediationHint: remediationHint,
+                            message: message
+                        )]
+                    }
+                    return [.pairingRequired(
+                        reason: reason,
+                        requestID: requestID,
+                        remediationHint: remediationHint,
+                        message: message
+                    )]
                 }
                 return [.handshakeFailed(message: message)]
             case OpenClawTalkRequestBuilder.sessionCreateRequestID:
@@ -572,8 +650,11 @@ enum OpenClawTalkEventMapper {
 
         switch id {
         case OpenClawTalkRequestBuilder.connectRequestID:
+            let result = (object["result"] as? [String: Any])
+                ?? (object["payload"] as? [String: Any])
+            let auth = result?["auth"] as? [String: Any]
             return [
-                .connected,
+                .connected(deviceToken: auth?["deviceToken"] as? String),
                 .providerEvent(.diagnostic("Connected to OpenClaw gateway."))
             ]
         case OpenClawTalkRequestBuilder.sessionCreateRequestID:
@@ -599,21 +680,14 @@ enum OpenClawTalkEventMapper {
         }
     }
 
-    /// NOT_PAIRED (details.code PAIRING_REQUIRED) carries the device's
-    /// gateway-approved scopes in details.approvedScopes; retrying connect with
-    /// exactly that set pairs without user action. Anything else (e.g. unknown
-    /// device) needs manual approval, so no retry is offered.
-    private static func approvedScopesForPairingRetry(error: [String: Any]?) -> [String]? {
-        guard let error else { return nil }
+    /// Identifies NOT_PAIRED / PAIRING_REQUIRED responses. When approved scopes
+    /// are also present, the provider retains its existing one-shot adjusted-scope
+    /// retry; any subsequent rejection surfaces the fresh approval request.
+    private static func isPairingRequired(error: [String: Any]?) -> Bool {
+        guard let error else { return false }
         let details = error["details"] as? [String: Any]
-        let isPairingRetry = (error["code"] as? String) == "NOT_PAIRED"
+        return (error["code"] as? String) == "NOT_PAIRED"
             || (details?["code"] as? String) == "PAIRING_REQUIRED"
-        guard isPairingRetry,
-              let approvedScopes = details?["approvedScopes"] as? [String],
-              approvedScopes.isEmpty == false else {
-            return nil
-        }
-        return approvedScopes
     }
 
     private static func talkEnvelopeActions(_ envelope: [String: Any], sessionID: String?) -> [OpenClawTalkEventAction] {
@@ -1066,6 +1140,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     /// for the reconnect (requesting more re-triggers the pairing prompt).
     private var requestedScopesOverride: [String]?
     private var hasRetriedWithApprovedScopes = false
+    private var omitDeviceTokenForConnect = false
+    private var hasRetriedWithoutDeviceToken = false
 
     private static let fatalAudioFailureMessage =
         "Microphone audio stopped after repeated audio device failures. Start the voice session again."
@@ -1245,6 +1321,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         deviceCredentials = deviceCredentialsProvider()
         requestedScopesOverride = nil
         hasRetriedWithApprovedScopes = false
+        omitDeviceTokenForConnect = false
+        hasRetriedWithoutDeviceToken = false
         endpointCandidates = OpenClawTalkRequestBuilder.endpointCandidates(endpointURL: configuration.endpointURL)
         endpointCandidateIndex = 0
         currentEndpoint = nil
@@ -1441,7 +1519,13 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
                 cancelHandshakeWatchdog()
                 sendConnectFrame(nonce: OpenClawTalkEventMapper.connectChallengeNonce(from: text))
                 scheduleHandshakeWatchdog(.awaitingHello)
-            case .connected:
+            case let .connected(deviceToken):
+                if let deviceToken = deviceToken?.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                ),
+                   deviceToken.isEmpty == false {
+                    deviceCredentials?.operatorToken = deviceToken
+                }
                 handleGatewayConnected()
             case let .sessionCreated(newSessionID, newRelaySessionID):
                 cancelHandshakeWatchdog()
@@ -1469,8 +1553,29 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
                 handleSessionClosed(reason: reason)
             case let .handshakeFailed(message):
                 handleHandshakeFailed(message: message)
-            case let .connectRetryWithScopes(scopes, message):
-                retryConnectWithApprovedScopes(scopes, failureMessage: message)
+            case let .pairingRequired(reason, requestID, remediationHint, message):
+                handleHandshakeFailed(message: pairingFailureMessage(
+                    message: message,
+                    reason: reason,
+                    requestID: requestID,
+                    remediationHint: remediationHint
+                ))
+            case let .deviceTokenMismatch(message):
+                retryConnectWithoutDeviceToken(failureMessage: message)
+            case let .connectRetryWithScopes(
+                scopes,
+                reason,
+                requestID,
+                remediationHint,
+                message
+            ):
+                retryConnectWithApprovedScopes(
+                    scopes,
+                    reason: reason,
+                    requestID: requestID,
+                    remediationHint: remediationHint,
+                    failureMessage: message
+                )
             case let .toolCall(toolCall):
                 handleToolCall(toolCall)
             case let .malformedToolCall(callID, reason):
@@ -1835,7 +1940,9 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
                     token: gatewayToken,
                     clientVersion: Self.clientVersion,
                     scopes: requestedScopesOverride ?? deviceCredentials.operatorScopes,
-                    deviceToken: deviceCredentials.operatorToken,
+                    deviceToken: omitDeviceTokenForConnect
+                        ? nil
+                        : deviceCredentials.operatorToken,
                     deviceProof: proof
                 ))
                 return
@@ -1887,12 +1994,23 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     /// The gateway closes the socket after a NOT_PAIRED rejection (close code
     /// 1008), so the scope-adjusted retry needs a fresh connection — and a fresh
     /// challenge nonce — against the same endpoint.
-    private func retryConnectWithApprovedScopes(_ scopes: [String], failureMessage: String) {
+    private func retryConnectWithApprovedScopes(
+        _ scopes: [String],
+        reason: String?,
+        requestID: String?,
+        remediationHint: String?,
+        failureMessage: String
+    ) {
         guard deviceCredentials != nil,
               hasConnectedToGateway == false,
               hasRetriedWithApprovedScopes == false,
               scopes.isEmpty == false else {
-            handleHandshakeFailed(message: failureMessage)
+            handleHandshakeFailed(message: pairingFailureMessage(
+                message: failureMessage,
+                reason: reason,
+                requestID: requestID,
+                remediationHint: remediationHint
+            ))
             return
         }
         hasRetriedWithApprovedScopes = true
@@ -1904,6 +2022,48 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         hasConnectedToGateway = false
         endpointCandidateIndex = max(0, endpointCandidateIndex - 1)
         connectToNextEndpointCandidate(generation: startGeneration)
+    }
+
+    /// A stale token closes the socket after the rejection, so retry the same
+    /// endpoint once with a fresh challenge and signed device identity, omitting
+    /// only auth.deviceToken. The successful hello's canonical token is retained
+    /// in memory for this provider session and is never written to OpenClaw files.
+    private func retryConnectWithoutDeviceToken(failureMessage: String) {
+        guard deviceCredentials != nil,
+              hasConnectedToGateway == false,
+              hasRetriedWithoutDeviceToken == false else {
+            handleHandshakeFailed(message: failureMessage)
+            return
+        }
+        hasRetriedWithoutDeviceToken = true
+        omitDeviceTokenForConnect = true
+        emit(.diagnostic(
+            "OpenClaw device authorization changed; reconnecting with signed device identity."
+        ))
+        cancelHandshakeWatchdog()
+        disposeCurrentSocket()
+        isConnected = false
+        hasConnectedToGateway = false
+        endpointCandidateIndex = max(0, endpointCandidateIndex - 1)
+        connectToNextEndpointCandidate(generation: startGeneration)
+    }
+
+    private func pairingFailureMessage(
+        message: String,
+        reason: String?,
+        requestID: String?,
+        remediationHint: String?
+    ) -> String {
+        var details: [String] = []
+        if let requestID, requestID.isEmpty == false {
+            details.append("Approval request: \(requestID)")
+        }
+        if let remediationHint, remediationHint.isEmpty == false {
+            details.append(remediationHint)
+        } else if let reason, reason.isEmpty == false {
+            details.append("Approval reason: \(reason)")
+        }
+        return ([message] + details).joined(separator: "\n")
     }
 
     private func handleGatewayConnected() {
@@ -2048,6 +2208,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         deviceCredentials = nil
         requestedScopesOverride = nil
         hasRetriedWithApprovedScopes = false
+        omitDeviceTokenForConnect = false
+        hasRetriedWithoutDeviceToken = false
         resetSpeakerModeState()
     }
 

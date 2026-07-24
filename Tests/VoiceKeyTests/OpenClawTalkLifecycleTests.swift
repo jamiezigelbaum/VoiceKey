@@ -39,6 +39,112 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
         XCTAssertEqual(auth["deviceToken"] as? String, "device-token")
     }
 
+    func testDeviceTokenMismatchRetriesWithoutTokenAndAdoptsSuccessfulHello() throws {
+        let mismatchSocket = ScriptedOpenClawWebSocket(messages: [
+            #"{"type":"event","event":"connect.challenge","payload":{"nonce":"nonce-1","ts":1}}"#,
+            """
+            {"type":"res","id":"1","ok":false,"error":{"code":"INVALID_REQUEST",\
+            "message":"unauthorized: device token mismatch (rotate/reissue device token)",\
+            "details":{"code":"AUTH_DEVICE_TOKEN_MISMATCH",\
+            "authReason":"device_token_mismatch","canRetryWithDeviceToken":false,\
+            "recommendedNextStep":"update_auth_credentials"}}}
+            """
+        ])
+        let repairedSocket = ScriptedOpenClawWebSocket(messages: [
+            #"{"type":"event","event":"connect.challenge","payload":{"nonce":"nonce-2","ts":2}}"#,
+            """
+            {"type":"res","id":"1","result":{"type":"hello-ok","protocol":4,\
+            "server":{"version":"2026.7.1-2"},\
+            "auth":{"role":"operator","scopes":["operator.talk","operator.write"],\
+            "deviceToken":"canonical-device-token","issuedAtMs":1784300000000}}}
+            """,
+            #"{"type":"res","id":"2","ok":true,"payload":{"sessionId":"session-1","relaySessionId":"relay-1"}}"#,
+            #"{"type":"event","event":"talk.event","payload":{"relaySessionId":"relay-1","type":"ready"}}"#
+        ])
+        let factory = ScriptedOpenClawWebSocketFactory(
+            sockets: [mismatchSocket, repairedSocket]
+        )
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            socketFactory: factory,
+            watchdogs: ManualWatchdogScheduler(),
+            deviceCredentials: deviceCredentials
+        )
+
+        let listening = expectation(description: "repaired session ready")
+        provider.onEvent = { event in
+            guard case .status(.listening) = event else { return }
+            listening.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [listening], timeout: 1)
+
+        XCTAssertEqual(
+            factory.requestedURLs.map(\.absoluteString),
+            ["ws://127.0.0.1:18790", "ws://127.0.0.1:18790"]
+        )
+        let initialParams = try XCTUnwrap(
+            mismatchSocket.sentFrames.first?["params"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            (initialParams["auth"] as? [String: Any])?["deviceToken"] as? String,
+            "device-token"
+        )
+        let repairedParams = try XCTUnwrap(
+            repairedSocket.sentFrames.first?["params"] as? [String: Any]
+        )
+        XCTAssertNil((repairedParams["auth"] as? [String: Any])?["deviceToken"])
+        XCTAssertNotNil(repairedParams["device"])
+        XCTAssertEqual(
+            OpenClawTalkEventMapper.actions(
+                from: """
+                    {"type":"res","id":"1","result":{"type":"hello-ok",\
+                    "auth":{"deviceToken":"canonical-device-token"}}}
+                    """,
+                sessionID: nil
+            ).first,
+            .connected(deviceToken: "canonical-device-token")
+        )
+    }
+
+    func testPairingFailureSurfacesLatestRequestAndRemediationHint() {
+        func pairingFrame(requestID: String) -> String {
+            """
+            {"type":"res","id":"1","ok":false,"error":{"code":"NOT_PAIRED",\
+            "message":"pairing required: device identity changed and must be re-approved",\
+            "details":{"code":"PAIRING_REQUIRED","reason":"metadata-upgrade",\
+            "requestId":"\(requestID)",\
+            "remediationHint":"Approve the current pending request.",\
+            "approvedScopes":["operator.talk","operator.write"]}}}
+            """
+        }
+        let firstSocket = ScriptedOpenClawWebSocket(messages: [
+            #"{"type":"event","event":"connect.challenge","payload":{"nonce":"nonce-1"}}"#,
+            pairingFrame(requestID: "expired-request")
+        ])
+        let retrySocket = ScriptedOpenClawWebSocket(messages: [
+            #"{"type":"event","event":"connect.challenge","payload":{"nonce":"nonce-2"}}"#,
+            pairingFrame(requestID: "latest-request")
+        ])
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            sockets: [firstSocket, retrySocket],
+            watchdogs: ManualWatchdogScheduler(),
+            deviceCredentials: deviceCredentials
+        )
+
+        let surfaced = expectation(description: "latest pairing request surfaced")
+        provider.onEvent = { event in
+            guard case let .status(.needsAttention(message)) = event,
+                  message.contains("latest-request"),
+                  message.contains("Approve the current pending request."),
+                  message.contains("expired-request") == false else { return }
+            surfaced.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [surfaced], timeout: 1)
+    }
+
     func testFatalAudioFailureStopsSessionAndSurfacesNeedsAttention() {
         let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
         let audioEngine = LifecycleAudioEngine()
