@@ -19,10 +19,24 @@ echo "Quitting VoiceKey..."
 pkill -f "VoiceKey.app/Contents/MacOS/VoiceKey" 2>/dev/null
 sleep 1
 
+# Reset permissions BEFORE removing the app: tccutil resolves the bundle
+# id through the installed app, and fails with kLSApplicationNotFoundErr
+# once it is gone (bit us live on the Air, 2026-07-24).
+echo "Resetting permission grants (microphone prompt will fire again)..."
+tccutil reset Microphone "$BUNDLE_ID"
+tccutil reset Accessibility "$BUNDLE_ID"
+
 if [[ "$KEEP_APP" == false ]]; then
   echo "Removing the app..."
-  brew uninstall --cask --zap voicekey 2>/dev/null \
-    || rm -rf /Applications/VoiceKey.app
+  # --force uninstalls even if artifacts are missing; never hide brew's
+  # errors — a silently failed uninstall leaves Caskroom metadata behind
+  # and "brew install" then refuses with "already installed" (also bit
+  # us live on the Air).
+  if command -v brew >/dev/null 2>&1 && brew list --cask voicekey >/dev/null 2>&1; then
+    brew uninstall --cask --zap --force voicekey
+  else
+    rm -rf /Applications/VoiceKey.app
+  fi
 fi
 
 echo "Deleting preferences..."
@@ -30,10 +44,6 @@ defaults delete "$BUNDLE_ID" 2>/dev/null
 
 echo "Deleting keychain items (API keys, MCP tokens, gateway token)..."
 while security delete-generic-password -s "$BUNDLE_ID" >/dev/null 2>&1; do :; done
-
-echo "Resetting permission grants (microphone prompt will fire again)..."
-tccutil reset Microphone "$BUNDLE_ID"
-tccutil reset Accessibility "$BUNDLE_ID"
 
 echo "Deleting logs, web sessions, caches, saved state..."
 rm -rf ~/Library/Logs/VoiceKey \
