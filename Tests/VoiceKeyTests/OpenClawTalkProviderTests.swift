@@ -90,7 +90,7 @@ final class OpenClawTalkProviderTests: XCTestCase {
         XCTAssertEqual(frame["method"] as? String, "talk.session.create")
 
         let params = try dictionary(frame["params"])
-        XCTAssertEqual(params["sessionKey"] as? String, "agent:main:main")
+        XCTAssertEqual(params["sessionKey"] as? String, "agent:main:voicekey")
         XCTAssertEqual(params["mode"] as? String, "realtime")
         XCTAssertEqual(params["transport"] as? String, "gateway-relay")
         XCTAssertEqual(params["brain"] as? String, "agent-consult")
@@ -137,7 +137,7 @@ final class OpenClawTalkProviderTests: XCTestCase {
         XCTAssertEqual(frame["id"] as? String, "9")
         XCTAssertEqual(frame["method"] as? String, "talk.client.toolCall")
         let params = try dictionary(frame["params"])
-        XCTAssertEqual(params["sessionKey"] as? String, "agent:main:main")
+        XCTAssertEqual(params["sessionKey"] as? String, "agent:main:voicekey")
         XCTAssertNil(params["voiceSessionId"])
         XCTAssertEqual(params["relaySessionId"] as? String, "relay-1")
         XCTAssertEqual(params["callId"] as? String, "call-1")

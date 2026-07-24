@@ -293,7 +293,7 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
             $0["method"] as? String == "talk.client.toolCall"
         })
         let clientParams = try XCTUnwrap(clientFrame["params"] as? [String: Any])
-        XCTAssertEqual(clientParams["sessionKey"] as? String, "agent:main:main")
+        XCTAssertEqual(clientParams["sessionKey"] as? String, "agent:main:voicekey")
         // Schema forbids extra keys; voiceSessionId must NOT be present.
         XCTAssertNil(clientParams["voiceSessionId"])
         XCTAssertEqual(clientParams["relaySessionId"] as? String, "relay-1")

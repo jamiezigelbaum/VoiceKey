@@ -42,8 +42,12 @@ enum OpenClawTalkRequestBuilder {
     static let sessionCreateRequestID = "2"
     // Must be a chat session key the gateway can resolve (format
     // agent:<agent>:<session>); the consult runs against this session's
-    // agent and memory. agent:main:main is the live main-agent session.
-    static let sessionKey = "agent:main:main"
+    // agent and memory. agent:main:voicekey is VoiceKey's DEDICATED lane on
+    // the main agent (created 2026-07-24): same workspace/memory/tools, but
+    // isolated from agent:main:main, which other operator threads keep busy —
+    // consults sharing that session collided with concurrent runs and came
+    // back as instant empty finals while the real answer landed later.
+    static let sessionKey = "agent:main:voicekey"
     static let clientID = "openclaw-macos"
     static let clientMode = "backend"
     static let role = "operator"
