@@ -359,7 +359,10 @@ struct VoiceSessionConfiguration: Equatable {
     var webSearchEnabled: Bool = false
     var speakerModePreference: OpenAISpeakerModePreference = .automatic
 
-    static let defaultInstructions = "You are VoiceKey, a concise and helpful voice assistant. Speak naturally and keep answers brief unless the user asks for detail."
+    // Empty by design (owner ruling 2026-07-24): VoiceKey is the app, not
+    // the assistant — never bake an identity into sessions. Users add
+    // instructions per channel if they want them.
+    static let defaultInstructions = ""
 
     static var `default`: VoiceSessionConfiguration {
         VoiceProviderID.openAIRealtime.defaultConfiguration
