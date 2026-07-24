@@ -134,6 +134,27 @@ final class ChatGPTProvider: NSObject {
     private func clickStartButtonOnce() {
         startClickCount += 1
         updateDebug("Start click #\(startClickCount)")
+        // GPT-Live gates microphone capture on GENUINE user activation:
+        // a synthetic DOM click opens the conversation shell but WebKit
+        // refuses the media pipeline (observed 2026-07-24: audio elements
+        // paused/readyState 0 after a DOM click). Locate the control, then
+        // click NATIVELY at its screen coordinates.
+        windowController.runJavaScript(ChatGPTDOMProbe.startButtonScript) { [weak self] result in
+            guard let self else { return }
+            let point = ProbeResult(result)
+            if point.state == "clickable", let x = point.x, let y = point.y {
+                self.log("Native-clicking ChatGPT Voice control: \(point.label ?? "unknown")")
+                if self.windowController.nativeClickInWebView(x: x, y: y) {
+                    self.observeVoiceStartedAfterSingleClick()
+                    return
+                }
+                self.log("Native click failed; falling back to a DOM click.")
+            }
+            self.clickStartButtonOnceViaDOM()
+        }
+    }
+
+    private func clickStartButtonOnceViaDOM() {
         log("Sending one DOM click to ChatGPT Voice control.")
         windowController.runJavaScript(ChatGPTDOMProbe.startButtonClickFallbackScript) { [weak self] result in
             guard let self else { return }
@@ -158,6 +179,23 @@ final class ChatGPTProvider: NSObject {
     private func clickStopButtonOnce() {
         stopClickCount += 1
         updateDebug("Stop click #\(stopClickCount)")
+        // Same user-activation rule as start: prefer a native click.
+        windowController.runJavaScript(ChatGPTDOMProbe.stopButtonScript) { [weak self] result in
+            guard let self else { return }
+            let point = ProbeResult(result)
+            if point.state == "clickable", let x = point.x, let y = point.y {
+                self.log("Native-clicking ChatGPT Voice stop control: \(point.label ?? "unknown")")
+                if self.windowController.nativeClickInWebView(x: x, y: y) {
+                    self.observeVoiceStoppedAfterSingleClick()
+                    return
+                }
+                self.log("Native stop click failed; falling back to a DOM click.")
+            }
+            self.clickStopButtonOnceViaDOM()
+        }
+    }
+
+    private func clickStopButtonOnceViaDOM() {
         log("Sending one DOM click to ChatGPT Voice stop control.")
         windowController.runJavaScript(ChatGPTDOMProbe.stopButtonClickFallbackScript) { [weak self] result in
             guard let self else { return }
