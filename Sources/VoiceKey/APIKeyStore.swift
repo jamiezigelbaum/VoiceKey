@@ -12,7 +12,17 @@ enum APIKeyStoreError: LocalizedError {
     }
 }
 
-final class APIKeyStore {
+protocol VoiceCredentialStoring: AnyObject {
+    func hasAPIKey(for profile: VoiceProfile) -> Bool
+    func apiKey(for profile: VoiceProfile) -> String?
+    func setAPIKey(_ apiKey: String, for profile: VoiceProfile) throws
+    func deleteAPIKey(for profile: VoiceProfile) throws
+    func authorizationToken(forMCPServer id: UUID) -> String?
+    func setAuthorizationToken(_ token: String, forMCPServer id: UUID) throws
+    func deleteAuthorizationToken(forMCPServer id: UUID) throws
+}
+
+final class APIKeyStore: VoiceCredentialStoring {
     static let shared = APIKeyStore()
 
     private let service = "com.zigelbaum.VoiceKey"
@@ -72,6 +82,22 @@ final class APIKeyStore {
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw APIKeyStoreError.unexpectedStatus(status)
         }
+    }
+
+    func hasAPIKey(for profile: VoiceProfile) -> Bool {
+        apiKey(for: profile) != nil
+    }
+
+    func apiKey(for profile: VoiceProfile) -> String? {
+        apiKey(for: profile.providerID)
+    }
+
+    func setAPIKey(_ apiKey: String, for profile: VoiceProfile) throws {
+        try setAPIKey(apiKey, for: profile.providerID)
+    }
+
+    func deleteAPIKey(for profile: VoiceProfile) throws {
+        try deleteAPIKey(for: profile.providerID)
     }
 
     func authorizationToken(forMCPServer id: UUID) -> String? {

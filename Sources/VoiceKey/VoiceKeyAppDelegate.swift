@@ -2,15 +2,20 @@ import AppKit
 import AVFoundation
 
 enum HotKeyRecordingLifecycle {
-    static func record(
+    static func register(
         _ hotKey: HotKeyConfiguration,
         for workingProfile: VoiceProfile,
-        savedProfiles: inout [VoiceProfile],
-        register: (VoiceProfile) -> Bool,
-        save: ([VoiceProfile]) -> Void
+        committedProfiles: [VoiceProfile],
+        register: (VoiceProfile) -> Bool
     ) -> Bool {
-        let savedIndex = savedProfiles.firstIndex(where: { $0.id == workingProfile.id })
-        var candidate = savedIndex.map { savedProfiles[$0] } ?? workingProfile
+        guard let committedProfile = committedProfiles.first(where: {
+            $0.id == workingProfile.id
+        }) else {
+            // Never register a Carbon hotkey for a channel the app does not own.
+            return false
+        }
+
+        var candidate = committedProfile
         let previousCandidate = candidate
         candidate.hotKey = hotKey
 
@@ -19,11 +24,6 @@ enum HotKeyRecordingLifecycle {
                 _ = register(previousCandidate)
             }
             return false
-        }
-
-        if let savedIndex {
-            savedProfiles[savedIndex].hotKey = hotKey
-            save(savedProfiles)
         }
         return true
     }
@@ -687,19 +687,14 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
         didRecordHotKey hotKey: HotKeyConfiguration,
         for profile: VoiceProfile
     ) -> Bool {
-        var updatedProfiles = profiles
-        let accepted = HotKeyRecordingLifecycle.record(
+        HotKeyRecordingLifecycle.register(
             hotKey,
             for: profile,
-            savedProfiles: &updatedProfiles,
-            register: { [weak self] profile in
-                self?.registerHotKey(for: profile) == true
-            },
-            save: { VoiceProfileStore.save($0) }
+            committedProfiles: profiles,
+            register: { [weak self] candidate in
+                self?.registerHotKey(for: candidate) == true
+            }
         )
-        profiles = updatedProfiles
-        rebuildMenu()
-        return accepted
     }
 
     func settingsControllerDidUpdateCredentials(_ controller: SettingsWindowController) {

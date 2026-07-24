@@ -80,6 +80,11 @@ struct OpenClawRuntimePanelSnapshot: Equatable {
     var applyButtonIsVisible: Bool
 }
 
+struct SettingsWindowSizingSnapshot: Equatable {
+    var contentHeight: CGFloat
+    var formHeight: CGFloat
+}
+
 struct VoiceProfileProviderSettings: Equatable {
     var model: String
     var voice: String
@@ -110,6 +115,75 @@ struct VoiceProfileProviderSettingsCache {
     }
 }
 
+enum VoiceProfileSettingsEdit: Equatable {
+    case name(String)
+    case provider(VoiceProviderID)
+    case model(String)
+    case voice(String)
+    case instructions(String)
+    case endpointURL(String)
+    case webSearchEnabled(Bool)
+    case speakerModePreference(OpenAISpeakerModePreference)
+}
+
+struct MCPAuthorizationMutation: Equatable {
+    var serverID: UUID
+    var token: String?
+}
+
+enum SettingsAutoApplyPersistence {
+    static func commit(
+        previousProfiles: [VoiceProfile],
+        nextProfiles: [VoiceProfile],
+        authorizationMutations: [MCPAuthorizationMutation],
+        saveProfiles: ([VoiceProfile]) -> Void,
+        credentialStore: VoiceCredentialStoring
+    ) throws -> [VoiceProfile] {
+        let sorted = VoiceProfileStore.sortedByHotKey(nextProfiles)
+        let previousTokens = Dictionary(
+            uniqueKeysWithValues: authorizationMutations.map {
+                ($0.serverID, credentialStore.authorizationToken(forMCPServer: $0.serverID))
+            }
+        )
+
+        // Profile references must exist before their Keychain tokens. If a token
+        // write fails, restore both sides so the batch never leaves an orphan.
+        saveProfiles(sorted)
+        do {
+            for mutation in authorizationMutations {
+                if let token = mutation.token?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                   token.isEmpty == false {
+                    try credentialStore.setAuthorizationToken(
+                        token,
+                        forMCPServer: mutation.serverID
+                    )
+                } else {
+                    try credentialStore.deleteAuthorizationToken(
+                        forMCPServer: mutation.serverID
+                    )
+                }
+            }
+        } catch {
+            for mutation in authorizationMutations {
+                if let previousToken = previousTokens[mutation.serverID] ?? nil {
+                    try? credentialStore.setAuthorizationToken(
+                        previousToken,
+                        forMCPServer: mutation.serverID
+                    )
+                } else {
+                    try? credentialStore.deleteAuthorizationToken(
+                        forMCPServer: mutation.serverID
+                    )
+                }
+            }
+            saveProfiles(previousProfiles)
+            throw error
+        }
+        return sorted
+    }
+}
+
 protocol SettingsWindowControllerDelegate: AnyObject {
     func settingsController(_ controller: SettingsWindowController, didUpdateProfiles profiles: [VoiceProfile])
     func settingsController(
@@ -127,8 +201,8 @@ final class SettingsWindowController: NSWindowController {
     private var workingProfiles: [VoiceProfile]
     private var selectedProfileID: UUID
     private var providerSettingsCache: VoiceProfileProviderSettingsCache
-    private var pendingMCPAuthorizationValues: [UUID: String] = [:]
-    private var pendingMCPAuthorizationDeletions: Set<UUID> = []
+    private let credentialStore: VoiceCredentialStoring
+    private let saveProfiles: ([VoiceProfile]) -> Void
     private let openClawRuntimeService: OpenClawRuntimeSettingsServing
     private(set) var openClawRuntimePanelState: OpenClawRuntimePanelState
     private var openClawRuntimeLoadGeneration = UUID()
@@ -146,6 +220,15 @@ final class SettingsWindowController: NSWindowController {
             modelIsEditable: openClawModelField.isEditable,
             voicePickerIsVisible: openClawVoicePopup.isHidden == false,
             applyButtonIsVisible: applyOpenClawRuntimeButton.isHidden == false
+        )
+    }
+
+    var windowSizingSnapshot: SettingsWindowSizingSnapshot {
+        window?.contentView?.layoutSubtreeIfNeeded()
+        formStackView.layoutSubtreeIfNeeded()
+        return SettingsWindowSizingSnapshot(
+            contentHeight: window?.contentLayoutRect.height ?? 0,
+            formHeight: formStackView.fittingSize.height
         )
     }
 
@@ -197,7 +280,6 @@ final class SettingsWindowController: NSWindowController {
     private let instructionsTextView = NSTextView()
     private let tipLabel = NSTextField(wrappingLabelWithString: "If the voice hears phrases you did not say, use headphones — speaker audio feeding back into the microphone causes phantom turns.")
     private let formStatusLabel = NSTextField(wrappingLabelWithString: "")
-    private let saveButton = NSButton(title: "Save", target: nil, action: nil)
     private var openClawRuntimeSectionViews: [NSView] = []
     private let openClawSessionLabel = NSTextField(labelWithString: "")
     private let openClawModelField = NSTextField()
@@ -216,12 +298,18 @@ final class SettingsWindowController: NSWindowController {
 
     init(
         profiles: [VoiceProfile],
-        openClawRuntimeService: OpenClawRuntimeSettingsServing = OpenClawRuntimeSettingsService()
+        openClawRuntimeService: OpenClawRuntimeSettingsServing = OpenClawRuntimeSettingsService(),
+        credentialStore: VoiceCredentialStoring = APIKeyStore.shared,
+        saveProfiles: @escaping ([VoiceProfile]) -> Void = {
+            VoiceProfileStore.save($0)
+        }
     ) {
         let initialProfiles = profiles.isEmpty ? [Self.makeDefaultProfile()] : profiles
         workingProfiles = initialProfiles
         selectedProfileID = initialProfiles[0].id
         providerSettingsCache = VoiceProfileProviderSettingsCache(profiles: initialProfiles)
+        self.credentialStore = credentialStore
+        self.saveProfiles = saveProfiles
         self.openClawRuntimeService = openClawRuntimeService
         openClawRuntimePanelState = OpenClawRuntimePanelState(
             settings: .staticFallback,
@@ -230,13 +318,13 @@ final class SettingsWindowController: NSWindowController {
         )
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 660),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 900),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = VoiceChannelUIStrings.windowTitle
-        window.contentMinSize = NSSize(width: 540, height: 560)
+        window.contentMinSize = NSSize(width: 540, height: 640)
         window.isReleasedWhenClosed = false
         window.center()
 
@@ -481,20 +569,12 @@ final class SettingsWindowController: NSWindowController {
         addArranged(instructionsScrollView)
         endSection(after: instructionsScrollView)
 
-        // Footer: speaker-feedback tip, inline status, prominent Save button.
+        // Footer: auto-apply status and the speaker-feedback tip.
         let footerSeparator = makeSeparator()
         addArranged(footerSeparator)
         formStackView.setCustomSpacing(12, after: footerSeparator)
         addArranged(tipLabel)
         addArranged(formStatusLabel)
-        formStackView.setCustomSpacing(12, after: formStatusLabel)
-        let saveSpacer = NSView()
-        saveSpacer.translatesAutoresizingMaskIntoConstraints = false
-        saveSpacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        let saveRow = NSStackView(views: [saveSpacer, saveButton])
-        saveRow.orientation = .horizontal
-        saveRow.translatesAutoresizingMaskIntoConstraints = false
-        addArranged(saveRow)
     }
 
     private func configureProfileControls() {
@@ -561,6 +641,8 @@ final class SettingsWindowController: NSWindowController {
         }
         speakerModePopup.toolTip =
             "Controls speaker echo handling for this voice channel. Auto uses headphone behavior for Bluetooth and the built-in headphone jack; USB defaults to speaker behavior."
+        speakerModePopup.target = self
+        speakerModePopup.action = #selector(speakerModeChanged)
     }
 
     private func configureOpenClawRuntimeControls() {
@@ -613,7 +695,8 @@ final class SettingsWindowController: NSWindowController {
         }
         addMCPServerButton.action = #selector(addMCPServer)
         editMCPServerButton.action = #selector(editMCPServer)
-        removeMCPServerButton.action = #selector(removeMCPServer)
+        removeMCPServerButton.action =
+            #selector(removeMCPServerWithConfirmation)
     }
 
     private func configureInstructionsEditor() {
@@ -634,6 +717,7 @@ final class SettingsWindowController: NSWindowController {
         instructionsTextView.autoresizingMask = [.width]
         instructionsTextView.textContainer?.widthTracksTextView = true
         instructionsTextView.textContainer?.containerSize = NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude)
+        instructionsTextView.delegate = self
         instructionsScrollView.documentView = instructionsTextView
         instructionsTextView.frame = NSRect(origin: .zero, size: instructionsScrollView.contentSize)
     }
@@ -641,6 +725,10 @@ final class SettingsWindowController: NSWindowController {
     private func configureStaticControls() {
         nameField.delegate = self
         nameField.placeholderString = VoiceChannelUIStrings.channelNamePlaceholder
+        modelField.delegate = self
+        voiceComboBox.delegate = self
+        endpointField.delegate = self
+        apiKeyField.delegate = self
 
         hotKeyStatusLabel.font = NSFont.systemFont(ofSize: 11)
         resetHotKeyStatus()
@@ -649,6 +737,8 @@ final class SettingsWindowController: NSWindowController {
         voiceComboBox.isEditable = true
 
         endpointField.placeholderString = "wss://localhost:8080"
+        webSearchCheckbox.target = self
+        webSearchCheckbox.action = #selector(webSearchChanged)
 
         credentialStatusLabel.font = NSFont.systemFont(ofSize: 11)
         credentialStatusLabel.textColor = .secondaryLabelColor
@@ -658,15 +748,6 @@ final class SettingsWindowController: NSWindowController {
 
         formStatusLabel.font = NSFont.systemFont(ofSize: 12)
         clearFormStatus()
-
-        // Return-key default button: AppKit paints it with the accent color.
-        saveButton.bezelStyle = .rounded
-        saveButton.controlSize = .large
-        saveButton.keyEquivalent = "\r"
-        saveButton.translatesAutoresizingMaskIntoConstraints = false
-        saveButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
-        saveButton.target = self
-        saveButton.action = #selector(saveSettings)
     }
 
     private func styleFormLabel(_ label: NSTextField) {
@@ -767,8 +848,6 @@ final class SettingsWindowController: NSWindowController {
         let nextProfiles = newValue.isEmpty ? [Self.makeDefaultProfile()] : newValue
         workingProfiles = nextProfiles
         providerSettingsCache = VoiceProfileProviderSettingsCache(profiles: nextProfiles)
-        pendingMCPAuthorizationValues.removeAll()
-        pendingMCPAuthorizationDeletions.removeAll()
         if nextProfiles.contains(where: { $0.id == selectedProfileID }) == false {
             selectedProfileID = nextProfiles[0].id
         }
@@ -786,25 +865,115 @@ final class SettingsWindowController: NSWindowController {
         return trimmed.isEmpty ? profile.providerID.displayName : trimmed
     }
 
-    private func commitFormToWorkingCopy() {
-        guard let index = selectedProfileIndex else { return }
-        var profile = workingProfiles[index]
-        profile.name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if profile.providerID.isImplemented,
-           let raw = providerPopup.selectedItem?.representedObject as? String,
-           let provider = VoiceProviderID(rawValue: raw) {
-            profile.providerID = provider
+    @discardableResult
+    func apply(
+        _ edit: VoiceProfileSettingsEdit,
+        to profileID: UUID? = nil
+    ) -> Bool {
+        let targetID = profileID ?? selectedProfileID
+        guard let index = workingProfiles.firstIndex(where: {
+            $0.id == targetID
+        }) else {
+            return false
         }
-        profile.model = modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        profile.voice = voiceComboBox.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        profile.instructions = instructionsTextView.string
-        profile.endpointURL = endpointField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        profile.webSearchEnabled = webSearchCheckbox.state == .on
-        if let raw = speakerModePopup.selectedItem?.representedObject as? String,
-           let preference = OpenAISpeakerModePreference(rawValue: raw) {
+        var nextProfiles = workingProfiles
+        var profile = nextProfiles[index]
+
+        switch edit {
+        case let .name(value):
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            profile.name = trimmed.isEmpty ? profile.providerID.displayName : trimmed
+        case let .provider(provider):
+            guard provider.isImplemented else { return false }
+            let previousProvider = profile.providerID
+            guard provider != previousProvider else { return true }
+            providerSettingsCache.remember(profile)
+            profile.providerID = provider
+            let cached = providerSettingsCache.settings(
+                for: profile.id,
+                provider: provider
+            )
+            profile.model = cached?.model ?? provider.defaultModel
+            profile.voice = cached?.voice ?? provider.defaultVoice
+        case let .model(value):
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            profile.model = profile.providerID.supportsModelSetting
+                && trimmed.isEmpty == false
+                ? trimmed
+                : profile.providerID.defaultModel
+        case let .voice(value):
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            profile.voice = profile.providerID.supportsVoiceSetting
+                && trimmed.isEmpty == false
+                ? trimmed
+                : profile.providerID.defaultVoice
+        case let .instructions(value):
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            profile.instructions = profile.providerID != .chatGPTWeb
+                && trimmed.isEmpty == false
+                ? trimmed
+                : VoiceSessionConfiguration.defaultInstructions
+        case let .endpointURL(value):
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let message = endpointValidationError(
+                provider: profile.providerID,
+                endpoint: trimmed
+            ) {
+                showEndpointError(message)
+                return false
+            }
+            profile.endpointURL = trimmed
+            resetEndpointStatus(for: profile.providerID)
+        case let .webSearchEnabled(enabled):
+            profile.webSearchEnabled =
+                profile.providerID == .openAIRealtime && enabled
+        case let .speakerModePreference(preference):
             profile.speakerModePreference = preference
         }
-        workingProfiles[index] = profile
+
+        nextProfiles[index] = profile
+        let committed = commitProfiles(nextProfiles)
+        if committed {
+            providerSettingsCache.remember(profile)
+        }
+        return committed
+    }
+
+    @discardableResult
+    private func commitProfiles(
+        _ nextProfiles: [VoiceProfile],
+        authorizationMutations: [MCPAuthorizationMutation] = []
+    ) -> Bool {
+        let previousProfiles = workingProfiles
+        do {
+            let sorted = try SettingsAutoApplyPersistence.commit(
+                previousProfiles: previousProfiles,
+                nextProfiles: nextProfiles,
+                authorizationMutations: authorizationMutations,
+                saveProfiles: saveProfiles,
+                credentialStore: credentialStore
+            )
+            workingProfiles = sorted
+            if workingProfiles.contains(where: {
+                $0.id == selectedProfileID
+            }) == false, let first = workingProfiles.first {
+                selectedProfileID = first.id
+            }
+            rebuildProfilePopup()
+            updateProfileButtons()
+            delegate?.settingsController(
+                self,
+                didUpdateProfiles: sorted
+            )
+            clearFormStatus()
+            return true
+        } catch {
+            workingProfiles = previousProfiles
+            showFormError(
+                "Couldn’t apply the settings change: \(error.localizedDescription)"
+            )
+            return false
+        }
     }
 
     private func syncFormFromSelectedProfile() {
@@ -844,6 +1013,7 @@ final class SettingsWindowController: NSWindowController {
         endpointRequiredLabel.isHidden = provider != .custom
         endpointField.placeholderString = provider.endpointPlaceholder
         endpointField.stringValue = profile.endpointURL
+        resetEndpointStatus(for: provider)
         speakerModeRow?.isHidden =
             provider != .openAIRealtime && provider != .openClaw
         if let index = speakerModePopup.itemArray.firstIndex(where: {
@@ -857,7 +1027,7 @@ final class SettingsWindowController: NSWindowController {
 
         apiCredentialLabel.stringValue = provider.credentialLabel
         apiKeyField.stringValue = ""
-        syncCredentialStatus(for: provider)
+        syncCredentialStatus(for: profile)
         syncMCPServerControls(for: profile)
         syncOpenClawRuntimePanel(for: profile)
 
@@ -969,16 +1139,18 @@ final class SettingsWindowController: NSWindowController {
         removeMCPServerButton.isEnabled = hasServers
     }
 
-    private func syncCredentialStatus(for provider: VoiceProviderID) {
+    private func syncCredentialStatus(for profile: VoiceProfile) {
+        let provider = profile.providerID
         let credentialState = VoiceProviderCredentialViewState(
             provider: provider,
-            hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)
+            hasAPIKey: credentialStore.hasAPIKey(for: profile)
         )
         apiKeyField.isEnabled = credentialState.acceptsAPIKeyInput
         apiKeyField.placeholderString = provider.credentialPlaceholder
         removeAPIKeyButton.isEnabled = credentialState.canRemoveAPIKey
         removeAPIKeyButton.isHidden = provider == .chatGPTWeb
         credentialStatusLabel.stringValue = credentialState.statusMessage
+        credentialStatusLabel.textColor = .secondaryLabelColor
     }
 
     private func rebuildProfilePopup() {
@@ -1009,43 +1181,72 @@ final class SettingsWindowController: NSWindowController {
         guard let raw = profilePopup.selectedItem?.representedObject as? String,
               let id = UUID(uuidString: raw),
               id != selectedProfileID else { return }
-        commitFormToWorkingCopy()
+        commitFocusedControl()
         selectProfile(id: id)
     }
 
     @objc private func addProfile() {
-        commitFormToWorkingCopy()
+        commitFocusedControl()
         guard let provider = chooseProviderForNewChannel() else { return }
         let profile = VoiceChannelOperations.makeChannel(
             provider: provider,
             existingNames: workingProfiles.map(\.name)
         )
-        workingProfiles.append(profile)
-        providerSettingsCache.remember(profile)
+        guard commitNewProfile(profile) else { return }
         selectProfile(id: profile.id)
-        updateProfileButtons()
+    }
+
+    @discardableResult
+    func commitNewProfile(_ profile: VoiceProfile) -> Bool {
+        var nextProfiles = workingProfiles
+        nextProfiles.append(profile)
+        guard commitProfiles(nextProfiles) else { return false }
+        providerSettingsCache.remember(profile)
+        return true
     }
 
     @objc private func duplicateProfile() {
-        guard let sourceIndex = selectedProfileIndex else { return }
-        commitFormToWorkingCopy()
+        commitFocusedControl()
+        guard let copy = commitDuplicateProfile(selectedProfileID) else {
+            return
+        }
+        selectProfile(id: copy.id)
+    }
+
+    @discardableResult
+    func commitDuplicateProfile(_ profileID: UUID) -> VoiceProfile? {
+        guard let sourceIndex = workingProfiles.firstIndex(where: {
+            $0.id == profileID
+        }) else {
+            return nil
+        }
         let source = workingProfiles[sourceIndex]
         let copy = VoiceChannelOperations.duplicate(
             source,
             existingNames: workingProfiles.map(\.name)
         )
+        var authorizationMutations: [MCPAuthorizationMutation] = []
         for (sourceServer, copiedServer) in zip(
             source.mcpServers,
             copy.mcpServers
         ) {
             if let token = effectiveMCPAuthorization(for: sourceServer.id) {
-                pendingMCPAuthorizationValues[copiedServer.id] = token
+                authorizationMutations.append(MCPAuthorizationMutation(
+                    serverID: copiedServer.id,
+                    token: token
+                ))
             }
         }
-        workingProfiles.insert(copy, at: sourceIndex + 1)
+        var nextProfiles = workingProfiles
+        nextProfiles.insert(copy, at: sourceIndex + 1)
+        guard commitProfiles(
+            nextProfiles,
+            authorizationMutations: authorizationMutations
+        ) else {
+            return nil
+        }
         providerSettingsCache.remember(copy)
-        selectProfile(id: copy.id)
-        updateProfileButtons()
+        return copy
     }
 
     @objc private func removeProfileWithConfirmation() {
@@ -1055,22 +1256,45 @@ final class SettingsWindowController: NSWindowController {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Delete voice channel “\(name)”?"
-        alert.informativeText = "This can’t be undone. If this channel is active, its voice session will stop when you save."
+        alert.informativeText = "This can’t be undone. If this channel is active, its voice session will stop immediately."
         alert.addButton(withTitle: VoiceChannelUIStrings.deleteChannel)
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         let removedProfile = workingProfiles[index]
-        let removedProfileID = removedProfile.id
-        for server in removedProfile.mcpServers {
-            scheduleMCPAuthorizationDeletion(for: server.id)
-        }
-        workingProfiles.remove(at: index)
-        providerSettingsCache.remove(profileID: removedProfileID)
-        selectedProfileID = workingProfiles[min(index, workingProfiles.count - 1)].id
-        rebuildProfilePopup()
+        guard commitDeleteProfile(removedProfile.id) else { return }
         syncFormFromSelectedProfile()
-        updateProfileButtons()
+    }
+
+    @discardableResult
+    func commitDeleteProfile(_ profileID: UUID) -> Bool {
+        guard workingProfiles.count > 1,
+              let index = workingProfiles.firstIndex(where: {
+                  $0.id == profileID
+              }) else {
+            return false
+        }
+        let removedProfile = workingProfiles[index]
+        let removedProfileID = removedProfile.id
+        let authorizationMutations = removedProfile.mcpServers.map {
+            MCPAuthorizationMutation(serverID: $0.id, token: nil)
+        }
+        var nextProfiles = workingProfiles
+        nextProfiles.remove(at: index)
+        let nextSelectedID = nextProfiles[
+            min(index, nextProfiles.count - 1)
+        ].id
+        selectedProfileID = nextSelectedID
+        guard commitProfiles(
+            nextProfiles,
+            authorizationMutations: authorizationMutations
+        ) else {
+            selectedProfileID = removedProfileID
+            rebuildProfilePopup()
+            return false
+        }
+        providerSettingsCache.remove(profileID: removedProfileID)
+        return true
     }
 
     private func chooseProviderForNewChannel() -> VoiceProviderID? {
@@ -1099,14 +1323,66 @@ final class SettingsWindowController: NSWindowController {
               let result = editMCPServerConfiguration(nil) else {
             return
         }
-        workingProfiles[index].mcpServers.append(result.configuration)
-        stageMCPAuthorization(
-            result.authorization,
-            for: result.configuration.id
+        guard commitMCPServer(
+            result.configuration,
+            authorization: result.authorization,
+            profileID: workingProfiles[index].id
+        ) else {
+            return
+        }
+        guard let committedIndex = selectedProfileIndex else { return }
+        syncMCPServerControls(for: workingProfiles[committedIndex])
+        mcpServerPopup.selectItem(
+            at: workingProfiles[committedIndex].mcpServers.count - 1
         )
-        syncMCPServerControls(for: workingProfiles[index])
-        mcpServerPopup.selectItem(at: workingProfiles[index].mcpServers.count - 1)
         updateMCPServerButtons()
+    }
+
+    @discardableResult
+    func commitMCPServer(
+        _ configuration: MCPServerConfiguration,
+        authorization: String?,
+        profileID: UUID
+    ) -> Bool {
+        guard let index = workingProfiles.firstIndex(where: {
+            $0.id == profileID
+        }), [.openAIRealtime, .custom].contains(
+            workingProfiles[index].providerID
+        ), isValidMCPServerURL(configuration.urlString),
+           configuration.label.trimmingCharacters(
+               in: .whitespacesAndNewlines
+           ).isEmpty == false else {
+            return false
+        }
+        var normalized = configuration
+        normalized.label = configuration.label.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        normalized.urlString = configuration.urlString.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let allowedTools = configuration.allowedTools?
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+        normalized.allowedTools = allowedTools?.isEmpty == false
+            ? allowedTools
+            : nil
+
+        var nextProfiles = workingProfiles
+        if let serverIndex = nextProfiles[index].mcpServers.firstIndex(
+            where: { $0.id == normalized.id }
+        ) {
+            nextProfiles[index].mcpServers[serverIndex] = normalized
+        } else {
+            nextProfiles[index].mcpServers.append(normalized)
+        }
+        return commitProfiles(
+            nextProfiles,
+            authorizationMutations: [MCPAuthorizationMutation(
+                serverID: normalized.id,
+                token: authorization
+            )]
+        )
     }
 
     @objc private func editMCPServer() {
@@ -1117,24 +1393,70 @@ final class SettingsWindowController: NSWindowController {
               ) else {
             return
         }
-        workingProfiles[profileIndex].mcpServers[serverIndex] = result.configuration
-        stageMCPAuthorization(
-            result.authorization,
-            for: result.configuration.id
-        )
-        syncMCPServerControls(for: workingProfiles[profileIndex])
+        guard commitMCPServer(
+            result.configuration,
+            authorization: result.authorization,
+            profileID: workingProfiles[profileIndex].id
+        ) else {
+            return
+        }
+        guard let committedIndex = selectedProfileIndex else { return }
+        syncMCPServerControls(for: workingProfiles[committedIndex])
         mcpServerPopup.selectItem(at: serverIndex)
         updateMCPServerButtons()
     }
 
-    @objc private func removeMCPServer() {
+    @objc private func removeMCPServerWithConfirmation() {
         guard let profileIndex = selectedProfileIndex,
               let serverIndex = selectedMCPServerIndex(for: workingProfiles[profileIndex]) else {
             return
         }
-        let server = workingProfiles[profileIndex].mcpServers.remove(at: serverIndex)
-        scheduleMCPAuthorizationDeletion(for: server.id)
-        syncMCPServerControls(for: workingProfiles[profileIndex])
+        let server = workingProfiles[profileIndex].mcpServers[serverIndex]
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Remove MCP server “\(server.label)”?"
+        alert.informativeText =
+            "The server and its stored authorization token will be removed immediately."
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let serverID =
+            server.id
+        guard commitRemoveMCPServer(
+            serverID,
+            profileID: workingProfiles[profileIndex].id
+        ) else {
+            return
+        }
+        guard let committedIndex = selectedProfileIndex else { return }
+        syncMCPServerControls(for: workingProfiles[committedIndex])
+    }
+
+    @discardableResult
+    func commitRemoveMCPServer(
+        _ serverID: UUID,
+        profileID: UUID
+    ) -> Bool {
+        guard let profileIndex = workingProfiles.firstIndex(where: {
+            $0.id == profileID
+        }), let serverIndex = workingProfiles[
+            profileIndex
+        ].mcpServers.firstIndex(where: {
+            $0.id == serverID
+        }) else {
+            return false
+        }
+        var nextProfiles = workingProfiles
+        let server = nextProfiles[profileIndex].mcpServers.remove(
+            at: serverIndex
+        )
+        return commitProfiles(
+            nextProfiles,
+            authorizationMutations: [
+                MCPAuthorizationMutation(serverID: server.id, token: nil)
+            ]
+        )
     }
 
     private func selectedMCPServerIndex(for profile: VoiceProfile) -> Int? {
@@ -1168,11 +1490,17 @@ final class SettingsWindowController: NSWindowController {
         )
         authorizationField.placeholderString = "Optional bearer token"
 
+        let validationLabel = NSTextField(wrappingLabelWithString: "")
+        validationLabel.textColor = .systemRed
+        validationLabel.font = NSFont.systemFont(ofSize: 11)
+        validationLabel.isHidden = true
+
         let editor = NSGridView(views: [
             [NSTextField(labelWithString: "Label"), labelField],
             [NSTextField(labelWithString: "URL"), urlField],
             [NSTextField(labelWithString: "Allowed tools"), allowedToolsField],
-            [NSTextField(labelWithString: "Authorization"), authorizationField]
+            [NSTextField(labelWithString: "Authorization"), authorizationField],
+            [NSTextField(labelWithString: ""), validationLabel]
         ])
         editor.rowSpacing = 8
         editor.columnSpacing = 12
@@ -1191,11 +1519,16 @@ final class SettingsWindowController: NSWindowController {
             let label = labelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let urlString = urlField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if label.isEmpty {
-                alert.informativeText = "Enter a server label."
+                validationLabel.stringValue = "Enter a server label."
+                validationLabel.isHidden = false
+                window?.makeFirstResponder(labelField)
                 continue
             }
             if isValidMCPServerURL(urlString) == false {
-                alert.informativeText = "Enter an http:// or https:// URL with a host."
+                validationLabel.stringValue =
+                    "Enter an http:// or https:// URL with a host."
+                validationLabel.isHidden = false
+                window?.makeFirstResponder(urlField)
                 continue
             }
 
@@ -1217,53 +1550,37 @@ final class SettingsWindowController: NSWindowController {
     }
 
     private func effectiveMCPAuthorization(for id: UUID) -> String? {
-        if pendingMCPAuthorizationDeletions.contains(id) {
-            return nil
-        }
-        return pendingMCPAuthorizationValues[id]
-            ?? APIKeyStore.shared.authorizationToken(forMCPServer: id)
-    }
-
-    private func stageMCPAuthorization(_ authorization: String?, for id: UUID) {
-        let trimmed = authorization?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if trimmed.isEmpty {
-            scheduleMCPAuthorizationDeletion(for: id)
-        } else {
-            pendingMCPAuthorizationDeletions.remove(id)
-            pendingMCPAuthorizationValues[id] = trimmed
-        }
-    }
-
-    private func scheduleMCPAuthorizationDeletion(for id: UUID) {
-        pendingMCPAuthorizationValues[id] = nil
-        pendingMCPAuthorizationDeletions.insert(id)
+        credentialStore.authorizationToken(forMCPServer: id)
     }
 
     // MARK: - Provider / hotkey actions
 
     @objc private func providerChanged() {
-        guard let index = selectedProfileIndex,
-              let raw = providerPopup.selectedItem?.representedObject as? String,
+        guard let raw = providerPopup.selectedItem?.representedObject as? String,
               let provider = VoiceProviderID(rawValue: raw) else { return }
-        let previousProvider = workingProfiles[index].providerID
-        guard provider != previousProvider else { return }
-
-        // The popup already shows the destination, so commit temporarily adopts it.
-        // Restore the source provider before stashing the fields that are still onscreen.
-        commitFormToWorkingCopy()
-        workingProfiles[index].providerID = previousProvider
-        providerSettingsCache.remember(workingProfiles[index])
-        workingProfiles[index].providerID = provider
-        let settings = providerSettingsCache.settings(
-            for: workingProfiles[index].id,
-            provider: provider
-        )
-        workingProfiles[index].model = settings?.model ?? provider.defaultModel
-        workingProfiles[index].voice = settings?.voice ?? provider.defaultVoice
-        syncFormFromSelectedProfile()
+        if apply(.provider(provider)) {
+            syncFormFromSelectedProfile()
+        }
     }
 
-    private func handleRecordedHotKey(_ hotKey: HotKeyConfiguration, forProfileID profileID: UUID) {
+    @objc private func speakerModeChanged() {
+        guard let raw =
+            speakerModePopup.selectedItem?.representedObject as? String,
+              let preference = OpenAISpeakerModePreference(rawValue: raw)
+        else {
+            return
+        }
+        _ = apply(.speakerModePreference(preference))
+    }
+
+    @objc private func webSearchChanged() {
+        _ = apply(.webSearchEnabled(webSearchCheckbox.state == .on))
+    }
+
+    func handleRecordedHotKey(
+        _ hotKey: HotKeyConfiguration,
+        forProfileID profileID: UUID
+    ) {
         guard let index = workingProfiles.firstIndex(where: { $0.id == profileID }) else { return }
 
         if let conflict = workingProfiles.first(where: { $0.id != profileID && isSameHotKey($0.hotKey, hotKey) }) {
@@ -1278,8 +1595,18 @@ final class SettingsWindowController: NSWindowController {
             for: workingProfiles[index]
         ) ?? false
         if accepted {
-            workingProfiles[index].hotKey = hotKey
-            resetHotKeyStatus()
+            var nextProfiles = workingProfiles
+            nextProfiles[index].hotKey = hotKey
+            if commitProfiles(nextProfiles) {
+                recorderView.hotKey = hotKey
+                resetHotKeyStatus()
+            } else {
+                recorderView.hotKey = workingProfiles[
+                    workingProfiles.firstIndex(where: {
+                        $0.id == profileID
+                    }) ?? index
+                ].hotKey
+            }
         } else {
             recorderView.hotKey = workingProfiles[index].hotKey
             showHotKeyError("That shortcut could not be registered.")
@@ -1303,7 +1630,7 @@ final class SettingsWindowController: NSWindowController {
 
     // MARK: - Gateway runtime / save / API key actions
 
-    @objc private func applyOpenClawRuntimeSettings() {
+    @objc func applyOpenClawRuntimeSettings() {
         guard let index = selectedProfileIndex,
               workingProfiles[index].providerID == .openClaw,
               openClawRuntimePanelState.isEditable else {
@@ -1332,8 +1659,7 @@ final class SettingsWindowController: NSWindowController {
         openClawRuntimeStatusLabel.textColor = .secondaryLabelColor
         openClawRuntimeStatusLabel.isHidden = false
         let profileID = workingProfiles[index].id
-        let endpointURL = endpointField.stringValue
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let endpointURL = workingProfiles[index].endpointURL
         openClawRuntimeService.apply(
             model: model,
             voice: voice,
@@ -1370,142 +1696,105 @@ final class SettingsWindowController: NSWindowController {
         openClawRuntimeStatusLabel.isHidden = false
     }
 
-    @objc private func saveSettings() {
-        let previouslySelectedID = selectedProfileID
-        let typedAPIKey = apiKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        commitFormToWorkingCopy()
+    private func commitAPIKeyField() {
+        guard let index = selectedProfileIndex else { return }
+        _ = commitAPIKey(
+            apiKeyField.stringValue,
+            for: workingProfiles[index].id
+        )
+    }
 
-        let normalized = normalizedProfilesForSave()
-        for profile in normalized {
-            if let message = endpointValidationError(for: profile) {
-                workingProfiles = normalized
-                selectProfile(id: profile.id)
-                if profile.id == previouslySelectedID {
-                    apiKeyField.stringValue = typedAPIKey
-                }
-                showFormError(message)
-                return
-            }
-            if let message = mcpValidationError(for: profile) {
-                workingProfiles = normalized
-                selectProfile(id: profile.id)
-                if profile.id == previouslySelectedID {
-                    apiKeyField.stringValue = typedAPIKey
-                }
-                showFormError(message)
-                return
-            }
+    @discardableResult
+    func commitAPIKey(_ value: String, for profileID: UUID) -> Bool {
+        guard let index = workingProfiles.firstIndex(where: {
+            $0.id == profileID
+        }) else {
+            return false
         }
-        workingProfiles = normalized
-        for profile in normalized {
-            providerSettingsCache.remember(profile)
+        let profile = workingProfiles[index]
+        let provider = profile.providerID
+        let credentialState = VoiceProviderCredentialViewState(
+            provider: provider,
+            hasAPIKey: credentialStore.hasAPIKey(for: profile)
+        )
+        let typedAPIKey = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard credentialState.acceptsAPIKeyInput,
+              typedAPIKey.isEmpty == false else {
+            return false
         }
 
         do {
-            try savePendingMCPAuthorizations()
+            // The committed profile, not the popup's transient selection, owns
+            // this account.
+            try credentialStore.setAPIKey(typedAPIKey, for: profile)
+            apiKeyField.stringValue = ""
+            syncCredentialStatus(for: profile)
+            delegate?.settingsControllerDidUpdateCredentials(self)
+            return true
         } catch {
-            showFormError("Couldn’t save an MCP authorization token: \(error.localizedDescription)")
-            return
+            credentialStatusLabel.stringValue =
+                "Couldn’t save the API key: \(error.localizedDescription)"
+            credentialStatusLabel.textColor = .systemRed
+            return false
         }
-        VoiceProfileStore.save(normalized)
-
-        if let index = selectedProfileIndex {
-            let provider = workingProfiles[index].providerID
-            let credentialState = VoiceProviderCredentialViewState(
-                provider: provider,
-                hasAPIKey: APIKeyStore.shared.hasAPIKey(for: provider)
-            )
-            if credentialState.acceptsAPIKeyInput, typedAPIKey.isEmpty == false {
-                do {
-                    try APIKeyStore.shared.setAPIKey(typedAPIKey, for: provider)
-                } catch {
-                    showFormError("Couldn’t save the API key: \(error.localizedDescription)")
-                    rebuildProfilePopup()
-                    syncCredentialStatus(for: provider)
-                    delegate?.settingsController(self, didUpdateProfiles: workingProfiles)
-                    return
-                }
-            }
-        }
-
-        rebuildProfilePopup()
-        syncFormFromSelectedProfile()
-        delegate?.settingsController(self, didUpdateProfiles: workingProfiles)
-        showFormStatus("Saved.")
     }
 
     @objc private func removeAPIKey() {
         guard let index = selectedProfileIndex else { return }
-        let provider = workingProfiles[index].providerID
-        guard provider != .chatGPTWeb else { return }
+        _ = commitRemoveAPIKey(for: workingProfiles[index].id)
+    }
+
+    @discardableResult
+    func commitRemoveAPIKey(for profileID: UUID) -> Bool {
+        guard let index = workingProfiles.firstIndex(where: {
+            $0.id == profileID
+        }) else {
+            return false
+        }
+        let profile = workingProfiles[index]
+        let provider = profile.providerID
+        guard provider != .chatGPTWeb else { return false }
 
         do {
-            try APIKeyStore.shared.deleteAPIKey(for: provider)
+            try credentialStore.deleteAPIKey(for: profile)
             apiKeyField.stringValue = ""
-            syncCredentialStatus(for: provider)
+            syncCredentialStatus(for: profile)
             delegate?.settingsControllerDidUpdateCredentials(self)
+            return true
         } catch {
-            showFormError("Couldn’t remove the API key: \(error.localizedDescription)")
+            credentialStatusLabel.stringValue =
+                "Couldn’t remove the API key: \(error.localizedDescription)"
+            credentialStatusLabel.textColor = .systemRed
+            return false
         }
     }
 
-    private func normalizedProfilesForSave() -> [VoiceProfile] {
-        workingProfiles.map { profile in
-            var normalized = profile
-            let provider = profile.providerID
-
-            normalized.name = displayName(for: profile)
-
-            let model = profile.model.trimmingCharacters(in: .whitespacesAndNewlines)
-            normalized.model = provider.supportsModelSetting && model.isEmpty == false ? model : provider.defaultModel
-
-            let voice = profile.voice.trimmingCharacters(in: .whitespacesAndNewlines)
-            normalized.voice = provider.supportsVoiceSetting && voice.isEmpty == false ? voice : provider.defaultVoice
-
-            let instructions = profile.instructions.trimmingCharacters(in: .whitespacesAndNewlines)
-            normalized.instructions = provider != .chatGPTWeb && instructions.isEmpty == false
-                ? instructions
-                : VoiceSessionConfiguration.defaultInstructions
-
-            normalized.endpointURL = profile.endpointURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            normalized.mcpServers = profile.mcpServers.map { server in
-                let allowedTools = server.allowedTools?
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { $0.isEmpty == false }
-                return MCPServerConfiguration(
-                    id: server.id,
-                    label: server.label.trimmingCharacters(in: .whitespacesAndNewlines),
-                    urlString: server.urlString.trimmingCharacters(in: .whitespacesAndNewlines),
-                    allowedTools: allowedTools?.isEmpty == false ? allowedTools : nil
-                )
-            }
-            return normalized
-        }
-    }
-
-    private func endpointValidationError(for profile: VoiceProfile) -> String? {
-        let endpoint = profile.endpointURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func endpointValidationError(
+        provider: VoiceProviderID,
+        endpoint: String
+    ) -> String? {
         if endpoint.isEmpty {
-            return profile.providerID == .custom
-                ? "“\(displayName(for: profile))” needs an endpoint URL — custom endpoints can’t be saved without one."
+            return provider == .custom
+                ? "Required"
                 : nil
         }
         guard isValidEndpointURL(endpoint) else {
-            return "The endpoint URL for “\(displayName(for: profile))” must start with ws://, wss://, http://, or https:// and include a host."
+            return "Use ws://, wss://, http://, or https:// with a host."
         }
         return nil
     }
 
-    private func mcpValidationError(for profile: VoiceProfile) -> String? {
-        for server in profile.mcpServers {
-            if server.label.isEmpty {
-                return "An MCP server in “\(displayName(for: profile))” needs a label."
-            }
-            if isValidMCPServerURL(server.urlString) == false {
-                return "The MCP server URL for “\(server.label)” must start with http:// or https:// and include a host."
-            }
-        }
-        return nil
+    private func showEndpointError(_ message: String) {
+        endpointRequiredLabel.stringValue = message
+        endpointRequiredLabel.textColor = .systemRed
+        endpointRequiredLabel.isHidden = false
+    }
+
+    private func resetEndpointStatus(for provider: VoiceProviderID) {
+        endpointRequiredLabel.stringValue = "Required"
+        endpointRequiredLabel.textColor = .systemRed
+        endpointRequiredLabel.isHidden = provider != .custom
     }
 
     private func isValidMCPServerURL(_ string: String) -> Bool {
@@ -1517,17 +1806,6 @@ final class SettingsWindowController: NSWindowController {
             return false
         }
         return true
-    }
-
-    private func savePendingMCPAuthorizations() throws {
-        for (id, token) in pendingMCPAuthorizationValues {
-            try APIKeyStore.shared.setAuthorizationToken(token, forMCPServer: id)
-        }
-        for id in pendingMCPAuthorizationDeletions {
-            try APIKeyStore.shared.deleteAuthorizationToken(forMCPServer: id)
-        }
-        pendingMCPAuthorizationValues.removeAll()
-        pendingMCPAuthorizationDeletions.removeAll()
     }
 
     private func isValidEndpointURL(_ string: String) -> Bool {
@@ -1547,30 +1825,91 @@ final class SettingsWindowController: NSWindowController {
         formStatusLabel.isHidden = false
     }
 
-    private func showFormStatus(_ message: String) {
-        formStatusLabel.stringValue = message
-        formStatusLabel.textColor = .secondaryLabelColor
-        formStatusLabel.isHidden = false
-    }
-
     private func clearFormStatus() {
         formStatusLabel.stringValue = ""
         formStatusLabel.isHidden = true
     }
 }
 
-extension SettingsWindowController: NSTextFieldDelegate {
+extension SettingsWindowController: NSComboBoxDelegate {
     func controlTextDidEndEditing(_ obj: Notification) {
-        guard let field = obj.object as? NSTextField,
-              field === nameField,
-              let index = selectedProfileIndex else { return }
-        workingProfiles[index].name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        rebuildProfilePopup()
+        guard let field = obj.object as? NSTextField else { return }
+        commitTextField(field)
+    }
+
+    func comboBoxSelectionDidChange(_ notification: Notification) {
+        guard let comboBox = notification.object as? NSComboBox,
+              comboBox === voiceComboBox else {
+            return
+        }
+        _ = apply(.voice(comboBox.stringValue))
+    }
+
+    private func commitTextField(_ field: NSTextField) {
+        switch field {
+        case nameField:
+            if apply(.name(field.stringValue)),
+               let index = selectedProfileIndex {
+                nameField.stringValue = workingProfiles[index].name
+            }
+        case modelField:
+            if apply(.model(field.stringValue)),
+               let index = selectedProfileIndex {
+                modelField.stringValue = workingProfiles[index].model
+            }
+        case voiceComboBox:
+            if apply(.voice(field.stringValue)),
+               let index = selectedProfileIndex {
+                voiceComboBox.stringValue = workingProfiles[index].voice
+            }
+        case endpointField:
+            _ = apply(.endpointURL(field.stringValue))
+        case apiKeyField:
+            commitAPIKeyField()
+        default:
+            break
+        }
+    }
+
+    private func commitFocusedControl() {
+        if instructionsTextView.window?.firstResponder ===
+            instructionsTextView {
+            _ = apply(.instructions(instructionsTextView.string))
+            return
+        }
+        for field in [
+            nameField,
+            modelField,
+            voiceComboBox,
+            endpointField,
+            apiKeyField
+        ] where field.currentEditor() != nil {
+            if let editor = field.currentEditor() {
+                field.stringValue = editor.string
+            }
+            commitTextField(field)
+            return
+        }
+    }
+}
+
+extension SettingsWindowController: NSTextViewDelegate {
+    func textDidEndEditing(_ notification: Notification) {
+        guard let textView = notification.object as? NSTextView,
+              textView === instructionsTextView else {
+            return
+        }
+        if apply(.instructions(textView.string)),
+           let index = selectedProfileIndex {
+            instructionsTextView.string =
+                workingProfiles[index].instructions
+        }
     }
 }
 
 extension SettingsWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
+        commitFocusedControl()
         cancelHotKeyRecording()
     }
 

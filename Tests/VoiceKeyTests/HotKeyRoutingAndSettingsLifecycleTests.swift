@@ -1,4 +1,5 @@
 @testable import VoiceKey
+import Carbon
 import XCTest
 
 final class HotKeyDispatchTableTests: XCTestCase {
@@ -65,7 +66,7 @@ final class VoiceProfileProviderSettingsCacheTests: XCTestCase {
 }
 
 final class VoiceProfileRuntimeLifecycleTests: XCTestCase {
-    func testRecordingHotKeyRegistersUnsavedWorkingCopyProfile() {
+    func testRecordingHotKeyRejectsProfileAbsentFromCommittedList() {
         let savedProfile = VoiceProfile(
             name: "Saved",
             providerID: .openAIRealtime,
@@ -80,29 +81,72 @@ final class VoiceProfileRuntimeLifecycleTests: XCTestCase {
             model: VoiceProviderID.openAIRealtime.defaultModel,
             voice: VoiceProviderID.openAIRealtime.defaultVoice
         )
-        var savedProfiles = [savedProfile]
         var registeredProfiles: [VoiceProfile] = []
-        var persistedProfiles: [[VoiceProfile]] = []
 
-        let accepted = HotKeyRecordingLifecycle.record(
+        let accepted = HotKeyRecordingLifecycle.register(
             .defaultVoiceToggle,
             for: unsavedProfile,
-            savedProfiles: &savedProfiles,
+            committedProfiles: [savedProfile],
             register: { profile in
                 registeredProfiles.append(profile)
                 return true
-            },
-            save: { profiles in
-                persistedProfiles.append(profiles)
+            }
+        )
+
+        XCTAssertFalse(accepted)
+        XCTAssertTrue(registeredProfiles.isEmpty)
+    }
+
+    func testRecordingHotKeyRegistersCommittedProfileCandidate() {
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.hotKey = nil
+        var registeredProfiles: [VoiceProfile] = []
+
+        let accepted = HotKeyRecordingLifecycle.register(
+            .defaultVoiceToggle,
+            for: profile,
+            committedProfiles: [profile],
+            register: {
+                registeredProfiles.append($0)
+                return true
             }
         )
 
         XCTAssertTrue(accepted)
-        XCTAssertEqual(registeredProfiles.count, 1)
-        XCTAssertEqual(registeredProfiles.first?.id, unsavedProfile.id)
-        XCTAssertEqual(registeredProfiles.first?.hotKey, .defaultVoiceToggle)
-        XCTAssertEqual(savedProfiles, [savedProfile])
-        XCTAssertTrue(persistedProfiles.isEmpty)
+        XCTAssertEqual(registeredProfiles.first?.id, profile.id)
+        XCTAssertEqual(
+            registeredProfiles.first?.hotKey,
+            .defaultVoiceToggle
+        )
+    }
+
+    func testFailedHotKeyRegistrationRestoresPreviousRegistration() {
+        let profile = VoiceProfile.defaultOpenAI()
+        let replacement = HotKeyConfiguration(
+            keyCode: UInt32(kVK_F17),
+            carbonModifiers: 0,
+            menuKeyEquivalent: "",
+            menuModifierMask: [],
+            displayName: "F17",
+            mainKeyDisplayName: "F17"
+        )
+        var registrations: [VoiceProfile] = []
+
+        let accepted = HotKeyRecordingLifecycle.register(
+            replacement,
+            for: profile,
+            committedProfiles: [profile],
+            register: { candidate in
+                registrations.append(candidate)
+                return candidate.hotKey != replacement
+            }
+        )
+
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(
+            registrations.map(\.hotKey),
+            [replacement, .defaultVoiceToggle]
+        )
     }
 
     func testDeletingActiveProfileStopsProviderBeforeReconfiguration() {
