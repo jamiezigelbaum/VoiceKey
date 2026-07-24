@@ -129,7 +129,7 @@ enum VoiceProfileStore {
     static func load(defaults: UserDefaults = .standard) -> [VoiceProfile] {
         if let data = defaults.data(forKey: profilesKey),
            let profiles = try? JSONDecoder().decode([VoiceProfile].self, from: data) {
-            return profiles
+            return sortedByHotKey(profiles)
         }
 
         if hasLegacySettings(defaults: defaults) {
@@ -140,8 +140,20 @@ enum VoiceProfileStore {
     }
 
     static func save(_ profiles: [VoiceProfile], defaults: UserDefaults = .standard) {
-        guard let data = try? JSONEncoder().encode(profiles) else { return }
+        guard let data = try? JSONEncoder().encode(sortedByHotKey(profiles)) else { return }
         defaults.set(data, forKey: profilesKey)
+    }
+
+    /// Canonical channel order everywhere (menu, channel picker): by hotkey
+    /// — F16 before F17 before F18 — with unassigned-hotkey channels last.
+    /// Stable for ties so duplicates keep their relative position.
+    static func sortedByHotKey(_ profiles: [VoiceProfile]) -> [VoiceProfile] {
+        profiles.enumerated().sorted { lhs, rhs in
+            let l = lhs.element.hotKey?.sortRank ?? (2, 0, "")
+            let r = rhs.element.hotKey?.sortRank ?? (2, 0, "")
+            if l == r { return lhs.offset < rhs.offset }
+            return l < r
+        }.map(\.element)
     }
 
     static func isFreshInstall(defaults: UserDefaults = .standard) -> Bool {

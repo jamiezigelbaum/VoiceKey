@@ -408,3 +408,61 @@ final class VoiceProviderSettingsStoreTests: XCTestCase {
         )
     }
 }
+
+extension HotKeyConfigurationTests {
+    func testEffectiveMenuKeyEquivalentDerivesFromKeyCodeNotStoredGlyph() {
+        // Live incident 2026-07-24: a legacy F16 profile carried the F18
+        // glyph, so the menu displayed the wrong shortcut for a correct
+        // binding. The derived glyph must win.
+        let staleF16 = HotKeyConfiguration(
+            keyCode: 106, // kVK_F16
+            carbonModifiers: 0,
+            menuKeyEquivalent: String(UnicodeScalar(NSF18FunctionKey)!),
+            menuModifierMask: [],
+            displayName: "F16",
+            mainKeyDisplayName: "F16"
+        )
+        XCTAssertEqual(
+            staleF16.effectiveMenuKeyEquivalent,
+            String(UnicodeScalar(NSF16FunctionKey)!)
+        )
+
+        let emptyF18 = HotKeyConfiguration(
+            keyCode: 79, // kVK_F18
+            carbonModifiers: 0,
+            menuKeyEquivalent: "",
+            menuModifierMask: [],
+            displayName: "F18",
+            mainKeyDisplayName: "F18"
+        )
+        XCTAssertEqual(
+            emptyF18.effectiveMenuKeyEquivalent,
+            String(UnicodeScalar(NSF18FunctionKey)!)
+        )
+    }
+
+    func testProfilesSortByHotKeyWithUnassignedLast() {
+        func profile(_ name: String, keyCode: UInt32?, display: String) -> VoiceProfile {
+            let hotKey = keyCode.map {
+                HotKeyConfiguration(
+                    keyCode: $0, carbonModifiers: 0,
+                    menuKeyEquivalent: "", menuModifierMask: [],
+                    displayName: display, mainKeyDisplayName: display
+                )
+            }
+            return VoiceProfile(
+                name: name, providerID: .openAIRealtime,
+                hotKey: hotKey, model: "", voice: ""
+            )
+        }
+        // Deliberately out of order; F-key key codes are non-monotonic
+        // (F16=106, F17=64, F18=79) so this proves numeric F-key ordering.
+        let sorted = VoiceProfileStore.sortedByHotKey([
+            profile("ChatGPT", keyCode: 79, display: "F18"),
+            profile("NoKey", keyCode: nil, display: ""),
+            profile("OpenAI", keyCode: 106, display: "F16"),
+            profile("Castor", keyCode: 64, display: "F17")
+        ])
+        XCTAssertEqual(sorted.map(\.name), ["OpenAI", "Castor", "ChatGPT", "NoKey"])
+    }
+}

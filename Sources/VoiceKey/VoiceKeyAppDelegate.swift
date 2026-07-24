@@ -587,7 +587,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             item.title = profileMenuTitle(for: profile)
             item.isEnabled = isProfileMenuItemEnabled(for: profile)
             if let hotKey = profile.hotKey {
-                item.keyEquivalent = hotKey.menuKeyEquivalent
+                item.keyEquivalent = hotKey.effectiveMenuKeyEquivalent
                 item.keyEquivalentModifierMask = hotKey.menuModifierMask
             } else {
                 item.keyEquivalent = ""

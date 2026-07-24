@@ -25,6 +25,42 @@ struct HotKeyConfiguration: Equatable, Codable {
         self.mainKeyDisplayName = mainKeyDisplayName
     }
 
+    /// Carbon virtual key code → function-key number, for every F-key.
+    /// Codes are not ordered (F16=106, F17=64, F18=79), so this table is
+    /// the only trustworthy mapping.
+    private static let functionKeyNumbersByKeyCode: [UInt32: Int] = [
+        UInt32(kVK_F1): 1, UInt32(kVK_F2): 2, UInt32(kVK_F3): 3,
+        UInt32(kVK_F4): 4, UInt32(kVK_F5): 5, UInt32(kVK_F6): 6,
+        UInt32(kVK_F7): 7, UInt32(kVK_F8): 8, UInt32(kVK_F9): 9,
+        UInt32(kVK_F10): 10, UInt32(kVK_F11): 11, UInt32(kVK_F12): 12,
+        UInt32(kVK_F13): 13, UInt32(kVK_F14): 14, UInt32(kVK_F15): 15,
+        UInt32(kVK_F16): 16, UInt32(kVK_F17): 17, UInt32(kVK_F18): 18,
+        UInt32(kVK_F19): 19, UInt32(kVK_F20): 20
+    ]
+
+    /// Menu glyph derived from the key code — the value Carbon actually
+    /// registers — rather than the persisted menuKeyEquivalent, which has
+    /// carried stale glyphs (a legacy F16 profile stored the F18 character,
+    /// so the menu displayed the wrong shortcut while the binding was
+    /// correct; observed live 2026-07-24). Non-function keys fall back to
+    /// the stored equivalent.
+    var effectiveMenuKeyEquivalent: String {
+        if let number = Self.functionKeyNumbersByKeyCode[keyCode],
+           let scalar = UnicodeScalar(NSF1FunctionKey + (number - 1)) {
+            return String(scalar)
+        }
+        return menuKeyEquivalent
+    }
+
+    /// Sort key for hotkey-ordered channel lists: function keys in numeric
+    /// order first, other keys after (by display name), unassigned last.
+    var sortRank: (Int, Int, String) {
+        if let number = Self.functionKeyNumbersByKeyCode[keyCode] {
+            return (0, number, displayName)
+        }
+        return (1, 0, displayName)
+    }
+
     static let defaultVoiceToggle = HotKeyConfiguration(
         keyCode: UInt32(kVK_F16),
         carbonModifiers: 0,
