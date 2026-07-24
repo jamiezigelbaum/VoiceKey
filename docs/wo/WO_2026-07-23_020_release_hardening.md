@@ -904,3 +904,126 @@ live log 2026-07-24 07:57Z), so spoken "how's it going?" / "cancel that" /
 - `swift build` and `swift test` green; CoreAudio-dependent tests
   skip-and-flag.
 - Skip-and-flag standing authority applies.
+
+## WO-M: Auto-apply settings + basic-flows sweep (v0.2.1 quality gate)
+
+Jamie's rulings (2026-07-24): (1) the footer Save button dies — everything
+auto-applies, the modern System Settings idiom; (2) the settings window
+defaults tall enough to show all content, no hidden controls. Trigger: a
+deleted channel came back after close (staged edits silently discarded)
+and hotkey recording collided with a pending-deleted channel's ghost
+registration. Two adversarial reviews then swept the surface; their 19
+findings are numbered below (S* = settings review, M*/m* = app review).
+Full reports in the session records; every claim below was traced to
+code by a reviewer, with the file:line in the reports.
+
+### Verified facts (do not re-investigate)
+
+1. All edits except hotkey recording stage in
+   SettingsWindowController.workingProfiles and persist only via the
+   footer saveSettings; window close discards silently. Hotkey recording
+   saves immediately via HotKeyRecordingLifecycle.record.
+2. Flows verified CLEAN by review (do not churn): active-channel delete
+   reconcile on save; rename/switch/switch-back preservation; duplicate
+   remints ids and copies MCP tokens correctly; no Carbon/monitor
+   double-fire; provider-kind switch mid-session; retention-vs-log-window;
+   no persisted activeProfileID.
+3. VoiceProfileStore.load/save both sort by hotkey; in-memory delegate
+   and settings arrays do NOT re-sort after saves (S4/m8 divergence).
+4. APIKeyStore keys keychain accounts by provider.rawValue only
+   (APIKeyStore.swift:127-129).
+5. NSEvent global keyDown monitors deliver nothing without Accessibility
+   trust; the app never checks/requests it in the fallback path
+   (VoiceKeyAppDelegate.swift:291-294, 326-329) — the "event monitor
+   fallback active" diagnostic overpromises.
+6. The one-shot first-run settings flag burns even if the user
+   immediately closes the window (VoiceKeyAppDelegate.swift:545).
+
+### Required behavior
+
+**Leg A — auto-apply conversion (kills S1, S2, S3, S5, S7 and the two
+original bugs by construction):**
+1. Remove the Save button and all staged-until-save semantics. Commits:
+   text fields on end-of-editing (and on window close for the focused
+   field), popups/checkboxes/pickers on change, add/duplicate on their
+   confirmation, delete on its confirmation dialog (the dialog copy
+   becomes true: deletion is immediate and releases the channel's hotkey
+   registration and menu item at once), API keys on end-of-editing
+   (stored per provider immediately; Remove Key stays immediate and now
+   consistent — but must target the COMMITTED provider, S3), MCP
+   server edits and authorization tokens at their own add/edit/remove
+   dialogs' confirmation (replacing the pending-*-values/deletions
+   staging; write profiles before tokens or roll back the batch, S8).
+2. Every commit flows through one path: update profiles → sort with
+   VoiceProfileStore.sortedByHotKey → save → delegate didUpdateProfiles
+   with the SAME sorted array (fixes S4/m8 everywhere; the delegate
+   adopts sorted order in memory).
+3. Inline validation: an invalid value (endpoint URL, MCP fields) shows
+   its error at the field immediately and does NOT commit that field;
+   no exit gates, no form-wide rewrites (S7 dies with saveSettings).
+4. Hotkey recording validates and registers against the CURRENT
+   committed profile list (post-auto-apply there is no pending state).
+   Never leave a Carbon registration for a profile id absent from the
+   delegate's profiles (S1/M1): draft-channel recording cannot exist
+   anymore because add commits immediately, but assert the invariant in
+   tests regardless.
+5. Window sizing: default content size shows everything without
+   scrolling for the largest provider panel (OpenAI with MCP list);
+   keep resizable.
+6. OpenClaw runtime panel: load AND apply use the committed
+   endpointURL; commitFormToWorkingCopy is gone, so both read the same
+   committed profile value (S6).
+
+**Leg B — app-level flow fixes:**
+7. M2: an activation-precondition failure (no hotkey, no key, not
+   ready) while ANOTHER channel's session is live must not clobber the
+   global status/menu; surface it as a transient diagnostic + user
+   alert, leaving the live session's menu state intact.
+8. M3: keep the active channel's menu item enabled during .stopping,
+   and add a stop watchdog (e.g. 10s) that forces .ready with a
+   diagnostic if a provider wedges mid-stop.
+9. M6: when the user clicks a Start item (menu) or presses a hotkey and
+   readiness fails, open Settings focused on that channel with the
+   inline error visible. Keep F16 as the default only when a profile
+   set already exists; fresh installs get the default channel WITHOUT a
+   preset hotkey plus a first-run window that explains recording one
+   (the flag must only burn after the settings window has been shown
+   AND a hotkey exists or the user closed it deliberately — adjust
+   sensibly).
+10. M5: when Carbon registration fails, report honestly: if the app
+    lacks Accessibility trust say the key cannot work globally and
+    offer the trust prompt (AXIsProcessTrustedWithOptions) as the
+    fallback enabler; only claim "fallback active" when trust is
+    actually granted.
+11. M4: keychain accounts for .custom become per-channel
+    (custom.<profileUUID>) with silent migration from the legacy
+    account on first read; OpenAI/OpenClaw stay per-provider (one
+    vendor account) — the settings UI notes "shared across channels of
+    this provider" under the key field for those.
+12. m7: settingsControllerDidUpdateCredentials recomputes readiness and
+    clears a stale needsAttention status when resolved.
+13. m9: capture the provider id in the onEvent closure at wiring time
+    so teardown events attribute to the provider that emitted them.
+14. m10: "Clear Session Log" also truncates today's on-disk session
+    file (keep older files; retention handles them) — the menu item
+    then does what it says.
+15. m11: with zero channels, providerConfiguration/voiceProvider reset
+    to a safe default and provider-targeting menu items disable.
+
+### Acceptance
+
+- Per-control round-trip tests: for EVERY settings control, change →
+  window close → reopen → assert persisted (the class regression Jamie
+  hit can never return silently).
+- Targeted tests per numbered item (S1 invariant, S2/S3 key staging
+  death, S6 single-endpoint, S8 ordering/rollback, M2 live-session
+  isolation, M3 watchdog, M4 migration + per-channel isolation, M5
+  honest reporting paths, m7 badge clear, m9 attribution, m10 file
+  truncation, m11 empty-set safety).
+- Existing 295 tests stay green (update those asserting Save-era
+  semantics deliberately, with a comment naming the ruling).
+- swift build && swift test green; CoreAudio-dependent tests
+  skip-and-flag.
+- Skip-and-flag standing authority applies; if a leg proves deeper than
+  specced (e.g. first-run redesign), skip and flag rather than improvise
+  product decisions.
