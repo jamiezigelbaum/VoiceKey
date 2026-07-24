@@ -259,8 +259,29 @@ struct VoiceProviderCredentialViewState: Equatable {
     var acceptsAPIKeyInput: Bool
     var canRemoveAPIKey: Bool
 
-    init(provider: VoiceProviderID, hasAPIKey: Bool) {
-        statusMessage = provider.readiness(hasAPIKey: hasAPIKey).settingsMessage
+    init(
+        provider: VoiceProviderID,
+        hasAPIKey: Bool,
+        hasDiscoveredGatewayToken: Bool = OpenClawTokenResolver.gatewayTokenFromSecretsDirectory(
+            OpenClawTokenResolver.defaultSecretsDirectory
+        ) != nil
+    ) {
+        // The credential caption reflects credential PRESENCE, not channel
+        // readiness: OpenClaw's readiness always passes (token optional,
+        // resolved at connect time), which made a machine with no token and
+        // no OpenClaw pairing claim "Ready to use." (fresh-Air install,
+        // 2026-07-24).
+        if provider == .openClaw {
+            if hasAPIKey {
+                statusMessage = "Gateway token stored."
+            } else if hasDiscoveredGatewayToken {
+                statusMessage = "Using this Mac's OpenClaw pairing (auto-discovered token)."
+            } else {
+                statusMessage = "No gateway token found — paste one, or pair this Mac with OpenClaw."
+            }
+        } else {
+            statusMessage = provider.readiness(hasAPIKey: hasAPIKey).settingsMessage
+        }
         // ChatGPT Web signs in through the provider's web UI. All other providers can
         // edit a stored key; for custom endpoints the key is optional.
         acceptsAPIKeyInput = provider.isImplemented && provider != .chatGPTWeb

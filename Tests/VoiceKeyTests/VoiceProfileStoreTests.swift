@@ -300,3 +300,37 @@ final class VoiceProfileStoreTests: XCTestCase {
         ])
     }
 }
+
+final class OpenClawCredentialStateTests: XCTestCase {
+    // The caption reflects credential PRESENCE, never channel readiness:
+    // OpenClaw readiness always passes, which made a token-less machine
+    // with no OpenClaw pairing claim "Ready to use." (fresh Air, 2026-07-24).
+    func testStoredTokenState() {
+        let state = VoiceProviderCredentialViewState(
+            provider: .openClaw, hasAPIKey: true, hasDiscoveredGatewayToken: false
+        )
+        XCTAssertEqual(state.statusMessage, "Gateway token stored.")
+        XCTAssertTrue(state.canRemoveAPIKey)
+    }
+
+    func testDiscoveredPairingState() {
+        let state = VoiceProviderCredentialViewState(
+            provider: .openClaw, hasAPIKey: false, hasDiscoveredGatewayToken: true
+        )
+        XCTAssertEqual(
+            state.statusMessage,
+            "Using this Mac's OpenClaw pairing (auto-discovered token)."
+        )
+    }
+
+    func testNoCredentialStateNeverClaimsReady() {
+        let state = VoiceProviderCredentialViewState(
+            provider: .openClaw, hasAPIKey: false, hasDiscoveredGatewayToken: false
+        )
+        XCTAssertEqual(
+            state.statusMessage,
+            "No gateway token found — paste one, or pair this Mac with OpenClaw."
+        )
+        XCTAssertFalse(state.statusMessage.contains("Ready"))
+    }
+}
