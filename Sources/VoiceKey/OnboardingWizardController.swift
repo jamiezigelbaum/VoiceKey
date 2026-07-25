@@ -123,6 +123,96 @@ enum ApplicationRelocator {
     }
 }
 
+/// Geometry for the wizard window. The window never changes width, so every
+/// wrapping label is laid out against `contentWidth` and a step's height can be
+/// measured straight from the constraint system.
+enum OnboardingWindowMetrics {
+    static let width: CGFloat = 620
+    static let horizontalInset: CGFloat = 42
+    static let minimumContentHeight: CGFloat = 200
+    /// Kept clear of the usable screen edges when a step is taller than the
+    /// screen can show.
+    static let screenMargin: CGFloat = 60
+
+    static var horizontalInsetTotal: CGFloat {
+        horizontalInset * 2
+    }
+
+    static var contentWidth: CGFloat {
+        width - horizontalInsetTotal
+    }
+
+    /// Height the window's content area should take for a step that needs
+    /// `fitting` points, never taller than the screen can show.
+    static func contentHeight(
+        fitting: CGFloat,
+        visibleFrameHeight: CGFloat,
+        windowChromeHeight: CGFloat
+    ) -> CGFloat {
+        let natural = max(
+            fitting.rounded(.up),
+            minimumContentHeight
+        )
+        guard visibleFrameHeight > 0 else { return natural }
+        let available = visibleFrameHeight
+            - screenMargin * 2
+            - windowChromeHeight
+        return min(natural, max(minimumContentHeight, available))
+    }
+
+    /// Keeps the window's centre where it is while its height changes, then
+    /// nudges it back inside the usable screen area.
+    static func centeredFrame(
+        currentFrame: NSRect,
+        targetSize: NSSize,
+        visibleFrame: NSRect
+    ) -> NSRect {
+        var frame = NSRect(
+            x: currentFrame.midX - targetSize.width / 2,
+            y: currentFrame.midY - targetSize.height / 2,
+            width: targetSize.width,
+            height: targetSize.height
+        )
+        guard visibleFrame.isEmpty == false else {
+            return frame
+        }
+        frame.origin.x = min(
+            max(frame.minX, visibleFrame.minX),
+            max(visibleFrame.minX, visibleFrame.maxX - frame.width)
+        )
+        frame.origin.y = min(
+            max(frame.minY, visibleFrame.minY),
+            max(visibleFrame.minY, visibleFrame.maxY - frame.height)
+        )
+        return frame
+    }
+}
+
+/// VoiceKey lives in the menu bar, so it normally runs as an accessory app with
+/// no Dock icon and no Command-Tab entry — click another window and the wizard
+/// can no longer be selected. The wizard borrows the regular activation policy
+/// while it is on screen and hands the old one back when it closes.
+struct OnboardingActivationPolicySwitch {
+    private(set) var borrowedFrom: NSApplication.ActivationPolicy?
+
+    /// The policy to apply now, or nil when nothing has to change.
+    mutating func borrow(
+        from current: NSApplication.ActivationPolicy
+    ) -> NSApplication.ActivationPolicy? {
+        guard borrowedFrom == nil, current != .regular else {
+            return nil
+        }
+        borrowedFrom = current
+        return .regular
+    }
+
+    /// The policy to restore, or nil when nothing was borrowed.
+    mutating func release() -> NSApplication.ActivationPolicy? {
+        defer { borrowedFrom = nil }
+        return borrowedFrom
+    }
+}
+
 final class OnboardingWizardController: NSWindowController {
     weak var delegate: OnboardingWizardControllerDelegate?
 
@@ -148,6 +238,10 @@ final class OnboardingWizardController: NSWindowController {
     private let moveApplication:
         (@escaping (Result<Void, Error>) -> Void) -> Void
     private let quitApplication: () -> Void
+    private let activationPolicyProvider:
+        () -> NSApplication.ActivationPolicy
+    private let applyActivationPolicy:
+        (NSApplication.ActivationPolicy) -> Void
 
     private let contentStack = NSStackView()
     private var currentStep: OnboardingStep = .welcome
@@ -177,6 +271,9 @@ final class OnboardingWizardController: NSWindowController {
     private var hotKeyStatusLabel: NSTextField?
     private var microphoneHelpIsExpanded = false
     private var relocationStatusMessage: String?
+    private var activationPolicySwitch =
+        OnboardingActivationPolicySwitch()
+    private var terminationObserver: NSObjectProtocol?
     private lazy var openClawWizard = OpenClawConnectionWizard(
         tester: openClawTester,
         tokenProvider: { [weak self] in
@@ -224,6 +321,15 @@ final class OnboardingWizardController: NSWindowController {
             .moveToApplicationsAndRelaunch,
         quitApplication: @escaping () -> Void = {
             NSApplication.shared.terminate(nil)
+        },
+        activationPolicyProvider: @escaping (
+        ) -> NSApplication.ActivationPolicy = {
+            NSApplication.shared.activationPolicy()
+        },
+        applyActivationPolicy: @escaping (
+            NSApplication.ActivationPolicy
+        ) -> Void = {
+            NSApplication.shared.setActivationPolicy($0)
         }
     ) {
         self.profileProvider = profileProvider
@@ -250,13 +356,18 @@ final class OnboardingWizardController: NSWindowController {
         self.openURL = openURL
         self.moveApplication = moveApplication
         self.quitApplication = quitApplication
+        self.activationPolicyProvider = activationPolicyProvider
+        self.applyActivationPolicy = applyActivationPolicy
 
+        // Every step resizes the window to its own content, so this is only a
+        // starting frame — see sizeWindowToFitCurrentStep().
         let window = NSWindow(
             contentRect: NSRect(
                 x: 0,
                 y: 0,
-                width: 620,
-                height: 900
+                width: OnboardingWindowMetrics.width,
+                height: OnboardingWindowMetrics
+                    .minimumContentHeight
             ),
             styleMask: [
                 .titled,
@@ -280,6 +391,13 @@ final class OnboardingWizardController: NSWindowController {
         ) { [weak self] _ in
             self?.refreshMicrophoneAuthorization()
         }
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.releaseActivationPolicy()
+        }
     }
 
     @available(*, unavailable)
@@ -292,6 +410,11 @@ final class OnboardingWizardController: NSWindowController {
         if let activationObserver {
             NotificationCenter.default.removeObserver(
                 activationObserver
+            )
+        }
+        if let terminationObserver {
+            NotificationCenter.default.removeObserver(
+                terminationObserver
             )
         }
         audioEngine?.stop()
@@ -353,10 +476,29 @@ final class OnboardingWizardController: NSWindowController {
         if [.microphone, .hotKey, .done].contains(currentStep) {
             ensureSelectedChannels()
         }
+        borrowActivationPolicy()
         render()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    /// Gives the wizard a Dock icon and a Command-Tab entry for as long as it is
+    /// open, so it stays selectable after the owner clicks another app.
+    private func borrowActivationPolicy() {
+        guard let policy = activationPolicySwitch.borrow(
+            from: activationPolicyProvider()
+        ) else {
+            return
+        }
+        applyActivationPolicy(policy)
+    }
+
+    private func releaseActivationPolicy() {
+        guard let policy = activationPolicySwitch.release() else {
+            return
+        }
+        applyActivationPolicy(policy)
     }
 
     private func beginWizardSession() {
@@ -397,13 +539,16 @@ final class OnboardingWizardController: NSWindowController {
         contentStack.spacing = 18
         contentStack.edgeInsets = NSEdgeInsets(
             top: 34,
-            left: 42,
+            left: OnboardingWindowMetrics.horizontalInset,
             bottom: 30,
-            right: 42
+            right: OnboardingWindowMetrics.horizontalInset
         )
         contentStack.translatesAutoresizingMaskIntoConstraints =
             false
         contentView.addSubview(contentStack)
+        // Pinned on all four edges: the window is sized to the stack's fitting
+        // height, and the bottom pin lets the step's flexible space take up
+        // whatever slack is left when a step has to be clamped to the screen.
         NSLayoutConstraint.activate([
             contentStack.leadingAnchor.constraint(
                 equalTo: contentView.leadingAnchor
@@ -415,9 +560,54 @@ final class OnboardingWizardController: NSWindowController {
                 equalTo: contentView.topAnchor
             ),
             contentStack.bottomAnchor.constraint(
-                lessThanOrEqualTo: contentView.bottomAnchor
+                equalTo: contentView.bottomAnchor
             )
         ])
+    }
+
+    /// Resizes the window to the height the current step actually needs.
+    private func sizeWindowToFitCurrentStep() {
+        guard let window,
+              let contentView = window.contentView else {
+            return
+        }
+        contentView.layoutSubtreeIfNeeded()
+        let visibleFrame =
+            (window.screen ?? NSScreen.main)?.visibleFrame
+            ?? .zero
+        let chromeHeight = window.frameRect(
+            forContentRect: .zero
+        ).height
+        let contentHeight = OnboardingWindowMetrics.contentHeight(
+            fitting: contentView.fittingSize.height,
+            visibleFrameHeight: visibleFrame.height,
+            windowChromeHeight: chromeHeight
+        )
+        let targetSize = window.frameRect(
+            forContentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: OnboardingWindowMetrics.width,
+                height: contentHeight
+            )
+        ).size
+        let heightChange = abs(
+            targetSize.height - window.frame.height
+        )
+        guard heightChange > 0.5
+            || abs(targetSize.width - window.frame.width) > 0.5
+        else {
+            return
+        }
+        window.setFrame(
+            OnboardingWindowMetrics.centeredFrame(
+                currentFrame: window.frame,
+                targetSize: targetSize,
+                visibleFrame: visibleFrame
+            ),
+            display: true,
+            animate: window.isVisible && heightChange > 8
+        )
     }
 
     private func render() {
@@ -461,6 +651,8 @@ final class OnboardingWizardController: NSWindowController {
         case .done:
             renderDone()
         }
+
+        sizeWindowToFitCurrentStep()
     }
 
     private func renderLocation() {
@@ -528,16 +720,16 @@ final class OnboardingWizardController: NSWindowController {
         addTitle("What would you like to connect?")
         addBody("Choose one or both. You can add more voice channels later.")
 
-        contentStack.addArrangedSubview(serviceCard(
+        addServiceCard(
             service: .openAI,
             title: "OpenAI",
             description: "Fast, natural voice conversations with OpenAI."
-        ))
-        contentStack.addArrangedSubview(serviceCard(
+        )
+        addServiceCard(
             service: .openClaw,
             title: "OpenClaw",
             description: "Talk with your own OpenClaw assistant and tools."
-        ))
+        )
 
         if selectedServices.isEmpty {
             addStatus(
@@ -557,11 +749,11 @@ final class OnboardingWizardController: NSWindowController {
             selectedServices.isEmpty == false
     }
 
-    private func serviceCard(
+    private func addServiceCard(
         service: OnboardingService,
         title: String,
         description: String
-    ) -> NSView {
+    ) {
         let checkbox = NSButton(
             checkboxWithTitle: title,
             target: self,
@@ -584,6 +776,8 @@ final class OnboardingWizardController: NSWindowController {
         detail.textColor = .secondaryLabelColor
         detail.font = NSFont.systemFont(ofSize: 13)
         detail.maximumNumberOfLines = 2
+        detail.preferredMaxLayoutWidth =
+            OnboardingWindowMetrics.contentWidth - 28
 
         let stack = NSStackView(views: [checkbox, detail])
         stack.orientation = .vertical
@@ -603,13 +797,8 @@ final class OnboardingWizardController: NSWindowController {
             ? .controlAccentColor
             : .separatorColor
         box.contentView = stack
-        box.translatesAutoresizingMaskIntoConstraints = false
+        addFullWidth(box)
         box.heightAnchor.constraint(equalToConstant: 88).isActive = true
-        box.widthAnchor.constraint(
-            equalTo: contentStack.widthAnchor,
-            constant: -84
-        ).isActive = true
-        return box
     }
 
     private func renderAPIKey() {
@@ -668,16 +857,11 @@ final class OnboardingWizardController: NSWindowController {
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 10
-        row.translatesAutoresizingMaskIntoConstraints = false
         field.setContentHuggingPriority(
             NSLayoutConstraint.Priority(1),
             for: .horizontal
         )
-        contentStack.addArrangedSubview(row)
-        row.widthAnchor.constraint(
-            equalTo: contentStack.widthAnchor,
-            constant: -84
-        ).isActive = true
+        addFullWidth(row)
 
         let caption = addStatus(
             Self.keyCaption,
@@ -756,11 +940,7 @@ final class OnboardingWizardController: NSWindowController {
                 equalToConstant: 30
             ).isActive = true
             openClawTokenField = field
-            contentStack.addArrangedSubview(field)
-            field.widthAnchor.constraint(
-                equalTo: contentStack.widthAnchor,
-                constant: -84
-            ).isActive = true
+            addFullWidth(field)
             let hint = addStatus(
                 "You can find the gateway token on the Mac where OpenClaw runs.",
                 color: .secondaryLabelColor
@@ -786,11 +966,7 @@ final class OnboardingWizardController: NSWindowController {
                 equalToConstant: 30
             ).isActive = true
             openClawEndpointField = field
-            contentStack.addArrangedSubview(field)
-            field.widthAnchor.constraint(
-                equalTo: contentStack.widthAnchor,
-                constant: -84
-            ).isActive = true
+            addFullWidth(field)
             addStatus(
                 "VoiceKey accepts http, https, ws, or wss addresses.",
                 color: .secondaryLabelColor
@@ -831,11 +1007,7 @@ final class OnboardingWizardController: NSWindowController {
                 )
                 row.orientation = .horizontal
                 row.spacing = 10
-                contentStack.addArrangedSubview(row)
-                row.widthAnchor.constraint(
-                    equalTo: contentStack.widthAnchor,
-                    constant: -84
-                ).isActive = true
+                addFullWidth(row)
             } else {
                 addStatus(
                     "Waiting for a current approval request…",
@@ -1057,11 +1229,7 @@ final class OnboardingWizardController: NSWindowController {
             )
         }
         hotKeyRecorder = recorder
-        contentStack.addArrangedSubview(recorder)
-        recorder.widthAnchor.constraint(
-            equalTo: contentStack.widthAnchor,
-            constant: -84
-        ).isActive = true
+        addFullWidth(recorder)
 
         let status = addStatus(
             "Your shortcut works anywhere while VoiceKey is running.",
@@ -1147,6 +1315,21 @@ final class OnboardingWizardController: NSWindowController {
         contentStack.addArrangedSubview(imageView)
     }
 
+    /// Adds `view` to the step and only then pins it to the content width.
+    /// Order matters: activating a constraint between two views with no shared
+    /// ancestor raises and aborts the rest of the step — that is how the service
+    /// picker shipped with no cards and no buttons (2026-07-25).
+    @discardableResult
+    private func addFullWidth<V: NSView>(_ view: V) -> V {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        contentStack.addArrangedSubview(view)
+        view.widthAnchor.constraint(
+            equalTo: contentStack.widthAnchor,
+            constant: -OnboardingWindowMetrics.horizontalInsetTotal
+        ).isActive = true
+        return view
+    }
+
     @discardableResult
     private func addTitle(_ text: String) -> NSTextField {
         let label = NSTextField(
@@ -1157,12 +1340,9 @@ final class OnboardingWizardController: NSWindowController {
             weight: .semibold
         )
         label.maximumNumberOfLines = 3
-        contentStack.addArrangedSubview(label)
-        label.widthAnchor.constraint(
-            equalTo: contentStack.widthAnchor,
-            constant: -84
-        ).isActive = true
-        return label
+        label.preferredMaxLayoutWidth =
+            OnboardingWindowMetrics.contentWidth
+        return addFullWidth(label)
     }
 
     @discardableResult
@@ -1173,12 +1353,9 @@ final class OnboardingWizardController: NSWindowController {
         label.font = NSFont.systemFont(ofSize: 15)
         label.textColor = .secondaryLabelColor
         label.maximumNumberOfLines = 3
-        contentStack.addArrangedSubview(label)
-        label.widthAnchor.constraint(
-            equalTo: contentStack.widthAnchor,
-            constant: -84
-        ).isActive = true
-        return label
+        label.preferredMaxLayoutWidth =
+            OnboardingWindowMetrics.contentWidth
+        return addFullWidth(label)
     }
 
     @discardableResult
@@ -1191,17 +1368,24 @@ final class OnboardingWizardController: NSWindowController {
         )
         label.font = NSFont.systemFont(ofSize: 12)
         label.textColor = color
+        label.preferredMaxLayoutWidth =
+            OnboardingWindowMetrics.contentWidth
         contentStack.addArrangedSubview(label)
         label.widthAnchor.constraint(
             lessThanOrEqualTo: contentStack.widthAnchor,
-            constant: -84
+            constant: -OnboardingWindowMetrics.horizontalInsetTotal
         ).isActive = true
         return label
     }
 
+    /// Takes up whatever height is left over when a step has to be clamped to
+    /// the screen. It measures as zero, so it never inflates the window.
     private func addFlexibleSpace() {
         let spacer = NSView()
         spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.heightAnchor.constraint(
+            greaterThanOrEqualToConstant: 0
+        ).isActive = true
         spacer.setContentHuggingPriority(
             NSLayoutConstraint.Priority(1),
             for: .vertical
@@ -1244,12 +1428,7 @@ final class OnboardingWizardController: NSWindowController {
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 12
-        row.translatesAutoresizingMaskIntoConstraints = false
-        contentStack.addArrangedSubview(row)
-        row.widthAnchor.constraint(
-            equalTo: contentStack.widthAnchor,
-            constant: -84
-        ).isActive = true
+        addFullWidth(row)
         return primaryButton
     }
 
@@ -1791,6 +1970,9 @@ extension OnboardingWizardController: NSTextFieldDelegate {
 }
 
 extension OnboardingWizardController: NSWindowDelegate {
+    // Every way out of the wizard — Done, "Set up later", the close button and
+    // programmatic dismissal — ends here, so the activation policy goes back
+    // exactly once and VoiceKey returns to being a menu-bar-only app.
     func windowWillClose(_ notification: Notification) {
         microphoneTimer?.invalidate()
         microphoneTimer = nil
@@ -1798,6 +1980,7 @@ extension OnboardingWizardController: NSWindowDelegate {
         openClawStepStarted = false
         hotKeyRecorder?.cancelRecording()
         stopMicrophonePreview()
+        releaseActivationPolicy()
     }
 }
 

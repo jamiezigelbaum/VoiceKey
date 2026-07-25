@@ -1,4 +1,5 @@
 @testable import VoiceKey
+import AppKit
 import Foundation
 import XCTest
 
@@ -476,6 +477,279 @@ final class OnboardingWizardControllerServiceTests:
             defaults.removePersistentDomain(forName: suiteName)
         }
         return defaults
+    }
+}
+
+final class OnboardingWizardWindowTests: XCTestCase {
+    func testServicesStepRendersBothCardsAndItsFooter() {
+        let recorder = ActivationPolicyRecorder()
+        let controller = makeController(policy: recorder)
+        defer { controller.close() }
+
+        controller.showReentrant()
+
+        XCTAssertEqual(
+            controller.currentStepSnapshot,
+            .services
+        )
+        let titles = buttonTitles(
+            in: controller.window?.contentView
+        )
+        XCTAssertTrue(titles.contains("OpenAI"), "\(titles)")
+        XCTAssertTrue(titles.contains("OpenClaw"), "\(titles)")
+        XCTAssertTrue(titles.contains("Continue"), "\(titles)")
+        XCTAssertTrue(
+            titles.contains("Set up later"),
+            "\(titles)"
+        )
+    }
+
+    func testServicesStepCheckboxTogglesSelectionAndEnablesContinue() {
+        let defaults = makeDefaults()
+        let recorder = ActivationPolicyRecorder()
+        let controller = makeController(
+            policy: recorder,
+            defaults: defaults
+        )
+        defer { controller.close() }
+        controller.showReentrant()
+
+        guard let checkbox = buttons(
+            in: controller.window?.contentView
+        ).first(where: { $0.title == "OpenAI" }) else {
+            return XCTFail("The OpenAI card never rendered.")
+        }
+        XCTAssertEqual(
+            buttons(in: controller.window?.contentView)
+                .first { $0.title == "Continue" }?.isEnabled,
+            false
+        )
+
+        checkbox.state = .on
+        _ = checkbox.target?.perform(
+            checkbox.action,
+            with: checkbox
+        )
+
+        XCTAssertEqual(
+            OnboardingServicePreferences.selectedServices(
+                defaults: defaults
+            ),
+            [.openAI]
+        )
+        XCTAssertEqual(
+            buttons(in: controller.window?.contentView)
+                .first { $0.title == "Continue" }?.isEnabled,
+            true
+        )
+    }
+
+    func testWindowHeightTracksTheRenderedStepInsteadOfAFixedFrame() {
+        let recorder = ActivationPolicyRecorder()
+        let controller = makeController(policy: recorder)
+        defer { controller.close() }
+
+        controller.showReentrant()
+
+        guard let window = controller.window,
+              let contentView = window.contentView else {
+            return XCTFail("The wizard has no window.")
+        }
+        XCTAssertEqual(
+            window.frame.width,
+            OnboardingWindowMetrics.width,
+            accuracy: 0.5
+        )
+        XCTAssertEqual(
+            contentView.frame.height,
+            max(
+                contentView.fittingSize.height,
+                OnboardingWindowMetrics.minimumContentHeight
+            ),
+            accuracy: 1
+        )
+        XCTAssertLessThan(contentView.frame.height, 700)
+    }
+
+    func testWizardBecomesRegularWhileOpenAndHandsThePolicyBack() {
+        let recorder = ActivationPolicyRecorder()
+        let controller = makeController(policy: recorder)
+
+        controller.showReentrant()
+        XCTAssertEqual(recorder.applied, [.regular])
+
+        // Re-entry from the menu bar must not stack a second borrow.
+        controller.showReentrant()
+        XCTAssertEqual(recorder.applied, [.regular])
+
+        controller.close()
+        XCTAssertEqual(
+            recorder.applied,
+            [.regular, .accessory]
+        )
+        XCTAssertEqual(recorder.current, .accessory)
+
+        controller.close()
+        XCTAssertEqual(
+            recorder.applied,
+            [.regular, .accessory]
+        )
+    }
+
+    private func makeController(
+        policy recorder: ActivationPolicyRecorder,
+        defaults: UserDefaults? = nil
+    ) -> OnboardingWizardController {
+        let defaults = defaults ?? makeDefaults()
+        OnboardingServicePreferences.saveSelectedServices(
+            [],
+            defaults: defaults
+        )
+        return OnboardingWizardController(
+            profileProvider: { [] },
+            credentialStore: OnboardingCredentialStore(),
+            userDefaults: defaults,
+            applicationLocationProvider: { .applications },
+            microphoneAuthorizationProvider: { .authorized },
+            activationPolicyProvider: { recorder.current },
+            applyActivationPolicy: { recorder.apply($0) }
+        )
+    }
+
+    private func buttons(in view: NSView?) -> [NSButton] {
+        guard let view else { return [] }
+        return view.subviews.flatMap { subview -> [NSButton] in
+            var found: [NSButton] = []
+            if let button = subview as? NSButton {
+                found.append(button)
+            }
+            found.append(contentsOf: buttons(in: subview))
+            return found
+        }
+    }
+
+    private func buttonTitles(in view: NSView?) -> [String] {
+        buttons(in: view).map(\.title)
+    }
+
+    private func makeDefaults() -> UserDefaults {
+        let suiteName = "OnboardingWizardWindowTests-\(UUID())"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        return defaults
+    }
+}
+
+final class OnboardingWindowMetricsTests: XCTestCase {
+    func testHeightFollowsContentUntilTheScreenRunsOut() {
+        XCTAssertEqual(
+            OnboardingWindowMetrics.contentHeight(
+                fitting: 342,
+                visibleFrameHeight: 900,
+                windowChromeHeight: 28
+            ),
+            342
+        )
+        XCTAssertEqual(
+            OnboardingWindowMetrics.contentHeight(
+                fitting: 1_400,
+                visibleFrameHeight: 900,
+                windowChromeHeight: 28
+            ),
+            900 - 120 - 28
+        )
+        XCTAssertEqual(
+            OnboardingWindowMetrics.contentHeight(
+                fitting: 40,
+                visibleFrameHeight: 900,
+                windowChromeHeight: 28
+            ),
+            OnboardingWindowMetrics.minimumContentHeight
+        )
+    }
+
+    func testUnknownScreenNeverClampsTheStep() {
+        XCTAssertEqual(
+            OnboardingWindowMetrics.contentHeight(
+                fitting: 640,
+                visibleFrameHeight: 0,
+                windowChromeHeight: 28
+            ),
+            640
+        )
+    }
+
+    func testResizingKeepsTheWindowCentredAndOnScreen() {
+        let visible = NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        let current = NSRect(
+            x: 410,
+            y: 250,
+            width: 620,
+            height: 400
+        )
+
+        let grown = OnboardingWindowMetrics.centeredFrame(
+            currentFrame: current,
+            targetSize: NSSize(width: 620, height: 600),
+            visibleFrame: visible
+        )
+        XCTAssertEqual(grown.midX, current.midX, accuracy: 0.5)
+        XCTAssertEqual(grown.midY, current.midY, accuracy: 0.5)
+
+        let pushedBack = OnboardingWindowMetrics.centeredFrame(
+            currentFrame: NSRect(
+                x: 410,
+                y: 820,
+                width: 620,
+                height: 200
+            ),
+            targetSize: NSSize(width: 620, height: 700),
+            visibleFrame: visible
+        )
+        XCTAssertGreaterThanOrEqual(
+            pushedBack.minY,
+            visible.minY
+        )
+        XCTAssertLessThanOrEqual(
+            pushedBack.maxY,
+            visible.maxY
+        )
+    }
+}
+
+final class OnboardingActivationPolicySwitchTests: XCTestCase {
+    func testBorrowsOnceAndReturnsTheOriginalPolicy() {
+        var policySwitch = OnboardingActivationPolicySwitch()
+
+        XCTAssertEqual(
+            policySwitch.borrow(from: .accessory),
+            .regular
+        )
+        XCTAssertNil(policySwitch.borrow(from: .accessory))
+        XCTAssertEqual(policySwitch.release(), .accessory)
+        XCTAssertNil(policySwitch.release())
+    }
+
+    func testARegularAppIsLeftAlone() {
+        var policySwitch = OnboardingActivationPolicySwitch()
+
+        XCTAssertNil(policySwitch.borrow(from: .regular))
+        XCTAssertNil(policySwitch.release())
+    }
+}
+
+private final class ActivationPolicyRecorder {
+    private(set) var current: NSApplication.ActivationPolicy =
+        .accessory
+    private(set) var applied:
+        [NSApplication.ActivationPolicy] = []
+
+    func apply(_ policy: NSApplication.ActivationPolicy) {
+        current = policy
+        applied.append(policy)
     }
 }
 
