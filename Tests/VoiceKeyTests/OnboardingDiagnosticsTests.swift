@@ -219,11 +219,58 @@ final class OnboardingWizardDiagnosticsTests: XCTestCase {
         )
         XCTAssertEqual(
             log.lines(ofKind: "services"),
-            ["services: confirmed openAI"]
+            ["services: confirmed openAI added=none"]
         )
         XCTAssertEqual(
             log.lines(ofKind: "channels"),
             ["channels: ensured openAI openClawEndpoint=absent"]
+        )
+    }
+
+    func testReopeningAFinishedSetupRecordsThePickerAndTheServiceItAdds() {
+        let log = RecordingOnboardingDiagnostics()
+        let controller = makeController(
+            log: log,
+            services: [.openAI],
+            hasAPIKey: true
+        )
+        defer { controller.close() }
+
+        controller.showManualReentry()
+        XCTAssertEqual(
+            controller.currentStepSnapshot,
+            .services
+        )
+        guard let checkbox = allViews(
+            ofType: NSButton.self,
+            in: controller.window?.contentView
+        ).first(where: { $0.title == "OpenClaw" }) else {
+            return XCTFail("The OpenClaw card never rendered.")
+        }
+        checkbox.state = .on
+        _ = checkbox.target?.perform(
+            checkbox.action,
+            with: checkbox
+        )
+        perform(title: "Continue", in: controller)
+
+        XCTAssertEqual(
+            log.lines.first,
+            "wizard: opened reentrant at step=services reason=add-another-service"
+        )
+        XCTAssertEqual(
+            log.lines(ofKind: "services"),
+            ["services: confirmed openAI, openClaw added=openClaw"]
+        )
+        XCTAssertEqual(
+            log.lines(ofKind: "channels"),
+            ["channels: ensured openAI, openClaw openClawEndpoint=absent"]
+        )
+        XCTAssertEqual(
+            log.lines(ofKind: "step"),
+            [
+                "step: services -> openClawConnect trigger=advance reason=openclaw-not-connected"
+            ]
         )
     }
 

@@ -110,6 +110,110 @@ final class OnboardingFlowPolicyTests: XCTestCase {
         )
     }
 
+    func testManualReentryOpensThePickerOnceEverythingSelectedIsComplete() {
+        let complete = groundTruth(
+            hasAPIKey: true,
+            hasOpenClawConnection: true,
+            microphone: .authorized,
+            hasHotKey: true
+        )
+
+        XCTAssertEqual(
+            OnboardingFlowPolicy.reentryStep(
+                groundTruth: complete
+            ),
+            .done,
+            "Entry the app makes on the owner’s behalf is unchanged."
+        )
+        let resolved = OnboardingFlowPolicy
+            .manualReentryStepWithReason(
+                groundTruth: complete
+            )
+        XCTAssertEqual(
+            resolved.step,
+            .services,
+            "Done sits after the picker, so opening there is a dead end for adding a service."
+        )
+        XCTAssertEqual(resolved.reason, .addAnotherService)
+    }
+
+    func testManualReentryStillResumesWhereUnfinishedSetupStopped() {
+        let expected: [(OnboardingGroundTruth, OnboardingStep, OnboardingStepReason)] = [
+            (
+                groundTruth(
+                    location: .translocated,
+                    hasAPIKey: true,
+                    microphone: .authorized,
+                    hasHotKey: true
+                ),
+                .location,
+                .appNotInApplications
+            ),
+            (
+                groundTruth(
+                    services: [],
+                    hasAPIKey: true,
+                    microphone: .authorized,
+                    hasHotKey: true
+                ),
+                .services,
+                .noServicesSelected
+            ),
+            (
+                groundTruth(
+                    hasAPIKey: false,
+                    microphone: .authorized,
+                    hasHotKey: true
+                ),
+                .apiKey,
+                .openAIKeyMissing
+            ),
+            (
+                groundTruth(
+                    services: [.openClaw],
+                    hasAPIKey: true,
+                    hasOpenClawConnection: false,
+                    microphone: .authorized,
+                    hasHotKey: true
+                ),
+                .openClawConnect,
+                .openClawNotConnected
+            ),
+            (
+                groundTruth(
+                    hasAPIKey: true,
+                    microphone: .denied,
+                    hasHotKey: true
+                ),
+                .microphone,
+                .microphoneNotAuthorized
+            ),
+            (
+                groundTruth(
+                    hasAPIKey: true,
+                    microphone: .authorized,
+                    hasHotKey: false
+                ),
+                .hotKey,
+                .hotKeysMissing
+            )
+        ]
+
+        for (facts, step, reason) in expected {
+            let resolved = OnboardingFlowPolicy
+                .manualReentryStepWithReason(groundTruth: facts)
+            XCTAssertEqual(resolved.step, step)
+            XCTAssertEqual(resolved.reason, reason)
+            XCTAssertEqual(
+                OnboardingFlowPolicy.reentryStep(
+                    groundTruth: facts
+                ),
+                step,
+                "Unfinished setup resumes identically however the wizard was opened."
+            )
+        }
+    }
+
     func testEveryNonAuthorizedMicrophoneStateRemainsIncomplete() {
         for state in [
             MicrophoneAuthorizationState.notDetermined,
@@ -466,6 +570,300 @@ final class OnboardingWizardControllerServiceTests:
             ),
             [.openAI, .openClaw]
         )
+    }
+
+    func testFinishedSetupReopenedFromTheMenuLandsOnServicesWithWhatTheOwnerHasTicked() {
+        let defaults = makeDefaults()
+        OnboardingServicePreferences.saveSelectedServices(
+            [.openAI],
+            defaults: defaults
+        )
+        let delegate = OnboardingChannelRecordingDelegate(
+            profiles: [VoiceProfile.defaultOpenAI()]
+        )
+        let controller = makeController(
+            defaults: defaults,
+            delegate: delegate,
+            hasAPIKey: true
+        )
+        defer { controller.close() }
+
+        controller.showManualReentry()
+
+        XCTAssertEqual(
+            controller.currentStepSnapshot,
+            .services,
+            "The menu item is the only way back in, so a finished setup has to reach the picker."
+        )
+        let checkboxes = onboardingButtons(
+            in: controller.window?.contentView
+        )
+        XCTAssertEqual(
+            checkboxes.first { $0.title == "OpenAI" }?.state,
+            .on
+        )
+        XCTAssertEqual(
+            checkboxes.first { $0.title == "OpenClaw" }?.state,
+            .off
+        )
+        XCTAssertTrue(
+            delegate.ensureRequests.isEmpty,
+            "Opening the picker must not touch channels."
+        )
+    }
+
+    func testUnfinishedSetupReopenedFromTheMenuStillResumesWhereItStopped() {
+        let defaults = makeDefaults()
+        OnboardingServicePreferences.saveSelectedServices(
+            [.openAI],
+            defaults: defaults
+        )
+        let delegate = OnboardingChannelRecordingDelegate(
+            profiles: [VoiceProfile.defaultOpenAI()]
+        )
+        let controller = makeController(
+            defaults: defaults,
+            delegate: delegate,
+            hasAPIKey: false
+        )
+        defer { controller.close() }
+
+        controller.showManualReentry()
+
+        XCTAssertEqual(
+            controller.currentStepSnapshot,
+            .apiKey
+        )
+    }
+
+    func testAddingASecondServiceWalksOnlyThatServicesRemainingSteps() {
+        let defaults = makeDefaults()
+        OnboardingServicePreferences.saveSelectedServices(
+            [.openAI],
+            defaults: defaults
+        )
+        let delegate = OnboardingChannelRecordingDelegate(
+            profiles: [VoiceProfile.defaultOpenAI()]
+        )
+        delegate.acceptsHotKeys = true
+        let tester = FakeOpenClawConnectionTester()
+        let controller = makeController(
+            defaults: defaults,
+            delegate: delegate,
+            hasAPIKey: true,
+            openClawTester: tester
+        )
+        defer { controller.close() }
+        controller.showManualReentry()
+
+        tick(service: "OpenClaw", on: true, in: controller)
+        performButton(title: "Continue", in: controller)
+
+        XCTAssertEqual(
+            controller.currentStepSnapshot,
+            .openClawConnect,
+            "The OpenAI key step was already satisfied and must not be walked again."
+        )
+        XCTAssertEqual(
+            delegate.ensureRequests.first,
+            [.openAI, .openClaw]
+        )
+        XCTAssertEqual(
+            delegate.profiles.filter {
+                $0.providerID == .openClaw
+            }.count,
+            1
+        )
+        XCTAssertEqual(
+            delegate.profiles.filter {
+                $0.providerID == .openAIRealtime
+            }.count,
+            1,
+            "Ensuring stays append-only: the existing channel is untouched."
+        )
+
+        // The connect step starts on the next main-queue turn.
+        RunLoop.current.run(
+            until: Date().addingTimeInterval(0.05)
+        )
+        XCTAssertEqual(tester.testCount, 1)
+        tester.completeNext(
+            .ok(serverVersion: "2026.7.1-2", scopes: [])
+        )
+        performButton(title: "Continue", in: controller)
+
+        XCTAssertEqual(controller.currentStepSnapshot, .hotKey)
+        guard let openClaw = delegate.profiles.first(where: {
+            $0.providerID == .openClaw
+        }) else {
+            return XCTFail("The OpenClaw channel was never created.")
+        }
+        XCTAssertEqual(
+            firstHotKeyRecorder(in: controller)?.profileID,
+            openClaw.id,
+            "Only the new channel still needs a shortcut."
+        )
+
+        firstHotKeyRecorder(in: controller)?.onHotKeyRecorded?(
+            openClaw.id,
+            .secondaryTestShortcut
+        )
+
+        XCTAssertEqual(controller.currentStepSnapshot, .done)
+        XCTAssertEqual(
+            delegate.profiles.first {
+                $0.providerID == .openAIRealtime
+            }?.hotKey,
+            .defaultVoiceToggle,
+            "The shortcut the owner already had is left alone."
+        )
+    }
+
+    func testUncheckingAServiceNeverDeletesItsChannel() {
+        let defaults = makeDefaults()
+        OnboardingServicePreferences.saveSelectedServices(
+            [.openAI, .openClaw],
+            defaults: defaults
+        )
+        OnboardingServicePreferences.setHasOpenClawConnection(
+            true,
+            defaults: defaults
+        )
+        let openClaw = VoiceProfile(
+            name: "OpenClaw",
+            providerID: .openClaw,
+            hotKey: .secondaryTestShortcut,
+            model: "",
+            voice: ""
+        )
+        let delegate = OnboardingChannelRecordingDelegate(
+            profiles: [VoiceProfile.defaultOpenAI(), openClaw]
+        )
+        let controller = makeController(
+            defaults: defaults,
+            delegate: delegate,
+            hasAPIKey: true
+        )
+        defer { controller.close() }
+        controller.showManualReentry()
+        XCTAssertEqual(
+            controller.currentStepSnapshot,
+            .services
+        )
+
+        tick(service: "OpenClaw", on: false, in: controller)
+        performButton(title: "Continue", in: controller)
+
+        XCTAssertEqual(controller.currentStepSnapshot, .done)
+        XCTAssertEqual(
+            delegate.profiles.filter {
+                $0.providerID == .openClaw
+            },
+            [openClaw],
+            "Deleting a channel stays a deliberate Settings action."
+        )
+        XCTAssertFalse(
+            delegate.ensureRequests.contains {
+                $0.contains(.openClaw)
+            }
+        )
+        XCTAssertEqual(
+            OnboardingServicePreferences.selectedServices(
+                defaults: defaults
+            ),
+            [.openAI]
+        )
+    }
+
+    private func makeController(
+        defaults: UserDefaults,
+        delegate: OnboardingChannelRecordingDelegate,
+        hasAPIKey: Bool,
+        openClawTester: OpenClawConnectionTesting =
+            FakeOpenClawConnectionTester()
+    ) -> OnboardingWizardController {
+        let controller = OnboardingWizardController(
+            profileProvider: { delegate.profiles },
+            credentialStore: OnboardingCredentialStore(
+                hasAPIKey: hasAPIKey,
+                // Keeps the gateway-token lookup off this Mac's own
+                // ~/.openclaw secrets, so the connect step is deterministic.
+                apiKey: "test-gateway-token"
+            ),
+            userDefaults: defaults,
+            openClawTester: openClawTester,
+            applicationLocationProvider: { .applications },
+            microphoneAuthorizationProvider: { .authorized },
+            audioEngineFactory: { SilentOnboardingAudioEngine() },
+            activationPolicyProvider: { .accessory },
+            applyActivationPolicy: { _ in }
+        )
+        controller.delegate = delegate
+        return controller
+    }
+
+    private func tick(
+        service title: String,
+        on: Bool,
+        in controller: OnboardingWizardController,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard let checkbox = onboardingButtons(
+            in: controller.window?.contentView
+        ).first(where: { $0.title == title }) else {
+            XCTFail(
+                "No \"\(title)\" card on screen.",
+                file: file,
+                line: line
+            )
+            return
+        }
+        checkbox.state = on ? .on : .off
+        _ = checkbox.target?.perform(
+            checkbox.action,
+            with: checkbox
+        )
+    }
+
+    private func performButton(
+        title: String,
+        in controller: OnboardingWizardController,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let buttons = onboardingButtons(
+            in: controller.window?.contentView
+        )
+        guard let button = buttons.first(where: {
+            $0.title == title
+        }), let action = button.action else {
+            XCTFail(
+                "No \"\(title)\" button in \(buttons.map(\.title))",
+                file: file,
+                line: line
+            )
+            return
+        }
+        _ = button.target?.perform(action, with: button)
+    }
+
+    private func firstHotKeyRecorder(
+        in controller: OnboardingWizardController
+    ) -> HotKeyRecorderView? {
+        func search(_ view: NSView?) -> HotKeyRecorderView? {
+            guard let view else { return nil }
+            for subview in view.subviews {
+                if let match = subview as? HotKeyRecorderView {
+                    return match
+                }
+                if let match = search(subview) {
+                    return match
+                }
+            }
+            return nil
+        }
+        return search(controller.window?.contentView)
     }
 
     private func makeDefaults() -> UserDefaults {
@@ -1304,6 +1702,7 @@ private final class FakeOnboardingRetryCancellation:
 private final class OnboardingChannelRecordingDelegate:
     OnboardingWizardControllerDelegate {
     var profiles: [VoiceProfile]
+    var acceptsHotKeys = false
     private(set) var ensureRequests:
         [Set<OnboardingService>] = []
 
@@ -1316,7 +1715,14 @@ private final class OnboardingChannelRecordingDelegate:
         didRecordHotKey hotKey: HotKeyConfiguration,
         for profile: VoiceProfile
     ) -> Bool {
-        false
+        guard acceptsHotKeys,
+              let index = profiles.firstIndex(where: {
+                  $0.id == profile.id
+              }) else {
+            return false
+        }
+        profiles[index].hotKey = hotKey
+        return true
     }
 
     func onboardingController(
@@ -1341,9 +1747,11 @@ private final class OnboardingChannelRecordingDelegate:
 private final class OnboardingCredentialStore:
     VoiceCredentialStoring {
     private let hasAPIKeyValue: Bool
+    private let apiKeyValue: String?
 
-    init(hasAPIKey: Bool = false) {
+    init(hasAPIKey: Bool = false, apiKey: String? = nil) {
         hasAPIKeyValue = hasAPIKey
+        apiKeyValue = apiKey
     }
 
     func hasAPIKey(for profile: VoiceProfile) -> Bool {
@@ -1351,7 +1759,7 @@ private final class OnboardingCredentialStore:
     }
 
     func apiKey(for profile: VoiceProfile) -> String? {
-        nil
+        apiKeyValue
     }
 
     func setAPIKey(
@@ -1375,6 +1783,57 @@ private final class OnboardingCredentialStore:
     func deleteAuthorizationToken(
         forMCPServer id: UUID
     ) throws {}
+}
+
+/// A shortcut that is never `defaultVoiceToggle`, so a second channel can be
+/// recorded without tripping the conflict path.
+extension HotKeyConfiguration {
+    static let secondaryTestShortcut = HotKeyConfiguration(
+        keyCode: 100,
+        carbonModifiers: 0,
+        menuKeyEquivalent: "",
+        menuModifierMask: [],
+        displayName: "F8",
+        mainKeyDisplayName: "F8"
+    )
+}
+
+/// The hot-key step starts a microphone preview; tests must never open the
+/// real input device.
+private final class SilentOnboardingAudioEngine:
+    RealtimeAudioEngineProtocol {
+    func requestMicrophoneAccess(
+        _ completion: @escaping (Bool) -> Void
+    ) {
+        completion(true)
+    }
+
+    func start(
+        inputHandler: @escaping (Data) -> Void,
+        activityHandler: @escaping (
+            RealtimeAudioInputActivity
+        ) -> Void
+    ) throws {}
+
+    func stop() {}
+
+    func stopPlayback() {}
+
+    func playPCM16(_ data: Data) {}
+}
+
+private func onboardingButtons(in view: NSView?) -> [NSButton] {
+    guard let view else { return [] }
+    return view.subviews.flatMap { subview -> [NSButton] in
+        var found: [NSButton] = []
+        if let button = subview as? NSButton {
+            found.append(button)
+        }
+        found.append(
+            contentsOf: onboardingButtons(in: subview)
+        )
+        return found
+    }
 }
 
 private final class StubOnboardingURLProtocol:

@@ -221,6 +221,10 @@ final class OnboardingWizardController: NSWindowController {
         "API keys are stored in Apple keychain and shared across channels of this provider."
     static let maskedKey = "••••••••••••"
     static let openClawTokenPlaceholder = "Paste token here"
+    static let chooseServicesCaption =
+        "Choose one or both. You can add more voice channels later."
+    static let addServiceCaption =
+        "Everything you picked is set up. Tick another service to add it — the ones you already have stay as they are."
 
     private let profileProvider: () -> [VoiceProfile]
     private let credentialStore: VoiceCredentialStoring
@@ -254,6 +258,9 @@ final class OnboardingWizardController: NSWindowController {
     private var selectedServices: Set<OnboardingService>
     private var confirmedServicesThisSession:
         Set<OnboardingService> = []
+    /// Set when the owner reopened a finished setup: the picker is showing to
+    /// let them add a service, not because a choice is missing.
+    private var opensToAddService = false
     private var verificationState: APIKeyVerificationState = .idle
     private var enteredAPIKey = ""
     private var enteredOpenClawToken = ""
@@ -480,16 +487,38 @@ final class OnboardingWizardController: NSWindowController {
         showAndRender()
     }
 
+    /// Re-entry the app made on the owner's behalf: resume at the first thing
+    /// still unfinished.
     func showReentrant() {
+        reenter(
+            resolvingWith: OnboardingFlowPolicy
+                .firstIncompleteStepWithReason(groundTruth:)
+        )
+    }
+
+    /// Re-entry the owner asked for from the menu bar. Same resume when setup is
+    /// unfinished; the service picker once it is complete, so a second service
+    /// can still be added.
+    func showManualReentry() {
+        reenter(
+            resolvingWith: OnboardingFlowPolicy
+                .manualReentryStepWithReason(groundTruth:)
+        )
+    }
+
+    private func reenter(
+        resolvingWith resolve: (OnboardingGroundTruth) -> (
+            step: OnboardingStep,
+            reason: OnboardingStepReason
+        )
+    ) {
         beginWizardSession()
         handledSteps.removeAll()
         handledHotKeyProfileIDs.removeAll()
         let groundTruth = groundTruthSnapshot
-        let resolved = OnboardingFlowPolicy
-            .firstIncompleteStepWithReason(
-                groundTruth: groundTruth
-            )
+        let resolved = resolve(groundTruth)
         currentStep = resolved.step
+        opensToAddService = resolved.reason == .addAnotherService
         logWizardOpened(
             .reentrant,
             reason: resolved.reason,
@@ -582,6 +611,7 @@ final class OnboardingWizardController: NSWindowController {
 
     private func beginWizardSession() {
         confirmedServicesThisSession.removeAll()
+        opensToAddService = false
         // Each opening re-states the facts it observes, so one window's log is
         // readable without the previous one.
         loggedEnsuredServices = nil
@@ -801,7 +831,11 @@ final class OnboardingWizardController: NSWindowController {
     private func renderServices() {
         addIcon(named: "point.3.connected.trianglepath.dotted")
         addTitle("What would you like to connect?")
-        addBody("Choose one or both. You can add more voice channels later.")
+        addBody(
+            opensToAddService
+                ? Self.addServiceCaption
+                : Self.chooseServicesCaption
+        )
 
         addServiceCard(
             service: .openAI,
@@ -1587,6 +1621,14 @@ final class OnboardingWizardController: NSWindowController {
     func confirmServices(
         _ services: Set<OnboardingService>
     ) {
+        // Read before ensuring: afterwards every confirmed service has a
+        // channel, and which ones are new is exactly what the log is for.
+        let servicesWithChannels = Set(
+            profileProvider().map(\.providerID)
+        )
+        let added = services.filter {
+            servicesWithChannels.contains($0.providerID) == false
+        }
         selectedServices = services
         OnboardingServicePreferences.saveSelectedServices(
             services,
@@ -1594,7 +1636,10 @@ final class OnboardingWizardController: NSWindowController {
         )
         confirmedServicesThisSession = services
         diagnostics?.record(
-            .servicesConfirmed(Array(services))
+            .servicesConfirmed(
+                Array(services),
+                added: Array(added)
+            )
         )
         ensureSelectedChannels()
     }
