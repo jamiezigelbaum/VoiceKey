@@ -268,14 +268,18 @@ struct VoiceProviderCredentialViewState: Equatable {
         // readiness: OpenClaw's readiness always passes (token optional,
         // resolved at connect time), which made a machine with no token and
         // no OpenClaw pairing claim "Ready to use." (fresh-Air install,
-        // 2026-07-24).
+        // 2026-07-24). It also names the source in effect, because an entered
+        // token silently outranks a working pairing (2026-07-25).
         if provider == .openClaw {
-            if hasAPIKey {
-                statusMessage = "Gateway token stored."
+            if hasAPIKey, hasDiscoveredGatewayToken {
+                statusMessage =
+                    "Using the token you entered — it overrides this Mac's OpenClaw pairing."
+            } else if hasAPIKey {
+                statusMessage = "Using the token you entered."
             } else if hasDiscoveredGatewayToken {
-                statusMessage = "Using this Mac's OpenClaw pairing (auto-discovered token)."
+                statusMessage = "Using this Mac's OpenClaw pairing."
             } else {
-                statusMessage = "No gateway token found — paste one, or pair this Mac with OpenClaw."
+                statusMessage = OpenClawCredentialCopy.noTokenFound
             }
         } else {
             statusMessage = provider.readiness(hasAPIKey: hasAPIKey).settingsMessage

@@ -881,7 +881,8 @@ final class SettingsAutoApplyTests: XCTestCase {
             OpenClawConnectionTestSnapshot(
                 isVisible: true,
                 isTesting: false,
-                status: "Connected to gateway 2026.7.1-2."
+                status:
+                    "Connected to OpenClaw (gateway 2026.7.1-2) using the token you entered."
             )
         )
         XCTAssertEqual(savedFacts, [true])
@@ -915,6 +916,252 @@ final class SettingsAutoApplyTests: XCTestCase {
             controller.openClawConnectionTestSnapshot
                 .isVisible
         )
+    }
+
+    /// The 2026-07-25 incident, end to end in Settings: a pasted token is
+    /// rejected, the failure says so, and one click removes it and re-tests.
+    func testRejectedEnteredTokenOffersInlineRemovalAndRetests() throws {
+        let profile = VoiceProfile(
+            name: "OpenClaw",
+            providerID: .openClaw,
+            model: "",
+            voice: "",
+            endpointURL: "ws://127.0.0.1:18790"
+        )
+        let credentials = InMemoryCredentialStore()
+        credentials.apiKeys[profile.id] = "stale-entered-token"
+        let tester = SettingsOpenClawConnectionTester()
+        tester.tokenSource = .enteredToken
+        tester.discoveryWouldSupplyDifferentToken = true
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            openClawConnectionTester: tester,
+            saveOpenClawConnectionFact: { _ in },
+            credentialStore: credentials,
+            saveProfiles: { _ in },
+            hasDiscoveredGatewayToken: { true }
+        )
+
+        let testButton = try XCTUnwrap(
+            descendantButtons(in: controller.window?.contentView)
+                .first { $0.title == "Test Connection" }
+        )
+        sendAction(for: testButton)
+        tester.complete(.gatewayTokenMismatch)
+
+        XCTAssertEqual(
+            controller.openClawConnectionTestSnapshot,
+            OpenClawConnectionTestSnapshot(
+                isVisible: true,
+                isTesting: false,
+                status: """
+                    OpenClaw rejected the token you entered. Remove it and VoiceKey \
+                    will use this Mac's OpenClaw pairing instead.
+                    """,
+                recoveryActionTitle: "Use This Mac's Pairing"
+            )
+        )
+
+        let recovery = try XCTUnwrap(
+            descendantButtons(in: controller.window?.contentView)
+                .first {
+                    $0.title == "Use This Mac's Pairing"
+                        && $0.isHidden == false
+                }
+        )
+        tester.tokenSource = .secretsJSON
+        tester.discoveryWouldSupplyDifferentToken = false
+        sendAction(for: recovery)
+
+        XCTAssertNil(
+            credentials.apiKeys[profile.id],
+            "The rejected token must be removed."
+        )
+        XCTAssertEqual(
+            tester.endpoints.count,
+            2,
+            "Removing the token must immediately re-test."
+        )
+        tester.complete(.ok(
+            serverVersion: "2026.7.1-2",
+            scopes: ["operator.talk"]
+        ))
+        XCTAssertEqual(
+            controller.openClawConnectionTestSnapshot.status,
+            "Connected to OpenClaw (gateway 2026.7.1-2) using this Mac's OpenClaw pairing."
+        )
+        XCTAssertNil(
+            controller.openClawConnectionTestSnapshot
+                .recoveryActionTitle
+        )
+    }
+
+    func testRejectedTokenWithoutADiscoveredFallbackOffersNoInlineAction() throws {
+        let profile = VoiceProfile(
+            name: "OpenClaw",
+            providerID: .openClaw,
+            model: "",
+            voice: "",
+            endpointURL: "ws://127.0.0.1:18790"
+        )
+        let credentials = InMemoryCredentialStore()
+        credentials.apiKeys[profile.id] = "wrong-token"
+        let tester = SettingsOpenClawConnectionTester()
+        tester.tokenSource = .enteredToken
+        tester.discoveryWouldSupplyDifferentToken = false
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            openClawConnectionTester: tester,
+            saveOpenClawConnectionFact: { _ in },
+            credentialStore: credentials,
+            saveProfiles: { _ in },
+            hasDiscoveredGatewayToken: { false }
+        )
+
+        let testButton = try XCTUnwrap(
+            descendantButtons(in: controller.window?.contentView)
+                .first { $0.title == "Test Connection" }
+        )
+        sendAction(for: testButton)
+        tester.complete(.gatewayTokenMismatch)
+
+        XCTAssertEqual(
+            controller.openClawConnectionTestSnapshot.status,
+            """
+            OpenClaw rejected the token you entered. Check it, or remove it and \
+            pair this Mac with OpenClaw.
+            """
+        )
+        XCTAssertNil(
+            controller.openClawConnectionTestSnapshot
+                .recoveryActionTitle
+        )
+    }
+
+    // MARK: - Credential entry is demoted while a pairing already works
+
+    func testDiscoveredPairingHidesTheTokenFieldUntilAsked() throws {
+        let profile = VoiceProfile(
+            name: "OpenClaw",
+            providerID: .openClaw,
+            model: "",
+            voice: "",
+            endpointURL: ""
+        )
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in },
+            hasDiscoveredGatewayToken: { true }
+        )
+
+        let snapshot = controller.credentialFieldSnapshot
+        XCTAssertFalse(
+            snapshot.isFieldVisible,
+            "A working pairing must not present an empty field to fill."
+        )
+        XCTAssertTrue(snapshot.isUseDifferentTokenVisible)
+        XCTAssertEqual(
+            controller.credentialStatusSnapshot,
+            "Using this Mac's OpenClaw pairing."
+        )
+
+        let reveal = try XCTUnwrap(
+            descendantButtons(in: controller.window?.contentView)
+                .first {
+                    $0.title == "Use a Different Token"
+                        && $0.isHidden == false
+                }
+        )
+        sendAction(for: reveal)
+
+        XCTAssertTrue(
+            controller.credentialFieldSnapshot.isFieldVisible
+        )
+        XCTAssertTrue(
+            controller.credentialFieldSnapshot.isEnabled
+        )
+        XCTAssertFalse(
+            controller.credentialFieldSnapshot
+                .isUseDifferentTokenVisible
+        )
+        XCTAssertEqual(
+            controller.credentialFieldSnapshot.placeholder,
+            "Paste an OpenClaw gateway token"
+        )
+        XCTAssertEqual(
+            controller.credentialFieldSnapshot.caption,
+            """
+            A token you enter is stored in Apple keychain and replaces this Mac's \
+            OpenClaw pairing.
+            """,
+            "Revealing the field must warn what entering a token does."
+        )
+    }
+
+    func testWithoutAnyPairingTheTokenFieldIsPrimary() {
+        let profile = VoiceProfile(
+            name: "OpenClaw",
+            providerID: .openClaw,
+            model: "",
+            voice: "",
+            endpointURL: ""
+        )
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in },
+            hasDiscoveredGatewayToken: { false }
+        )
+
+        let snapshot = controller.credentialFieldSnapshot
+        XCTAssertTrue(snapshot.isFieldVisible)
+        XCTAssertTrue(snapshot.isEnabled)
+        XCTAssertFalse(snapshot.isUseDifferentTokenVisible)
+        XCTAssertEqual(
+            snapshot.placeholder,
+            "Paste an OpenClaw gateway token"
+        )
+        XCTAssertEqual(
+            snapshot.caption,
+            """
+            Gateway tokens are stored in Apple keychain and shared across OpenClaw \
+            channels.
+            """,
+            "With nothing to override, the caption must not warn about a pairing."
+        )
+        XCTAssertEqual(
+            controller.credentialStatusSnapshot,
+            "No gateway token found — paste one, or pair this Mac with OpenClaw."
+        )
+    }
+
+    func testEnteredTokenSaysItOverridesThisMacsPairing() {
+        let profile = VoiceProfile(
+            name: "OpenClaw",
+            providerID: .openClaw,
+            model: "",
+            voice: "",
+            endpointURL: ""
+        )
+        let credentials = InMemoryCredentialStore()
+        credentials.apiKeys[profile.id] = "entered-token"
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: credentials,
+            saveProfiles: { _ in },
+            hasDiscoveredGatewayToken: { true }
+        )
+
+        XCTAssertEqual(
+            controller.credentialStatusSnapshot,
+            "Using the token you entered — it overrides this Mac's OpenClaw pairing."
+        )
+        let snapshot = controller.credentialFieldSnapshot
+        XCTAssertTrue(snapshot.isFieldVisible)
+        XCTAssertEqual(snapshot.renderedValue, "••••••••••••")
+        XCTAssertFalse(snapshot.renderedValue.contains("entered-token"))
+        XCTAssertFalse(snapshot.isUseDifferentTokenVisible)
     }
 
     func testWindowDefaultsTallEnoughAndHasNoSaveButton() {
@@ -1160,8 +1407,11 @@ private final class EndpointRecordingRuntimeService:
 private final class SettingsOpenClawConnectionTester:
     OpenClawConnectionTesting {
     private var completion:
-        ((OpenClawConnectionOutcome) -> Void)?
+        ((OpenClawConnectionTestResult) -> Void)?
     private(set) var endpoints: [String] = []
+    /// What the next completed test reports as the credential it used.
+    var tokenSource: OpenClawGatewayTokenSource? = .enteredToken
+    var discoveryWouldSupplyDifferentToken = false
 
     @discardableResult
     func testConnection(
@@ -1170,13 +1420,30 @@ private final class SettingsOpenClawConnectionTester:
             OpenClawConnectionOutcome
         ) -> Void
     ) -> OpenClawConnectionTestCancellation {
+        testConnection(endpointURL: endpointURL) { result in
+            completion(result.outcome)
+        }
+    }
+
+    @discardableResult
+    func testConnection(
+        endpointURL: String,
+        detailedCompletion: @escaping (
+            OpenClawConnectionTestResult
+        ) -> Void
+    ) -> OpenClawConnectionTestCancellation {
         endpoints.append(endpointURL)
-        self.completion = completion
+        completion = detailedCompletion
         return SettingsOpenClawTestCancellation()
     }
 
     func complete(_ outcome: OpenClawConnectionOutcome) {
-        completion?(outcome)
+        completion?(OpenClawConnectionTestResult(
+            outcome: outcome,
+            tokenSource: tokenSource,
+            discoveryWouldSupplyDifferentToken:
+                discoveryWouldSupplyDifferentToken
+        ))
         completion = nil
     }
 }

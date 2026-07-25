@@ -33,6 +33,12 @@ enum OpenClawTalkEventAction: Equatable {
         message: String
     )
     case deviceTokenMismatch(message: String)
+    /// The gateway rejected the gateway auth token itself (AUTH_TOKEN_MISMATCH /
+    /// AUTH_TOKEN_MISSING). The raw sentence ("unauthorized: gateway token
+    /// mismatch (provide gateway auth token)") tells a user nothing about which
+    /// token was used, so the provider composes the message from the credential
+    /// source instead.
+    case gatewayTokenRejected
     case toolCall(OpenClawTalkToolCall)
     case malformedToolCall(callID: String?, reason: String)
     case requestSucceeded(id: String, runID: String?, resultJSON: String?)
@@ -294,9 +300,177 @@ enum OpenClawTalkRequestBuilder {
     }
 }
 
+/// Where a resolved gateway token came from. The distinction is user-facing: a
+/// token pasted in Settings silently outranks a working OpenClaw pairing, and
+/// until 2026-07-25 nothing told the owner which one a session was using — a
+/// stale paste looked exactly like a broken gateway.
+enum OpenClawGatewayTokenSource: Equatable, CaseIterable {
+    /// Pasted into Settings by the owner and kept in the Keychain.
+    case enteredToken
+    /// A `*gateway-token*` file in the OpenClaw secrets directory.
+    case secretsDirectory
+    /// `gateway.auth.token` in the OpenClaw secrets.json.
+    case secretsJSON
+
+    /// True for the sources auto-discovery reads from this Mac's OpenClaw install.
+    var isDiscovered: Bool {
+        self != .enteredToken
+    }
+
+    /// Plain-language name for status copy. Never a file path or a token value.
+    var displayName: String {
+        switch self {
+        case .enteredToken:
+            return "the token you entered"
+        case .secretsDirectory, .secretsJSON:
+            return "this Mac's OpenClaw pairing"
+        }
+    }
+}
+
+/// A gateway token plus where it came from, kept as one value so user-facing
+/// copy can never name a different source than the token actually sent.
+struct OpenClawGatewayTokenResolution: Equatable {
+    var token: String
+    var source: OpenClawGatewayTokenSource
+}
+
+/// What VoiceKey says when the gateway rejects a token, and whether the user can
+/// recover by dropping the token they entered.
+struct OpenClawGatewayTokenRejection: Equatable {
+    var message: String
+    /// True when removing the entered token would leave VoiceKey a *different*
+    /// auto-discovered token to fall back on — the one-click way out.
+    var offersEnteredTokenRemoval: Bool
+}
+
+/// User-facing copy for gateway-credential states. Every string names the
+/// credential SOURCE in plain language and never a token value, a file path,
+/// or a keychain reference.
+enum OpenClawCredentialCopy {
+    static let noTokenFound =
+        "No gateway token found — paste one, or pair this Mac with OpenClaw."
+
+    static func connected(
+        serverVersion: String,
+        source: OpenClawGatewayTokenSource?
+    ) -> String {
+        guard let source else {
+            return "Connected to OpenClaw (gateway \(serverVersion))."
+        }
+        return "Connected to OpenClaw (gateway \(serverVersion)) using \(source.displayName)."
+    }
+
+    static func rejected(
+        source: OpenClawGatewayTokenSource?,
+        discoveryWouldSupplyDifferentToken: Bool
+    ) -> OpenClawGatewayTokenRejection {
+        guard let source else {
+            return OpenClawGatewayTokenRejection(
+                message: noTokenFound,
+                offersEnteredTokenRemoval: false
+            )
+        }
+        switch source {
+        case .enteredToken where discoveryWouldSupplyDifferentToken:
+            return OpenClawGatewayTokenRejection(
+                message: """
+                    OpenClaw rejected the token you entered. Remove it and VoiceKey \
+                    will use this Mac's OpenClaw pairing instead.
+                    """,
+                offersEnteredTokenRemoval: true
+            )
+        case .enteredToken:
+            return OpenClawGatewayTokenRejection(
+                message: """
+                    OpenClaw rejected the token you entered. Check it, or remove it \
+                    and pair this Mac with OpenClaw.
+                    """,
+                offersEnteredTokenRemoval: false
+            )
+        case .secretsDirectory, .secretsJSON:
+            return OpenClawGatewayTokenRejection(
+                message: """
+                    OpenClaw rejected this Mac's pairing. Re-pair this Mac in \
+                    OpenClaw, then try again.
+                    """,
+                offersEnteredTokenRemoval: false
+            )
+        }
+    }
+}
+
+/// The gateway relays its own upstream AI provider's errors verbatim, masked key
+/// fragment and sign-in URL included. Shown as-is ("Incorrect API key provided:
+/// sk-proj-…") it reads as the user's VoiceKey key being wrong and sends them to
+/// the wrong site: the rejected credential belongs to OpenClaw, on the Mac
+/// running the gateway (live report 2026-07-25).
+enum OpenClawUpstreamProviderError {
+    static let statusMessage = """
+        OpenClaw's own AI provider key was rejected. Fix it in OpenClaw on the Mac \
+        running the gateway — there is nothing to change in VoiceKey.
+        """
+
+    private static let rejectionWords = [
+        "incorrect",
+        "invalid",
+        "expired",
+        "revoked",
+        "rejected",
+        "unauthorized",
+        "not valid"
+    ]
+
+    /// True for an upstream provider credential rejection relayed to VoiceKey.
+    /// VoiceKey never authors a message like this itself, so a match can only
+    /// have come over the relay.
+    static func isCredentialRejection(_ message: String) -> Bool {
+        let lowercased = message.lowercased()
+        if lowercased.contains("invalid_api_key") {
+            return true
+        }
+        guard lowercased.contains("api key")
+            || lowercased.contains("api-key") else {
+            return false
+        }
+        return rejectionWords.contains { lowercased.contains($0) }
+    }
+
+    /// Keeps the upstream detail loggable while dropping every credential
+    /// fragment, including the provider's own masked form (`sk-proj-****...JsMA`).
+    /// Ordinary hyphenated words are left alone: only known key prefixes and
+    /// long opaque runs are matched.
+    static func redactingKeyFragments(_ message: String) -> String {
+        var redacted = message
+        for pattern in [
+            // Provider key prefixes, masked or whole.
+            "(?i)\\b(?:sk|pk|rk|xai|key)-[A-Za-z0-9*][A-Za-z0-9_.*\\-…]*[A-Za-z0-9*…]",
+            "\\bAIza[A-Za-z0-9_\\-]+",
+            // Any long opaque run, in case a provider formats keys differently.
+            "[A-Za-z0-9_\\-]{24,}"
+        ] {
+            guard let expression = try? NSRegularExpression(pattern: pattern) else {
+                continue
+            }
+            redacted = expression.stringByReplacingMatches(
+                in: redacted,
+                range: NSRange(redacted.startIndex..., in: redacted),
+                withTemplate: "[redacted]"
+            )
+        }
+        return redacted
+    }
+
+    static func diagnostic(_ message: String) -> String {
+        "OpenClaw gateway reported an upstream provider error: \(redactingKeyFragments(message))"
+    }
+}
+
 /// Resolves the gateway token without ever logging it: a token pasted in Settings
 /// (Keychain) wins; otherwise the first `*gateway-token*` file in the OpenClaw
 /// secrets directory is used, followed by `gateway.auth.token` in secrets.json.
+/// Resolution reports its source so callers can explain which credential is in
+/// play — precedence itself is unchanged.
 enum OpenClawTokenResolver {
     static var defaultSecretsDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -308,14 +482,36 @@ enum OpenClawTokenResolver {
             .appendingPathComponent(".openclaw/secrets.json")
     }
 
-    static func resolveGatewayToken(
+    static func gatewayTokenResolution(
         apiKeyProvider: () -> String?
-    ) -> String? {
-        resolveGatewayToken(
+    ) -> OpenClawGatewayTokenResolution? {
+        gatewayTokenResolution(
             apiKeyProvider: apiKeyProvider,
             secretsDirectory: defaultSecretsDirectory,
             secretsJSONURL: defaultSecretsJSONURL
         )
+    }
+
+    static func gatewayTokenResolution(
+        apiKeyProvider: () -> String?,
+        secretsDirectory: URL,
+        secretsJSONURL: URL? = nil
+    ) -> OpenClawGatewayTokenResolution? {
+        if let key = apiKeyProvider()?.trimmingCharacters(in: .whitespacesAndNewlines),
+           key.isEmpty == false {
+            return OpenClawGatewayTokenResolution(token: key, source: .enteredToken)
+        }
+        return discoveredGatewayTokenResolution(
+            secretsDirectory: secretsDirectory,
+            secretsJSONURL: secretsJSONURL
+        )
+    }
+
+    /// Convenience for callers that only need the token string.
+    static func resolveGatewayToken(
+        apiKeyProvider: () -> String?
+    ) -> String? {
+        gatewayTokenResolution(apiKeyProvider: apiKeyProvider)?.token
     }
 
     static func resolveGatewayToken(
@@ -323,22 +519,30 @@ enum OpenClawTokenResolver {
         secretsDirectory: URL,
         secretsJSONURL: URL? = nil
     ) -> String? {
-        if let key = apiKeyProvider()?.trimmingCharacters(in: .whitespacesAndNewlines),
-           key.isEmpty == false {
-            return key
-        }
+        gatewayTokenResolution(
+            apiKeyProvider: apiKeyProvider,
+            secretsDirectory: secretsDirectory,
+            secretsJSONURL: secretsJSONURL
+        )?.token
+    }
+
+    /// What resolution would return if nothing were stored in the Keychain — the
+    /// fallback a user recovers to by removing the token they entered.
+    static func discoveredGatewayTokenResolution(
+        secretsDirectory: URL = defaultSecretsDirectory,
+        secretsJSONURL: URL? = defaultSecretsJSONURL
+    ) -> OpenClawGatewayTokenResolution? {
         if let token = gatewayTokenFromSecretsDirectory(secretsDirectory) {
-            return token
+            return OpenClawGatewayTokenResolution(token: token, source: .secretsDirectory)
         }
-        return secretsJSONURL.flatMap(gatewayTokenFromSecretsJSON)
+        guard let token = secretsJSONURL.flatMap(gatewayTokenFromSecretsJSON) else {
+            return nil
+        }
+        return OpenClawGatewayTokenResolution(token: token, source: .secretsJSON)
     }
 
     static func discoveredGatewayToken() -> String? {
-        resolveGatewayToken(
-            apiKeyProvider: { nil },
-            secretsDirectory: defaultSecretsDirectory,
-            secretsJSONURL: defaultSecretsJSONURL
-        )
+        discoveredGatewayTokenResolution()?.token
     }
 
     static func gatewayTokenFromSecretsDirectory(_ directory: URL) -> String? {
@@ -607,6 +811,10 @@ enum OpenClawTalkEventMapper {
                 let details = error?["details"] as? [String: Any]
                 if details?["code"] as? String == "AUTH_DEVICE_TOKEN_MISMATCH" {
                     return [.deviceTokenMismatch(message: message)]
+                }
+                if let detailCode = details?["code"] as? String,
+                   detailCode == "AUTH_TOKEN_MISMATCH" || detailCode == "AUTH_TOKEN_MISSING" {
+                    return [.gatewayTokenRejected]
                 }
                 // The gateway rejects over-broad scope requests as NOT_PAIRED and
                 // reports the device's approved scope set; the provider reconnects
@@ -1025,7 +1233,9 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     }
 
     private static let openClawBundleID = "ai.openclaw.mac"
-    private static let missingTokenMessage = "OpenClaw gateway token not found — paste it in Settings"
+    // Same sentence as the Settings caption: pairing this Mac is as valid a fix
+    // as pasting a token, and only one of them can go stale.
+    private static let missingTokenMessage = OpenClawCredentialCopy.noTokenFound
     private static let unreachableMessage = "OpenClaw gateway unreachable — is the tunnel/OpenClaw running?"
     /// ~200 ms of PCM16 mono 24 kHz, the chunk size the gateway relay expects.
     private static let audioChunkByteCount = 9_600
@@ -1079,7 +1289,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     private let stateQueueKey = DispatchSpecificKey<Void>()
     private var eventHandler: ((VoiceProviderEvent) -> Void)?
     private var configuration: VoiceSessionConfiguration
-    private let tokenProvider: () -> String?
+    private let tokenResolutionProvider: () -> OpenClawGatewayTokenResolution?
+    private let discoveredTokenProvider: () -> String?
     private let audioEngineFactory: () -> RealtimeAudioEngineProtocol
     private var instantiatedAudioEngine: RealtimeAudioEngineProtocol?
     private var audioEngine: RealtimeAudioEngineProtocol {
@@ -1134,6 +1345,12 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     private var nextRequestIDValue = 3
     private var pendingAudio = Data()
     private var gatewayToken: String?
+    /// Where the token for the current connect attempt came from, and whether
+    /// removing an entered token would leave a different discovered one. Both
+    /// are recorded at connect time so a rejection can name the source without
+    /// re-reading anything (and without holding the token any longer).
+    private var gatewayTokenSource: OpenClawGatewayTokenSource?
+    private var discoveryWouldSupplyDifferentToken = false
     private let deviceCredentialsProvider: () -> OpenClawDeviceCredentials?
     private var deviceCredentials: OpenClawDeviceCredentials?
     /// Set after a NOT_PAIRED rejection: the gateway-approved scope set to use
@@ -1148,8 +1365,11 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
 
     init(
         configuration: VoiceSessionConfiguration,
-        tokenProvider: @escaping () -> String?,
+        tokenResolutionProvider: @escaping () -> OpenClawGatewayTokenResolution?,
         audioEngine: @autoclosure @escaping () -> RealtimeAudioEngineProtocol = RealtimeAudioEngine(),
+        discoveredTokenProvider: @escaping () -> String? = {
+            OpenClawTokenResolver.discoveredGatewayToken()
+        },
         deviceCredentialsProvider: @escaping () -> OpenClawDeviceCredentials? = {
             OpenClawDeviceIdentityStore.loadCredentials()
         },
@@ -1167,7 +1387,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         gateNow: @escaping () -> Date = Date.init
     ) {
         self.configuration = configuration
-        self.tokenProvider = tokenProvider
+        self.tokenResolutionProvider = tokenResolutionProvider
+        self.discoveredTokenProvider = discoveredTokenProvider
         self.audioEngineFactory = audioEngine
         self.deviceCredentialsProvider = deviceCredentialsProvider
         self.webSocketFactory = webSocketFactory
@@ -1193,7 +1414,7 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     }
 
     private func prepareOnStateQueue() {
-        guard tokenProvider() != nil else {
+        guard tokenResolutionProvider() != nil else {
             emit(.status(.needsAttention(Self.missingTokenMessage)))
             return
         }
@@ -1282,7 +1503,7 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     // MARK: - Starting
 
     private func startVoice() {
-        guard let token = tokenProvider() else {
+        guard let resolution = tokenResolutionProvider() else {
             emit(.status(.needsAttention(Self.missingTokenMessage)))
             return
         }
@@ -1306,18 +1527,27 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
                     )))
                     return
                 }
-                self.connect(token: token, generation: generation)
+                self.connect(resolution: resolution, generation: generation)
             }
         }
     }
 
-    private func connect(token: String, generation: Int) {
+    private func connect(
+        resolution: OpenClawGatewayTokenResolution,
+        generation: Int
+    ) {
         guard startGeneration == generation,
               isStarting,
               isStopping == false else { return }
 
         resetSpeakerModeState()
-        gatewayToken = token
+        gatewayToken = resolution.token
+        gatewayTokenSource = resolution.source
+        // Compared in memory only: presence and difference are reportable,
+        // the values themselves never are.
+        let discovered = discoveredTokenProvider()
+        discoveryWouldSupplyDifferentToken =
+            discovered != nil && discovered != resolution.token
         deviceCredentials = deviceCredentialsProvider()
         requestedScopesOverride = nil
         hasRetriedWithApprovedScopes = false
@@ -1562,6 +1792,14 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
                 ))
             case let .deviceTokenMismatch(message):
                 retryConnectWithoutDeviceToken(failureMessage: message)
+            case .gatewayTokenRejected:
+                handleHandshakeFailed(
+                    message: OpenClawCredentialCopy.rejected(
+                        source: gatewayTokenSource,
+                        discoveryWouldSupplyDifferentToken:
+                            discoveryWouldSupplyDifferentToken
+                    ).message
+                )
             case let .connectRetryWithScopes(
                 scopes,
                 reason,
@@ -2205,6 +2443,8 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         currentEndpoint = nil
         pendingAudio = Data()
         gatewayToken = nil
+        gatewayTokenSource = nil
+        discoveryWouldSupplyDifferentToken = false
         deviceCredentials = nil
         requestedScopesOverride = nil
         hasRetriedWithApprovedScopes = false
@@ -2300,6 +2540,20 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
     }
 
     private func emit(_ event: VoiceProviderEvent) {
+        // Single funnel, so an upstream provider error can never reach the user
+        // verbatim no matter which relay path forwarded it.
+        if case let .status(.needsAttention(message)) = event,
+           OpenClawUpstreamProviderError.isCredentialRejection(message) {
+            deliver(.diagnostic(OpenClawUpstreamProviderError.diagnostic(message)))
+            deliver(.status(.needsAttention(
+                OpenClawUpstreamProviderError.statusMessage
+            )))
+            return
+        }
+        deliver(event)
+    }
+
+    private func deliver(_ event: VoiceProviderEvent) {
         let handler = eventHandler
         DispatchQueue.main.async {
             handler?(event)

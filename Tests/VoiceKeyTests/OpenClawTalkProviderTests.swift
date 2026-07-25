@@ -647,6 +647,179 @@ final class OpenClawTalkProviderTests: XCTestCase {
         )
     }
 
+    // MARK: - Token resolution reports its source
+
+    func testResolutionReportsEnteredTokenSource() throws {
+        let secrets = try makeSecretsDirectory()
+        try writeSecretsFile("a-gateway-token", contents: "file-token", in: secrets)
+
+        XCTAssertEqual(
+            OpenClawTokenResolver.gatewayTokenResolution(
+                apiKeyProvider: { "  keychain-token\n" },
+                secretsDirectory: secrets
+            ),
+            OpenClawGatewayTokenResolution(
+                token: "keychain-token",
+                source: .enteredToken
+            )
+        )
+    }
+
+    func testResolutionReportsSecretsDirectorySource() throws {
+        let secrets = try makeSecretsDirectory()
+        try writeSecretsFile("a-gateway-token", contents: " file-token\n", in: secrets)
+        let secretsJSON = secrets.appendingPathComponent("secrets.json")
+        try #"{"gateway":{"auth":{"token":"json-token"}}}"#.write(
+            to: secretsJSON,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertEqual(
+            OpenClawTokenResolver.gatewayTokenResolution(
+                apiKeyProvider: { nil },
+                secretsDirectory: secrets,
+                secretsJSONURL: secretsJSON
+            ),
+            OpenClawGatewayTokenResolution(
+                token: "file-token",
+                source: .secretsDirectory
+            )
+        )
+    }
+
+    func testResolutionReportsSecretsJSONSource() throws {
+        let secrets = try makeSecretsDirectory()
+        let secretsJSON = secrets.appendingPathComponent("secrets.json")
+        try #"{"gateway":{"auth":{"token":"json-token"}}}"#.write(
+            to: secretsJSON,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertEqual(
+            OpenClawTokenResolver.gatewayTokenResolution(
+                apiKeyProvider: { nil },
+                secretsDirectory: secrets,
+                secretsJSONURL: secretsJSON
+            ),
+            OpenClawGatewayTokenResolution(
+                token: "json-token",
+                source: .secretsJSON
+            )
+        )
+    }
+
+    func testDiscoveredResolutionIgnoresTheEnteredToken() throws {
+        let secrets = try makeSecretsDirectory()
+        try writeSecretsFile("a-gateway-token", contents: "file-token", in: secrets)
+
+        XCTAssertEqual(
+            OpenClawTokenResolver.discoveredGatewayTokenResolution(
+                secretsDirectory: secrets,
+                secretsJSONURL: nil
+            ),
+            OpenClawGatewayTokenResolution(
+                token: "file-token",
+                source: .secretsDirectory
+            )
+        )
+        XCTAssertNil(
+            OpenClawTokenResolver.discoveredGatewayTokenResolution(
+                secretsDirectory: secrets.appendingPathComponent("missing"),
+                secretsJSONURL: nil
+            )
+        )
+    }
+
+    func testSourceDisplayNamesAreOwnerFacingAndJargonFree() {
+        XCTAssertEqual(
+            OpenClawGatewayTokenSource.enteredToken.displayName,
+            "the token you entered"
+        )
+        for source in [
+            OpenClawGatewayTokenSource.secretsDirectory,
+            OpenClawGatewayTokenSource.secretsJSON
+        ] {
+            XCTAssertEqual(source.displayName, "this Mac's OpenClaw pairing")
+            XCTAssertTrue(source.isDiscovered)
+        }
+        XCTAssertFalse(OpenClawGatewayTokenSource.enteredToken.isDiscovered)
+        for source in OpenClawGatewayTokenSource.allCases {
+            for jargon in ["keychain", "secrets.json", "secrets directory", "gateway.auth"] {
+                XCTAssertFalse(
+                    source.displayName.lowercased().contains(jargon),
+                    "Credential copy must not leak implementation jargon."
+                )
+            }
+        }
+    }
+
+    // MARK: - Rejected gateway token maps to an actionable connect action
+
+    func testGatewayTokenRejectionsMapToTheCredentialAction() {
+        for detailCode in ["AUTH_TOKEN_MISMATCH", "AUTH_TOKEN_MISSING"] {
+            let frame = """
+                {"type":"res","id":"1","ok":false,"error":{"code":"INVALID_REQUEST",\
+                "message":"unauthorized: gateway token mismatch (provide gateway auth token)",\
+                "details":{"code":"\(detailCode)"}}}
+                """
+            XCTAssertEqual(
+                OpenClawTalkEventMapper.actions(from: frame, sessionID: nil),
+                [.gatewayTokenRejected]
+            )
+        }
+    }
+
+    // MARK: - Relay-upstream provider errors
+
+    func testUpstreamCredentialRejectionDetection() {
+        for message in [
+            "Incorrect API key provided: sk-proj-****...JsMA.",
+            "invalid_api_key",
+            "Your API key is expired",
+            "unauthorized: api-key rejected by provider"
+        ] {
+            XCTAssertTrue(
+                OpenClawUpstreamProviderError.isCredentialRejection(message),
+                "Should have matched: \(message)"
+            )
+        }
+        for message in [
+            "No gateway token found — paste one, or pair this Mac with OpenClaw.",
+            "OpenClaw rejected the token you entered. Check it, or remove it and pair this Mac with OpenClaw.",
+            "OpenClaw gateway unreachable — is the tunnel/OpenClaw running?",
+            "Microphone audio stopped after repeated audio device failures."
+        ] {
+            XCTAssertFalse(
+                OpenClawUpstreamProviderError.isCredentialRejection(message),
+                "VoiceKey's own copy must never be rewritten: \(message)"
+            )
+        }
+    }
+
+    func testUpstreamRedactionDropsKeyFragmentsAndKeepsTheDetail() {
+        let redacted = OpenClawUpstreamProviderError.redactingKeyFragments(
+            """
+            Incorrect API key provided: sk-proj-****...JsMA. You can find your API \
+            key at https://platform.openai.com/account/api-keys.
+            """
+        )
+
+        XCTAssertFalse(redacted.contains("sk-proj"))
+        XCTAssertFalse(redacted.contains("JsMA"))
+        XCTAssertTrue(redacted.contains("Incorrect API key provided"))
+        XCTAssertTrue(redacted.contains("platform.openai.com/account/api-keys"))
+    }
+
+    func testUpstreamRedactionLeavesOrdinaryHyphenatedWordsAlone() {
+        let sentence = "Re-pair this Mac in OpenClaw, then sign-in and re-test the well-known set-up."
+        XCTAssertEqual(
+            OpenClawUpstreamProviderError.redactingKeyFragments(sentence),
+            sentence
+        )
+    }
+
     // MARK: - Provider metadata
 
     func testOpenClawProviderMetadata() {
@@ -705,14 +878,17 @@ final class OpenClawTalkProviderTests: XCTestCase {
     func testPrepareWithoutTokenEmitsNeedsAttention() {
         let provider = OpenClawTalkProvider(
             configuration: testConfiguration,
-            tokenProvider: { nil },
+            tokenResolutionProvider: { nil },
             audioEngine: FakeOpenClawAudioEngine()
         )
 
         let attention = expectation(description: "needs attention")
         provider.onEvent = { event in
             guard case let .status(.needsAttention(message)) = event else { return }
-            XCTAssertEqual(message, "OpenClaw gateway token not found — paste it in Settings")
+            XCTAssertEqual(
+                message,
+                "No gateway token found — paste one, or pair this Mac with OpenClaw."
+            )
             attention.fulfill()
         }
 
@@ -723,7 +899,9 @@ final class OpenClawTalkProviderTests: XCTestCase {
     func testPrepareWithTokenEmitsReady() {
         let provider = OpenClawTalkProvider(
             configuration: testConfiguration,
-            tokenProvider: { "token" },
+            tokenResolutionProvider: {
+                OpenClawGatewayTokenResolution(token: "token", source: .enteredToken)
+            },
             audioEngine: FakeOpenClawAudioEngine()
         )
 
@@ -741,7 +919,7 @@ final class OpenClawTalkProviderTests: XCTestCase {
         let audioEngine = FakeOpenClawAudioEngine()
         let provider = OpenClawTalkProvider(
             configuration: testConfiguration,
-            tokenProvider: { nil },
+            tokenResolutionProvider: { nil },
             audioEngine: audioEngine
         )
 
@@ -760,7 +938,9 @@ final class OpenClawTalkProviderTests: XCTestCase {
         let audioEngine = FakeOpenClawAudioEngine()
         let provider = OpenClawTalkProvider(
             configuration: testConfiguration,
-            tokenProvider: { "token" },
+            tokenResolutionProvider: {
+                OpenClawGatewayTokenResolution(token: "token", source: .enteredToken)
+            },
             audioEngine: audioEngine
         )
 
