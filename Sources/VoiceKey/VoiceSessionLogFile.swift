@@ -4,6 +4,8 @@ import Foundation
 /// ~/Library/Logs/VoiceKey so live-test evidence survives app relaunches.
 /// Local-only, with stable provider wire names (transcripts are written as
 /// deltas, uncoalesced); never contains credentials.
+/// Subsystems that are not voice providers — the onboarding wizard — write
+/// through `append(component:kind:text:)` into the same file.
 final class VoiceSessionLogFile {
     private let directory: URL
     private let retentionDays: Int
@@ -48,7 +50,34 @@ final class VoiceSessionLogFile {
             text = message
         }
 
-        let line = "[\(Self.timestampFormatter.string(from: timestamp))] \(provider.logWireName) \(kind): \(text)\n"
+        append(label: provider.logWireName, kind: kind, text: text, timestamp: timestamp)
+    }
+
+    /// Non-provider subsystems (the onboarding wizard) share the same daily
+    /// file, retention and timestamp format: `component` takes the slot the
+    /// provider wire name occupies, so one line shape covers both and a
+    /// walkthrough can be read straight out of the session log.
+    func append(
+        component: String,
+        kind: String,
+        text: String,
+        timestamp: Date = Date()
+    ) {
+        guard component.isEmpty == false,
+              kind.isEmpty == false,
+              text.isEmpty == false else {
+            return
+        }
+        // One event is one line: a message carrying newlines would otherwise
+        // read as several unattributed entries.
+        let singleLine = text
+            .split(whereSeparator: \.isNewline)
+            .joined(separator: " ")
+        append(label: component, kind: kind, text: singleLine, timestamp: timestamp)
+    }
+
+    private func append(label: String, kind: String, text: String, timestamp: Date) {
+        let line = "[\(Self.timestampFormatter.string(from: timestamp))] \(label) \(kind): \(text)\n"
         let fileURL = directory.appendingPathComponent(
             "session-\(Self.dayFormatter.string(from: timestamp)).log"
         )
@@ -122,5 +151,16 @@ final class VoiceSessionLogFile {
             }
             try? fileManager.removeItem(at: file)
         }
+    }
+}
+
+extension VoiceSessionLogFile: OnboardingDiagnosticsLogging {
+    func record(_ event: OnboardingLogEvent, timestamp: Date) {
+        append(
+            component: OnboardingLogEvent.component,
+            kind: event.kind,
+            text: event.text,
+            timestamp: timestamp
+        )
     }
 }

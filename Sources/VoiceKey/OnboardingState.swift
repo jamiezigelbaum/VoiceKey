@@ -199,27 +199,74 @@ enum OnboardingFlowPolicy {
     static func firstIncompleteStep(
         groundTruth: OnboardingGroundTruth
     ) -> OnboardingStep {
+        firstIncompleteStepWithReason(
+            groundTruth: groundTruth
+        ).step
+    }
+
+    /// The step the live facts point at, together with the fact that decided
+    /// it — the log records why the wizard opened where it did.
+    static func firstIncompleteStepWithReason(
+        groundTruth: OnboardingGroundTruth
+    ) -> (step: OnboardingStep, reason: OnboardingStepReason) {
         if groundTruth.applicationLocation != .applications {
-            return .location
+            return (.location, .appNotInApplications)
         }
         if groundTruth.selectedServices.isEmpty {
-            return .services
+            return (.services, .noServicesSelected)
         }
         if groundTruth.selectedServices.contains(.openAI)
             && groundTruth.hasOpenAIAPIKey == false {
-            return .apiKey
+            return (.apiKey, .openAIKeyMissing)
         }
         if groundTruth.selectedServices.contains(.openClaw)
             && groundTruth.hasOpenClawConnection == false {
-            return .openClawConnect
+            return (.openClawConnect, .openClawNotConnected)
         }
         if groundTruth.microphoneAuthorization != .authorized {
-            return .microphone
+            return (.microphone, .microphoneNotAuthorized)
         }
         if groundTruth.hasHotKeysForSelectedServices == false {
-            return .hotKey
+            return (.hotKey, .hotKeysMissing)
         }
-        return .done
+        return (.done, .everythingComplete)
+    }
+
+    /// Why the wizard is showing `step`: the fact that step exists to fix, or
+    /// `.userChoice` when the step is already satisfied and the owner is
+    /// simply walking through it.
+    static func reason(
+        for step: OnboardingStep,
+        groundTruth: OnboardingGroundTruth
+    ) -> OnboardingStepReason {
+        switch step {
+        case .location:
+            return groundTruth.applicationLocation == .applications
+                ? .userChoice
+                : .appNotInApplications
+        case .welcome:
+            return .firstRun
+        case .done:
+            return firstIncompleteStep(groundTruth: groundTruth) == .done
+                ? .everythingComplete
+                : .userChoice
+        case .services, .apiKey, .openClawConnect, .microphone, .hotKey:
+            guard isComplete(step, groundTruth: groundTruth) == false else {
+                return .userChoice
+            }
+            switch step {
+            case .services:
+                return .noServicesSelected
+            case .apiKey:
+                return .openAIKeyMissing
+            case .openClawConnect:
+                return .openClawNotConnected
+            case .microphone:
+                return .microphoneNotAuthorized
+            default:
+                return .hotKeysMissing
+            }
+        }
     }
 
     static func isComplete(
@@ -335,10 +382,13 @@ final class OpenClawConnectionWizard {
     private let tester: OpenClawConnectionTesting
     private let tokenProvider: () -> String?
     private let retryScheduler: OnboardingRetryScheduler
+    private weak var diagnostics: OnboardingDiagnosticsLogging?
     private var activeTest: OpenClawConnectionTestCancellation?
     private var retryCancellation: OnboardingRetryCancellation?
     private var endpointURL = ""
     private var isVisible = false
+    private var testAttempt = 0
+    private var pairingRequestID: String?
     private(set) var state: OpenClawConnectionWizardState = .searching {
         didSet {
             onStateChange?(state)
@@ -355,11 +405,13 @@ final class OpenClawConnectionWizard {
                 execute: workItem
             )
             return workItem
-        }
+        },
+        diagnostics: OnboardingDiagnosticsLogging? = nil
     ) {
         self.tester = tester
         self.tokenProvider = tokenProvider
         self.retryScheduler = retryScheduler
+        self.diagnostics = diagnostics
     }
 
     deinit {
@@ -370,10 +422,15 @@ final class OpenClawConnectionWizard {
         leave()
         self.endpointURL = endpointURL
         isVisible = true
+        testAttempt = 0
+        pairingRequestID = nil
         state = .searching
         guard hasToken else {
             state = .needsToken(
                 message: "No gateway token was found on this Mac."
+            )
+            diagnostics?.record(
+                .openClawTokenEntered(present: false)
             )
             return
         }
@@ -390,6 +447,9 @@ final class OpenClawConnectionWizard {
         guard hasToken else {
             state = .needsToken(
                 message: "Paste a gateway token, then try again."
+            )
+            diagnostics?.record(
+                .openClawTokenEntered(present: false)
             )
             return
         }
@@ -420,6 +480,18 @@ final class OpenClawConnectionWizard {
         if preservingPairingScreen == false {
             state = .testing
         }
+        testAttempt += 1
+        // Auto-retries are the one repeating event this log keeps: without a
+        // tick per retry a pairing wait that never resolves looks identical to
+        // a wizard that stopped dead.
+        diagnostics?.record(
+            .openClawTest(
+                attempt: testAttempt,
+                endpoint: endpointURL,
+                isAutoRetry: preservingPairingScreen,
+                pairingRequestID: pairingRequestID
+            )
+        )
         activeTest = tester.testConnection(
             endpointURL: endpointURL
         ) { [weak self] outcome in
@@ -432,10 +504,15 @@ final class OpenClawConnectionWizard {
     private func handle(_ outcome: OpenClawConnectionOutcome) {
         retryCancellation?.cancel()
         retryCancellation = nil
+        diagnostics?.record(
+            .openClawOutcome(outcome, endpoint: endpointURL)
+        )
         switch outcome {
         case let .ok(serverVersion, _):
+            pairingRequestID = nil
             state = .success(serverVersion: serverVersion)
         case let .pairingRequired(reason, requestID, remediationHint):
+            pairingRequestID = requestID
             state = .pairingWait(
                 reason: reason,
                 requestID: requestID,

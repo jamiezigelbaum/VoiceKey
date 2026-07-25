@@ -103,6 +103,65 @@ final class VoiceSessionLogFileTests: XCTestCase {
         XCTAssertFalse(text.contains("ChatGPT (web)"))
     }
 
+    func testComponentEventsShareTheProviderLineShapeInTheSameDailyFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "VoiceSessionLogFileTests-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let timestamp = Date(timeIntervalSince1970: 1_800_000_000)
+        // Retention is measured against the file's real mtime, which is older
+        // than this fixed timestamp; a short window would prune the file
+        // between appends.
+        let logFile = VoiceSessionLogFile(
+            directory: directory,
+            retentionDays: 3_650
+        )
+
+        logFile.append(
+            .diagnostic("connected"),
+            provider: .openAIRealtime,
+            timestamp: timestamp
+        )
+        logFile.record(
+            .stepTransition(
+                from: .welcome,
+                to: .services,
+                trigger: .advance,
+                reason: .noServicesSelected
+            ),
+            timestamp: timestamp.addingTimeInterval(1)
+        )
+        // A message carrying newlines still occupies exactly one line.
+        logFile.append(
+            component: "onboarding",
+            kind: "apikey",
+            text: "save failed\nchannel=OpenAI",
+            timestamp: timestamp.addingTimeInterval(2)
+        )
+        logFile.waitForPendingWrites()
+
+        let file = directory.appendingPathComponent(
+            "session-2027-01-15.log"
+        )
+        XCTAssertEqual(
+            try String(contentsOf: file, encoding: .utf8),
+            """
+            [2027-01-15T08:00:00Z] OpenAI Realtime API diagnostic: connected
+            [2027-01-15T08:00:01Z] onboarding step: welcome -> services trigger=advance reason=no-services-selected
+            [2027-01-15T08:00:02Z] onboarding apikey: save failed channel=OpenAI
+
+            """
+        )
+    }
+
     func testAppendDeletesOnlyExpiredSessionLogFiles() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("VoiceSessionLogFileTests-\(UUID().uuidString)", isDirectory: true)

@@ -685,7 +685,11 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             ?? OnboardingWizardController(
                 profileProvider: { [weak self] in
                     self?.profiles ?? []
-                }
+                },
+                // Same daily file the voice sessions write to: a first-run
+                // walkthrough on a Mac nobody can watch has to be readable
+                // from the log alone.
+                diagnostics: sessionLogFile
             )
         controller.delegate = self
         onboardingWizardController = controller
