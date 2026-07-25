@@ -93,12 +93,36 @@ struct CredentialFieldSnapshot: Equatable {
     var renderedValue: String
     var isEnabled: Bool
     var isChangeVisible: Bool
+    /// False when the entry field is deliberately absent — a working discovered
+    /// pairing must not present an empty box inviting a token paste.
+    var isFieldVisible: Bool
+    var isUseDifferentTokenVisible: Bool
+
+    init(
+        placeholder: String?,
+        caption: String,
+        renderedValue: String,
+        isEnabled: Bool,
+        isChangeVisible: Bool,
+        isFieldVisible: Bool = true,
+        isUseDifferentTokenVisible: Bool = false
+    ) {
+        self.placeholder = placeholder
+        self.caption = caption
+        self.renderedValue = renderedValue
+        self.isEnabled = isEnabled
+        self.isChangeVisible = isChangeVisible
+        self.isFieldVisible = isFieldVisible
+        self.isUseDifferentTokenVisible = isUseDifferentTokenVisible
+    }
 }
 
 struct OpenClawConnectionTestSnapshot: Equatable {
     var isVisible: Bool
     var isTesting: Bool
     var status: String
+    /// Title of the inline recovery button, or nil while it is hidden.
+    var recoveryActionTitle: String?
 }
 
 struct AdvancedDisclosureSnapshot: Equatable {
@@ -119,9 +143,15 @@ struct SettingsPermissionsSnapshot: Equatable {
 
 struct CredentialFieldPresentation: Equatable {
     static let placeholder = "Paste key here"
+    static let openClawPlaceholder = "Paste an OpenClaw gateway token"
     static let caption =
         "API keys are stored in Apple keychain and shared across channels of this provider."
+    static let openClawCaption =
+        "Gateway tokens are stored in Apple keychain and shared across OpenClaw channels."
+    static let openClawOverrideCaption =
+        "A token you enter is stored in Apple keychain and replaces this Mac's OpenClaw pairing."
     static let maskedValue = "••••••••••••"
+    static let useDifferentTokenTitle = "Use a Different Token"
 
     var placeholder: String
     var caption: String
@@ -130,21 +160,51 @@ struct CredentialFieldPresentation: Equatable {
     var isChangeVisible: Bool
     var isRemoveVisible: Bool
     var isCaptionVisible: Bool
+    /// Hidden when this Mac's OpenClaw pairing already works and no token was
+    /// entered: an empty field is an invitation, and taking that invitation is
+    /// exactly how a working pairing got overwritten (owner report 2026-07-25).
+    var isFieldVisible: Bool
+    /// The demoted way in to token entry, shown only while the field is hidden.
+    var isUseDifferentTokenVisible: Bool
 
     init(
         provider: VoiceProviderID,
         hasAPIKey: Bool,
-        isChanging: Bool
+        isChanging: Bool,
+        hasDiscoveredGatewayToken: Bool = false
     ) {
         let acceptsInput =
             VoiceProviderCredentialViewState(
                 provider: provider,
-                hasAPIKey: hasAPIKey
+                hasAPIKey: hasAPIKey,
+                hasDiscoveredGatewayToken: hasDiscoveredGatewayToken
             ).acceptsAPIKeyInput
-        placeholder = provider == .chatGPTWeb
-            ? provider.credentialPlaceholder
-            : Self.placeholder
-        caption = Self.caption
+        // OpenClaw is the only provider whose credential can already be
+        // satisfied without the user: entry is optional there, primary
+        // everywhere else.
+        let isSatisfiedByDiscovery =
+            provider == .openClaw
+            && hasAPIKey == false
+            && hasDiscoveredGatewayToken
+        isFieldVisible = isSatisfiedByDiscovery == false || isChanging
+        isUseDifferentTokenVisible =
+            acceptsInput && isSatisfiedByDiscovery && isChanging == false
+        switch provider {
+        case .chatGPTWeb:
+            placeholder = provider.credentialPlaceholder
+        case .openClaw:
+            placeholder = Self.openClawPlaceholder
+        case .openAIRealtime, .geminiLive, .deepgramVoiceAgent, .custom:
+            placeholder = Self.placeholder
+        }
+        switch (provider, hasDiscoveredGatewayToken) {
+        case (.openClaw, true):
+            caption = Self.openClawOverrideCaption
+        case (.openClaw, false):
+            caption = Self.openClawCaption
+        default:
+            caption = Self.caption
+        }
         renderedValue =
             hasAPIKey && isChanging == false
             ? Self.maskedValue
@@ -156,7 +216,7 @@ struct CredentialFieldPresentation: Equatable {
             acceptsInput && hasAPIKey && isChanging == false
         isRemoveVisible =
             provider != .chatGPTWeb && hasAPIKey
-        isCaptionVisible = acceptsInput
+        isCaptionVisible = acceptsInput && isFieldVisible
     }
 }
 
@@ -388,8 +448,16 @@ final class SettingsWindowController: NSWindowController {
             caption: credentialSharingLabel.stringValue,
             renderedValue: apiKeyField.stringValue,
             isEnabled: apiKeyField.isEnabled,
-            isChangeVisible: changeAPIKeyButton.isHidden == false
+            isChangeVisible: changeAPIKeyButton.isHidden == false,
+            isFieldVisible: apiKeyField.isHidden == false,
+            isUseDifferentTokenVisible:
+                useDifferentTokenButton.isHidden == false
         )
+    }
+
+    /// The credential caption currently shown under the entry row.
+    var credentialStatusSnapshot: String {
+        credentialStatusLabel.stringValue
     }
 
     var openClawConnectionTestSnapshot:
@@ -398,7 +466,11 @@ final class SettingsWindowController: NSWindowController {
             isVisible:
                 openClawConnectionTestRow?.isHidden == false,
             isTesting: openClawConnectionTest != nil,
-            status: openClawConnectionTestStatusLabel.stringValue
+            status: openClawConnectionTestStatusLabel.stringValue,
+            recoveryActionTitle:
+                useDiscoveredOpenClawTokenButton.isHidden
+                ? nil
+                : useDiscoveredOpenClawTokenButton.title
         )
     }
 
@@ -468,12 +540,24 @@ final class SettingsWindowController: NSWindowController {
         action: nil
     )
     private let removeAPIKeyButton = NSButton(title: "Remove Key", target: nil, action: nil)
+    private let useDifferentTokenButton = NSButton(
+        title: CredentialFieldPresentation.useDifferentTokenTitle,
+        target: nil,
+        action: nil
+    )
     private let credentialStatusLabel = NSTextField(labelWithString: "")
     private let credentialSharingLabel = NSTextField(
         labelWithString: CredentialFieldPresentation.caption
     )
     private let testOpenClawConnectionButton = NSButton(
         title: "Test Connection",
+        target: nil,
+        action: nil
+    )
+    /// Inline way out of a rejected pasted token: removes it and re-tests, so
+    /// the user never has to know that "Remove Key" is the fix.
+    private let useDiscoveredOpenClawTokenButton = NSButton(
+        title: OpenClawConnectionTestPresentation.useDiscoveredTokenTitle,
         target: nil,
         action: nil
     )
@@ -523,6 +607,10 @@ final class SettingsWindowController: NSWindowController {
     private let isAccessibilityTrusted: () -> Bool
     private let requestAccessibilityAccess: () -> Void
     private let openSystemSettingsURL: (URL) -> Void
+    /// Whether this Mac's OpenClaw pairing already supplies a gateway token.
+    /// Injected so credential UX can be exercised without touching the real
+    /// OpenClaw install.
+    private let hasDiscoveredGatewayToken: () -> Bool
     private var permissionsTimer: Timer?
     private var activationObserver: NSObjectProtocol?
     private var credentialProfileIDsBeingChanged: Set<UUID> =
@@ -580,6 +668,9 @@ final class SettingsWindowController: NSWindowController {
         },
         openSystemSettingsURL: @escaping (URL) -> Void = {
             _ = NSWorkspace.shared.open($0)
+        },
+        hasDiscoveredGatewayToken: @escaping () -> Bool = {
+            OpenClawTokenResolver.discoveredGatewayToken() != nil
         }
     ) {
         let initialProfiles = VoiceProfileStore.sortedByHotKey(
@@ -601,6 +692,7 @@ final class SettingsWindowController: NSWindowController {
         self.requestAccessibilityAccess =
             requestAccessibilityAccess
         self.openSystemSettingsURL = openSystemSettingsURL
+        self.hasDiscoveredGatewayToken = hasDiscoveredGatewayToken
         self.openClawRuntimeService = openClawRuntimeService
         self.openClawConnectionTester =
             openClawConnectionTester
@@ -908,10 +1000,18 @@ final class SettingsWindowController: NSWindowController {
             false
         changeAPIKeyButton.target = self
         changeAPIKeyButton.action = #selector(changeAPIKey)
+        useDifferentTokenButton.bezelStyle = .rounded
+        useDifferentTokenButton.controlSize = .small
+        useDifferentTokenButton
+            .translatesAutoresizingMaskIntoConstraints = false
+        useDifferentTokenButton.target = self
+        useDifferentTokenButton.action = #selector(changeAPIKey)
+        useDifferentTokenButton.isHidden = true
         let apiKeyRow = NSStackView(
             views: [
                 apiCredentialLabel,
                 apiKeyField,
+                useDifferentTokenButton,
                 changeAPIKeyButton,
                 removeAPIKeyButton
             ]
@@ -933,19 +1033,49 @@ final class SettingsWindowController: NSWindowController {
         testOpenClawConnectionButton.target = self
         testOpenClawConnectionButton.action =
             #selector(testOpenClawConnection)
+        useDiscoveredOpenClawTokenButton.bezelStyle = .rounded
+        useDiscoveredOpenClawTokenButton.controlSize = .small
+        useDiscoveredOpenClawTokenButton.target = self
+        useDiscoveredOpenClawTokenButton.action =
+            #selector(useDiscoveredOpenClawToken)
+        useDiscoveredOpenClawTokenButton.isHidden = true
         openClawConnectionTestStatusLabel.font =
             NSFont.systemFont(ofSize: 11)
         openClawConnectionTestStatusLabel.textColor =
             .secondaryLabelColor
         openClawConnectionTestStatusLabel.maximumNumberOfLines = 3
-        let connectionTestRow = makeRow(
+        // The outcome gets its own full-width line: squeezed beside the buttons
+        // it would truncate exactly the sentence that explains the fix.
+        let connectionButtonsSpacer = NSView()
+        let connectionButtonsRow = makeRow(
             label: "Connection",
             views: [
                 testOpenClawConnectionButton,
-                openClawConnectionTestStatusLabel
+                useDiscoveredOpenClawTokenButton,
+                connectionButtonsSpacer
             ],
-            stretching: openClawConnectionTestStatusLabel
+            stretching: connectionButtonsSpacer
         )
+        let connectionStatusRow = indentedRow(
+            openClawConnectionTestStatusLabel
+        )
+        let connectionTestRow = NSStackView(views: [
+            connectionButtonsRow,
+            connectionStatusRow
+        ])
+        connectionTestRow.orientation = .vertical
+        connectionTestRow.alignment = .leading
+        connectionTestRow.spacing = 4
+        connectionTestRow
+            .translatesAutoresizingMaskIntoConstraints = false
+        for row in [connectionButtonsRow, connectionStatusRow] {
+            row.leadingAnchor.constraint(
+                equalTo: connectionTestRow.leadingAnchor
+            ).isActive = true
+            row.trailingAnchor.constraint(
+                equalTo: connectionTestRow.trailingAnchor
+            ).isActive = true
+        }
         openClawConnectionTestRow = connectionTestRow
         addArranged(connectionTestRow)
         endSection(after: connectionTestRow)
@@ -1540,6 +1670,8 @@ final class SettingsWindowController: NSWindowController {
             "Add a voice channel, then record its global shortcut."
         hotKeyStatusLabel.textColor = .secondaryLabelColor
         apiKeyField.stringValue = ""
+        apiKeyField.isHidden = false
+        useDifferentTokenButton.isHidden = true
         changeAPIKeyButton.isHidden = true
         removeAPIKeyButton.isHidden = true
         credentialStatusLabel.stringValue =
@@ -1551,6 +1683,7 @@ final class SettingsWindowController: NSWindowController {
         openClawConnectionTestProfileID = nil
         openClawConnectionTestRow?.isHidden = true
         openClawConnectionTestStatusLabel.stringValue = ""
+        useDiscoveredOpenClawTokenButton.isHidden = true
         instructionsTextView.string = ""
         isAdvancedMCPExpanded = false
         for view in mcpSectionViews + openClawRuntimeSectionViews {
@@ -1689,9 +1822,14 @@ final class SettingsWindowController: NSWindowController {
         let provider = profile.providerID
         let hasAPIKey =
             credentialStore.hasAPIKey(for: profile)
+        // One lookup feeds both the caption and the field layout, so they can
+        // never describe different credential states.
+        let hasDiscoveredToken =
+            provider == .openClaw && hasDiscoveredGatewayToken()
         let credentialState = VoiceProviderCredentialViewState(
             provider: provider,
-            hasAPIKey: hasAPIKey
+            hasAPIKey: hasAPIKey,
+            hasDiscoveredGatewayToken: hasDiscoveredToken
         )
         let presentation = CredentialFieldPresentation(
             provider: provider,
@@ -1699,7 +1837,8 @@ final class SettingsWindowController: NSWindowController {
             isChanging:
                 credentialProfileIDsBeingChanged.contains(
                     profile.id
-                )
+                ),
+            hasDiscoveredGatewayToken: hasDiscoveredToken
         )
         apiKeyField.stringValue = presentation.renderedValue
         apiKeyField.isEnabled = presentation.isEnabled
@@ -1709,6 +1848,10 @@ final class SettingsWindowController: NSWindowController {
             presentation.renderedValue.isEmpty
             ? .controlTextColor
             : .secondaryLabelColor
+        apiKeyField.isHidden =
+            presentation.isFieldVisible == false
+        useDifferentTokenButton.isHidden =
+            presentation.isUseDifferentTokenVisible == false
         changeAPIKeyButton.isHidden =
             presentation.isChangeVisible == false
         removeAPIKeyButton.isEnabled = credentialState.canRemoveAPIKey
@@ -1733,6 +1876,7 @@ final class SettingsWindowController: NSWindowController {
             openClawConnectionTest = nil
             openClawConnectionTestProfileID = nil
             openClawConnectionTestStatusLabel.stringValue = ""
+            useDiscoveredOpenClawTokenButton.isHidden = true
             return
         }
         if openClawConnectionTestProfileID != profile.id {
@@ -1740,6 +1884,7 @@ final class SettingsWindowController: NSWindowController {
             openClawConnectionTest = nil
             openClawConnectionTestProfileID = nil
             openClawConnectionTestStatusLabel.stringValue = ""
+            useDiscoveredOpenClawTokenButton.isHidden = true
             testOpenClawConnectionButton.isEnabled = true
         }
     }
@@ -2338,6 +2483,7 @@ final class SettingsWindowController: NSWindowController {
         openClawConnectionTest?.cancel()
         openClawConnectionTestProfileID = profile.id
         testOpenClawConnectionButton.isEnabled = false
+        useDiscoveredOpenClawTokenButton.isHidden = true
         openClawConnectionTestStatusLabel.stringValue =
             "Testing…"
         openClawConnectionTestStatusLabel.textColor =
@@ -2345,7 +2491,7 @@ final class SettingsWindowController: NSWindowController {
         openClawConnectionTest =
             openClawConnectionTester.testConnection(
                 endpointURL: profile.endpointURL
-            ) { [weak self] outcome in
+            ) { [weak self] result in
                 guard let self,
                       self.selectedProfileID == profile.id else {
                     return
@@ -2353,59 +2499,10 @@ final class SettingsWindowController: NSWindowController {
                 self.openClawConnectionTest = nil
                 self.testOpenClawConnectionButton.isEnabled =
                     true
-                let succeeded: Bool
-                switch outcome {
-                case let .ok(serverVersion, _):
-                    succeeded = true
-                    self.openClawConnectionTestStatusLabel
-                        .stringValue =
-                        "Connected to gateway \(serverVersion)."
-                    self.openClawConnectionTestStatusLabel
-                        .textColor = .systemGreen
-                case let .pairingRequired(
-                    _,
-                    requestID,
-                    remediationHint
-                ):
-                    succeeded = false
-                    let request = requestID.map {
-                        " Approval request: \($0)."
-                    } ?? ""
-                    let hint = remediationHint.map {
-                        " \($0)"
-                    } ?? ""
-                    self.openClawConnectionTestStatusLabel
-                        .stringValue =
-                        "OpenClaw needs approval.\(request)\(hint)"
-                    self.openClawConnectionTestStatusLabel
-                        .textColor = .systemOrange
-                case .gatewayTokenMissing:
-                    succeeded = false
-                    self.showOpenClawConnectionTestFailure(
-                        "Gateway token missing."
-                    )
-                case .gatewayTokenMismatch:
-                    succeeded = false
-                    self.showOpenClawConnectionTestFailure(
-                        "Gateway token wasn’t accepted."
-                    )
-                case .deviceTokenMismatch:
-                    succeeded = false
-                    self.showOpenClawConnectionTestFailure(
-                        "OpenClaw’s saved device approval is no longer valid. Re-pair this Mac in OpenClaw, then try again."
-                    )
-                case let .unreachable(endpoints):
-                    succeeded = false
-                    self.showOpenClawConnectionTestFailure(
-                        "Gateway unreachable (\(endpoints.count) addresses tried)."
-                    )
-                case let .failed(_, message):
-                    succeeded = false
-                    self.showOpenClawConnectionTestFailure(
-                        message
-                    )
-                }
-                if succeeded {
+                let presentation =
+                    OpenClawConnectionTestPresentation(result: result)
+                self.showOpenClawConnectionTestResult(presentation)
+                if presentation.tone == .success {
                     self.saveOpenClawConnectionFact(true)
                 }
                 self.delegate?.settingsController(
@@ -2415,13 +2512,44 @@ final class SettingsWindowController: NSWindowController {
             }
     }
 
-    private func showOpenClawConnectionTestFailure(
-        _ message: String
+    private func showOpenClawConnectionTestResult(
+        _ presentation: OpenClawConnectionTestPresentation
     ) {
         openClawConnectionTestStatusLabel.stringValue =
-            message
-        openClawConnectionTestStatusLabel.textColor =
-            .systemRed
+            presentation.message
+        switch presentation.tone {
+        case .success:
+            openClawConnectionTestStatusLabel.textColor =
+                .systemGreen
+        case .warning:
+            openClawConnectionTestStatusLabel.textColor =
+                .systemOrange
+        case .failure:
+            openClawConnectionTestStatusLabel.textColor =
+                .systemRed
+        }
+        if let title = presentation.recoveryActionTitle {
+            useDiscoveredOpenClawTokenButton.title = title
+            useDiscoveredOpenClawTokenButton.isHidden = false
+        } else {
+            useDiscoveredOpenClawTokenButton.isHidden = true
+        }
+    }
+
+    /// One click out of the reported failure: drop the token the user entered
+    /// (everything auto-saves) and immediately re-test with what discovery finds.
+    @objc private func useDiscoveredOpenClawToken() {
+        guard let index = selectedProfileIndex,
+              workingProfiles[index].providerID == .openClaw else {
+            return
+        }
+        useDiscoveredOpenClawTokenButton.isHidden = true
+        guard commitRemoveAPIKey(
+            for: workingProfiles[index].id
+        ) else {
+            return
+        }
+        testOpenClawConnection()
     }
 
     private func commitAPIKeyField() {
@@ -2453,9 +2581,12 @@ final class SettingsWindowController: NSWindowController {
         }
         let profile = workingProfiles[index]
         let provider = profile.providerID
+        // Only acceptsAPIKeyInput is read here, which never depends on
+        // discovery — passing false keeps this off the filesystem.
         let credentialState = VoiceProviderCredentialViewState(
             provider: provider,
-            hasAPIKey: credentialStore.hasAPIKey(for: profile)
+            hasAPIKey: credentialStore.hasAPIKey(for: profile),
+            hasDiscoveredGatewayToken: false
         )
         let typedAPIKey = value
             .trimmingCharacters(in: .whitespacesAndNewlines)

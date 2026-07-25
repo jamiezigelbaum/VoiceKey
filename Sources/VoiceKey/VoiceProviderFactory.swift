@@ -24,8 +24,8 @@ enum VoiceProviderFactory {
         case .openClaw:
             return OpenClawTalkProvider(
                 configuration: configuration,
-                tokenProvider: {
-                    OpenClawTokenResolver.resolveGatewayToken(
+                tokenResolutionProvider: {
+                    OpenClawTokenResolver.gatewayTokenResolution(
                         apiKeyProvider: { apiKeyStore.apiKey(for: .openClaw) }
                     )
                 }

@@ -166,7 +166,12 @@ final class OpenClawTalkSpeakerModeProviderTests: XCTestCase {
         var socketIndex = 0
         let provider = OpenClawTalkProvider(
             configuration: testConfiguration,
-            tokenProvider: { "test-token" },
+            tokenResolutionProvider: {
+                OpenClawGatewayTokenResolution(
+                    token: "test-token",
+                    source: .enteredToken
+                )
+            },
             audioEngine: engine,
             deviceCredentialsProvider: { nil },
             webSocketFactory: { _ in
@@ -237,7 +242,12 @@ final class OpenClawTalkSpeakerModeProviderTests: XCTestCase {
     ) -> OpenClawTalkProvider {
         let provider = OpenClawTalkProvider(
             configuration: configuration ?? testConfiguration,
-            tokenProvider: { "test-token" },
+            tokenResolutionProvider: {
+                OpenClawGatewayTokenResolution(
+                    token: "test-token",
+                    source: .enteredToken
+                )
+            },
             audioEngine: engine,
             deviceCredentialsProvider: { nil },
             webSocketFactory: { _ in socket },

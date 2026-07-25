@@ -214,11 +214,253 @@ final class OpenClawConnectionTesterTests: XCTestCase {
         XCTAssertTrue(unexpectedThirdSocket.sentFrames.isEmpty)
     }
 
+    // MARK: - Credential source reporting
+
+    func testSuccessReportsEnteredTokenSourceAndNamesItInCopy() {
+        let result = runTest(
+            messages: [
+                connectChallenge(nonce: "nonce-1"),
+                successfulHelloResponse
+            ],
+            resolution: OpenClawGatewayTokenResolution(
+                token: "entered-token",
+                source: .enteredToken
+            ),
+            discoveredToken: "discovered-token"
+        )
+
+        XCTAssertEqual(result?.tokenSource, .enteredToken)
+        XCTAssertTrue(result?.discoveryWouldSupplyDifferentToken == true)
+        let presentation = OpenClawConnectionTestPresentation(
+            result: XCTUnwrapOrFail(result)
+        )
+        XCTAssertEqual(
+            presentation.message,
+            "Connected to OpenClaw (gateway 2026.7.1-2) using the token you entered."
+        )
+        XCTAssertEqual(presentation.tone, .success)
+        XCTAssertNil(presentation.recoveryActionTitle)
+    }
+
+    func testSuccessReportsDiscoveredPairingSourceAndNamesItInCopy() {
+        for source in [
+            OpenClawGatewayTokenSource.secretsDirectory,
+            OpenClawGatewayTokenSource.secretsJSON
+        ] {
+            let result = runTest(
+                messages: [
+                    connectChallenge(nonce: "nonce-1"),
+                    successfulHelloResponse
+                ],
+                resolution: OpenClawGatewayTokenResolution(
+                    token: "discovered-token",
+                    source: source
+                ),
+                discoveredToken: "discovered-token"
+            )
+
+            XCTAssertEqual(result?.tokenSource, source)
+            XCTAssertFalse(
+                result?.discoveryWouldSupplyDifferentToken == true,
+                "Discovery supplied this very token, so it is not an alternative."
+            )
+            XCTAssertEqual(
+                OpenClawConnectionTestPresentation(
+                    result: XCTUnwrapOrFail(result)
+                ).message,
+                "Connected to OpenClaw (gateway 2026.7.1-2) using this Mac's OpenClaw pairing."
+            )
+        }
+    }
+
+    func testRejectedEnteredTokenWithDiscoveryOffersRemovalRecovery() {
+        let result = runTest(
+            messages: [
+                connectChallenge(nonce: "nonce-1"),
+                gatewayTokenMismatchResponse
+            ],
+            resolution: OpenClawGatewayTokenResolution(
+                token: "stale-entered-token",
+                source: .enteredToken
+            ),
+            discoveredToken: "working-discovered-token"
+        )
+
+        XCTAssertEqual(result?.outcome, .gatewayTokenMismatch)
+        let presentation = OpenClawConnectionTestPresentation(
+            result: XCTUnwrapOrFail(result)
+        )
+        XCTAssertEqual(
+            presentation.message,
+            """
+            OpenClaw rejected the token you entered. Remove it and VoiceKey will \
+            use this Mac's OpenClaw pairing instead.
+            """
+        )
+        XCTAssertEqual(presentation.tone, .failure)
+        XCTAssertEqual(
+            presentation.recoveryActionTitle,
+            "Use This Mac's Pairing"
+        )
+    }
+
+    func testRejectedEnteredTokenWithoutDiscoveryOffersNoRecovery() {
+        let result = runTest(
+            messages: [
+                connectChallenge(nonce: "nonce-1"),
+                gatewayTokenMismatchResponse
+            ],
+            resolution: OpenClawGatewayTokenResolution(
+                token: "stale-entered-token",
+                source: .enteredToken
+            ),
+            discoveredToken: nil
+        )
+
+        let presentation = OpenClawConnectionTestPresentation(
+            result: XCTUnwrapOrFail(result)
+        )
+        XCTAssertEqual(
+            presentation.message,
+            """
+            OpenClaw rejected the token you entered. Check it, or remove it and \
+            pair this Mac with OpenClaw.
+            """
+        )
+        XCTAssertNil(presentation.recoveryActionTitle)
+    }
+
+    func testRejectedDiscoveredPairingPointsAtRepairing() {
+        let result = runTest(
+            messages: [
+                connectChallenge(nonce: "nonce-1"),
+                gatewayTokenMismatchResponse
+            ],
+            resolution: OpenClawGatewayTokenResolution(
+                token: "discovered-token",
+                source: .secretsJSON
+            ),
+            discoveredToken: "discovered-token"
+        )
+
+        let presentation = OpenClawConnectionTestPresentation(
+            result: XCTUnwrapOrFail(result)
+        )
+        XCTAssertEqual(
+            presentation.message,
+            """
+            OpenClaw rejected this Mac's pairing. Re-pair this Mac in OpenClaw, \
+            then try again.
+            """
+        )
+        XCTAssertNil(presentation.recoveryActionTitle)
+    }
+
+    func testNoTokenAnywhereReportsNoSourceAndPromptsForOne() {
+        let tester = OpenClawConnectionTester(
+            tokenResolutionProvider: { nil },
+            discoveredTokenProvider: { nil },
+            deviceCredentialsProvider: { nil },
+            webSocketFactory: { _ in
+                XCTFail("A test without a token must not open a socket.")
+                return ConnectionTesterFakeWebSocket(messages: [])
+            },
+            watchdogScheduler: { _, _ in ConnectionTesterWatchdog() }
+        )
+        let completed = expectation(description: "missing token reported")
+        var received: OpenClawConnectionTestResult?
+        tester.testConnection(
+            endpointURL: "ws://127.0.0.1:18790"
+        ) { (result: OpenClawConnectionTestResult) in
+            received = result
+            completed.fulfill()
+        }
+        wait(for: [completed], timeout: 1)
+
+        XCTAssertEqual(received?.outcome, .gatewayTokenMissing)
+        XCTAssertNil(received?.tokenSource)
+        let presentation = OpenClawConnectionTestPresentation(
+            result: XCTUnwrapOrFail(received)
+        )
+        XCTAssertEqual(
+            presentation.message,
+            "No gateway token found — paste one, or pair this Mac with OpenClaw."
+        )
+        XCTAssertNil(presentation.recoveryActionTitle)
+    }
+
+    func testTestOutcomeCopyNeverContainsATokenValue() {
+        let entered = "ENTERED-TOKEN-VALUE"
+        let discovered = "DISCOVERED-TOKEN-VALUE"
+        for messages in [
+            [connectChallenge(nonce: "n"), successfulHelloResponse],
+            [connectChallenge(nonce: "n"), gatewayTokenMismatchResponse],
+            [connectChallenge(nonce: "n"), gatewayTokenMissingResponse]
+        ] {
+            let result = runTest(
+                messages: messages,
+                resolution: OpenClawGatewayTokenResolution(
+                    token: entered,
+                    source: .enteredToken
+                ),
+                discoveredToken: discovered
+            )
+            let presentation = OpenClawConnectionTestPresentation(
+                result: XCTUnwrapOrFail(result)
+            )
+            XCTAssertFalse(presentation.message.contains(entered))
+            XCTAssertFalse(presentation.message.contains(discovered))
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func runTest(
+        messages: [String],
+        resolution: OpenClawGatewayTokenResolution,
+        discoveredToken: String?
+    ) -> OpenClawConnectionTestResult? {
+        let factory = ConnectionTesterWebSocketFactory(
+            sockets: [ConnectionTesterFakeWebSocket(messages: messages)]
+        )
+        let tester = makeTester(
+            factory: factory,
+            resolution: resolution,
+            discoveredToken: discoveredToken
+        )
+        let completed = expectation(description: "test finished")
+        var received: OpenClawConnectionTestResult?
+        tester.testConnection(
+            endpointURL: "ws://127.0.0.1:18790"
+        ) { (result: OpenClawConnectionTestResult) in
+            received = result
+            completed.fulfill()
+        }
+        wait(for: [completed], timeout: 1)
+        return received
+    }
+
+    private func XCTUnwrapOrFail(
+        _ result: OpenClawConnectionTestResult?
+    ) -> OpenClawConnectionTestResult {
+        guard let result else {
+            XCTFail("Expected a connection test result.")
+            return OpenClawConnectionTestResult(outcome: .gatewayTokenMissing)
+        }
+        return result
+    }
+
     private func makeTester(
-        factory: ConnectionTesterWebSocketFactory
+        factory: ConnectionTesterWebSocketFactory,
+        resolution: OpenClawGatewayTokenResolution = OpenClawGatewayTokenResolution(
+            token: "gateway-token",
+            source: .enteredToken
+        ),
+        discoveredToken: String? = nil
     ) -> OpenClawConnectionTester {
         OpenClawConnectionTester(
-            tokenProvider: { "gateway-token" },
+            tokenResolutionProvider: { resolution },
+            discoveredTokenProvider: { discoveredToken },
             deviceCredentialsProvider: {
                 OpenClawDeviceCredentials(
                     deviceID: "device-1",
@@ -246,6 +488,18 @@ private let deviceTokenMismatchResponse = """
     {"type":"res","id":"1","ok":false,"error":{"code":"INVALID_REQUEST",\
     "message":"unauthorized: device token mismatch",\
     "details":{"code":"AUTH_DEVICE_TOKEN_MISMATCH"}}}
+    """
+
+private let gatewayTokenMismatchResponse = """
+    {"type":"res","id":"1","ok":false,"error":{"code":"INVALID_REQUEST",\
+    "message":"unauthorized: gateway token mismatch (provide gateway auth token)",\
+    "details":{"code":"AUTH_TOKEN_MISMATCH","authReason":"token_mismatch"}}}
+    """
+
+private let gatewayTokenMissingResponse = """
+    {"type":"res","id":"1","ok":false,"error":{"code":"INVALID_REQUEST",\
+    "message":"unauthorized: gateway token missing (provide gateway auth token)",\
+    "details":{"code":"AUTH_TOKEN_MISSING","authReason":"token_missing"}}}
     """
 
 private let successfulHelloResponse = """

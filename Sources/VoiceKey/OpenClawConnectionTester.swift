@@ -67,6 +67,88 @@ enum OpenClawConnectionOutcomeMapper {
     }
 }
 
+/// A connection test plus the credential facts needed to explain it: a test that
+/// cannot name the token it used told the owner "everything is fine" while the
+/// hotkey failed with a different token (2026-07-25).
+struct OpenClawConnectionTestResult: Equatable {
+    var outcome: OpenClawConnectionOutcome
+    /// Source of the token this attempt actually used; nil when none was found.
+    var tokenSource: OpenClawGatewayTokenSource?
+    /// True when auto-discovery would supply a token different from the one used.
+    var discoveryWouldSupplyDifferentToken: Bool
+
+    init(
+        outcome: OpenClawConnectionOutcome,
+        tokenSource: OpenClawGatewayTokenSource? = nil,
+        discoveryWouldSupplyDifferentToken: Bool = false
+    ) {
+        self.outcome = outcome
+        self.tokenSource = tokenSource
+        self.discoveryWouldSupplyDifferentToken = discoveryWouldSupplyDifferentToken
+    }
+}
+
+/// How a connection test reads in Settings. The copy names the credential source
+/// but never a token value, and a rejected entered token carries its own way out.
+struct OpenClawConnectionTestPresentation: Equatable {
+    enum Tone: Equatable {
+        case success
+        case warning
+        case failure
+    }
+
+    var message: String
+    var tone: Tone
+    /// Title of the inline recovery button, or nil when there is nothing to offer.
+    var recoveryActionTitle: String?
+
+    static let useDiscoveredTokenTitle = "Use This Mac's Pairing"
+
+    init(result: OpenClawConnectionTestResult) {
+        switch result.outcome {
+        case let .ok(serverVersion, _):
+            message = OpenClawCredentialCopy.connected(
+                serverVersion: serverVersion,
+                source: result.tokenSource
+            )
+            tone = .success
+            recoveryActionTitle = nil
+        case let .pairingRequired(_, requestID, remediationHint):
+            let request = requestID.map { " Approval request: \($0)." } ?? ""
+            let hint = remediationHint.map { " \($0)" } ?? ""
+            message = "OpenClaw needs approval.\(request)\(hint)"
+            tone = .warning
+            recoveryActionTitle = nil
+        case .gatewayTokenMissing, .gatewayTokenMismatch:
+            let rejection = OpenClawCredentialCopy.rejected(
+                source: result.tokenSource,
+                discoveryWouldSupplyDifferentToken:
+                    result.discoveryWouldSupplyDifferentToken
+            )
+            message = rejection.message
+            tone = .failure
+            recoveryActionTitle = rejection.offersEnteredTokenRemoval
+                ? Self.useDiscoveredTokenTitle
+                : nil
+        case .deviceTokenMismatch:
+            message = """
+                OpenClaw’s saved device approval is no longer valid. Re-pair this \
+                Mac in OpenClaw, then try again.
+                """
+            tone = .failure
+            recoveryActionTitle = nil
+        case let .unreachable(endpoints):
+            message = "Gateway unreachable (\(endpoints.count) addresses tried)."
+            tone = .failure
+            recoveryActionTitle = nil
+        case let .failed(_, message):
+            self.message = message
+            tone = .failure
+            recoveryActionTitle = nil
+        }
+    }
+}
+
 protocol OpenClawConnectionTestCancellation: AnyObject {
     func cancel()
 }
@@ -77,22 +159,46 @@ protocol OpenClawConnectionTesting: AnyObject {
         endpointURL: String,
         completion: @escaping (OpenClawConnectionOutcome) -> Void
     ) -> OpenClawConnectionTestCancellation
+
+    /// Reports the credential source alongside the outcome, so a caller can say
+    /// which token was tested and offer a way out when the entered one fails.
+    @discardableResult
+    func testConnection(
+        endpointURL: String,
+        detailedCompletion: @escaping (OpenClawConnectionTestResult) -> Void
+    ) -> OpenClawConnectionTestCancellation
+}
+
+extension OpenClawConnectionTesting {
+    @discardableResult
+    func testConnection(
+        endpointURL: String,
+        detailedCompletion: @escaping (OpenClawConnectionTestResult) -> Void
+    ) -> OpenClawConnectionTestCancellation {
+        testConnection(endpointURL: endpointURL) { outcome in
+            detailedCompletion(OpenClawConnectionTestResult(outcome: outcome))
+        }
+    }
 }
 
 final class OpenClawConnectionTester: OpenClawConnectionTesting {
     private let lock = NSLock()
     private var runs: [UUID: OpenClawConnectionTestRun] = [:]
-    private let tokenProvider: () -> String?
+    private let tokenResolutionProvider: () -> OpenClawGatewayTokenResolution?
+    private let discoveredTokenProvider: () -> String?
     private let deviceCredentialsProvider: () -> OpenClawDeviceCredentials?
     private let webSocketFactory: OpenClawTalkWebSocketFactory
     private let watchdogScheduler: OpenClawTalkWatchdogScheduler
     private let now: () -> Date
 
     init(
-        tokenProvider: @escaping () -> String? = {
-            OpenClawTokenResolver.resolveGatewayToken(
+        tokenResolutionProvider: @escaping () -> OpenClawGatewayTokenResolution? = {
+            OpenClawTokenResolver.gatewayTokenResolution(
                 apiKeyProvider: { APIKeyStore.shared.apiKey(for: .openClaw) }
             )
+        },
+        discoveredTokenProvider: @escaping () -> String? = {
+            OpenClawTokenResolver.discoveredGatewayToken()
         },
         deviceCredentialsProvider: @escaping () -> OpenClawDeviceCredentials? = {
             OpenClawDeviceIdentityStore.loadCredentials()
@@ -110,7 +216,8 @@ final class OpenClawConnectionTester: OpenClawConnectionTesting {
         },
         now: @escaping () -> Date = Date.init
     ) {
-        self.tokenProvider = tokenProvider
+        self.tokenResolutionProvider = tokenResolutionProvider
+        self.discoveredTokenProvider = discoveredTokenProvider
         self.deviceCredentialsProvider = deviceCredentialsProvider
         self.webSocketFactory = webSocketFactory
         self.watchdogScheduler = watchdogScheduler
@@ -122,20 +229,33 @@ final class OpenClawConnectionTester: OpenClawConnectionTesting {
         endpointURL: String,
         completion: @escaping (OpenClawConnectionOutcome) -> Void
     ) -> OpenClawConnectionTestCancellation {
-        guard let token = tokenProvider()?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            token.isEmpty == false else {
+        testConnection(endpointURL: endpointURL) { result in
+            completion(result.outcome)
+        }
+    }
+
+    @discardableResult
+    func testConnection(
+        endpointURL: String,
+        detailedCompletion: @escaping (OpenClawConnectionTestResult) -> Void
+    ) -> OpenClawConnectionTestCancellation {
+        guard let resolution = trimmedResolution() else {
             let cancellation = OpenClawCompletedConnectionTest()
             DispatchQueue.main.async {
-                completion(.gatewayTokenMissing)
+                detailedCompletion(
+                    OpenClawConnectionTestResult(outcome: .gatewayTokenMissing)
+                )
             }
             return cancellation
         }
 
+        // Presence and difference only — the compared values never leave memory.
+        let discovered = discoveredTokenProvider()
+        let discoveryDiffers = discovered != nil && discovered != resolution.token
         let id = UUID()
         let run = OpenClawConnectionTestRun(
             endpoints: OpenClawTalkRequestBuilder.endpointCandidates(endpointURL: endpointURL),
-            token: token,
+            token: resolution.token,
             deviceCredentials: deviceCredentialsProvider(),
             webSocketFactory: webSocketFactory,
             watchdogScheduler: watchdogScheduler,
@@ -145,7 +265,11 @@ final class OpenClawConnectionTester: OpenClawConnectionTesting {
                 self?.runs[id] = nil
             }
             DispatchQueue.main.async {
-                completion(outcome)
+                detailedCompletion(OpenClawConnectionTestResult(
+                    outcome: outcome,
+                    tokenSource: resolution.source,
+                    discoveryWouldSupplyDifferentToken: discoveryDiffers
+                ))
             }
         }
         lock.withLock {
@@ -153,6 +277,13 @@ final class OpenClawConnectionTester: OpenClawConnectionTesting {
         }
         run.start()
         return run
+    }
+
+    private func trimmedResolution() -> OpenClawGatewayTokenResolution? {
+        guard var resolution = tokenResolutionProvider() else { return nil }
+        resolution.token = resolution.token
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return resolution.token.isEmpty ? nil : resolution
     }
 }
 

@@ -67,7 +67,7 @@ final class OpenClawTalkSessionStopTests: XCTestCase {
         let audioEngine = FakeRealtimeAudioEngine()
         let provider = OpenClawTalkProvider(
             configuration: testConfiguration,
-            tokenProvider: { nil },
+            tokenResolutionProvider: { nil },
             audioEngine: audioEngine,
             deviceCredentialsProvider: { nil }
         )
@@ -97,7 +97,12 @@ final class OpenClawTalkSessionStopTests: XCTestCase {
     private func makeProvider(audioEngine: FakeRealtimeAudioEngine) -> OpenClawTalkProvider {
         OpenClawTalkProvider(
             configuration: testConfiguration,
-            tokenProvider: { "test-gateway-token" },
+            tokenResolutionProvider: {
+            OpenClawGatewayTokenResolution(
+                token: "test-gateway-token",
+                source: .enteredToken
+            )
+        },
             audioEngine: audioEngine,
             deviceCredentialsProvider: { nil }
         )

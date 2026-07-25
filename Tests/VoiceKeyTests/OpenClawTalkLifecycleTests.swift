@@ -145,6 +145,211 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
         wait(for: [surfaced], timeout: 1)
     }
 
+    // MARK: - Rejected gateway token (live incident 2026-07-25)
+
+    /// The owner's Mac: a stale token pasted in Settings outranked a working
+    /// OpenClaw pairing, and the session failed with the gateway's own
+    /// "unauthorized: gateway token mismatch (provide gateway auth token)".
+    func testStaleEnteredTokenFailureNamesTheSourceAndTheWayOut() {
+        let entered = "STALE-ENTERED-TOKEN-VALUE"
+        let discovered = "WORKING-DISCOVERED-TOKEN-VALUE"
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            sockets: [ScriptedOpenClawWebSocket(messages: [
+                connectChallengeFrame(nonce: "nonce-1"),
+                gatewayTokenMismatchFrame
+            ])],
+            watchdogs: ManualWatchdogScheduler(),
+            tokenResolution: OpenClawGatewayTokenResolution(
+                token: entered,
+                source: .enteredToken
+            ),
+            discoveredToken: discovered
+        )
+
+        let surfaced = expectation(description: "actionable failure surfaced")
+        var events: [VoiceProviderEvent] = []
+        provider.onEvent = { event in
+            events.append(event)
+            guard case let .status(.needsAttention(message)) = event else { return }
+            XCTAssertEqual(
+                message,
+                """
+                OpenClaw rejected the token you entered. Remove it and VoiceKey will \
+                use this Mac's OpenClaw pairing instead.
+                """
+            )
+            surfaced.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [surfaced], timeout: 1)
+
+        assertNoTokenValues(
+            in: events,
+            values: [entered, discovered]
+        )
+    }
+
+    func testRejectedDiscoveredTokenPointsAtRepairingThisMac() {
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            sockets: [ScriptedOpenClawWebSocket(messages: [
+                connectChallengeFrame(nonce: "nonce-1"),
+                gatewayTokenMismatchFrame
+            ])],
+            watchdogs: ManualWatchdogScheduler(),
+            tokenResolution: OpenClawGatewayTokenResolution(
+                token: "discovered-token",
+                source: .secretsDirectory
+            ),
+            discoveredToken: "discovered-token"
+        )
+
+        let surfaced = expectation(description: "pairing failure surfaced")
+        provider.onEvent = { event in
+            guard case let .status(.needsAttention(message)) = event else { return }
+            XCTAssertEqual(
+                message,
+                """
+                OpenClaw rejected this Mac's pairing. Re-pair this Mac in OpenClaw, \
+                then try again.
+                """
+            )
+            surfaced.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [surfaced], timeout: 1)
+    }
+
+    /// The full live sequence: the device token is rejected first, VoiceKey
+    /// retries with signed identity, and only then does the gateway reject the
+    /// token itself — the user must still learn which credential failed.
+    func testDeviceMismatchThenTokenMismatchStillNamesTheEnteredToken() {
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            socketFactory: ScriptedOpenClawWebSocketFactory(sockets: [
+                ScriptedOpenClawWebSocket(messages: [
+                    connectChallengeFrame(nonce: "nonce-1"),
+                    """
+                    {"type":"res","id":"1","ok":false,"error":{"code":"INVALID_REQUEST",\
+                    "message":"unauthorized: device token mismatch",\
+                    "details":{"code":"AUTH_DEVICE_TOKEN_MISMATCH"}}}
+                    """
+                ]),
+                ScriptedOpenClawWebSocket(messages: [
+                    connectChallengeFrame(nonce: "nonce-2"),
+                    gatewayTokenMismatchFrame
+                ])
+            ]),
+            watchdogs: ManualWatchdogScheduler(),
+            deviceCredentials: deviceCredentials,
+            tokenResolution: OpenClawGatewayTokenResolution(
+                token: "stale-entered-token",
+                source: .enteredToken
+            ),
+            discoveredToken: "working-discovered-token"
+        )
+
+        let surfaced = expectation(description: "actionable failure surfaced")
+        provider.onEvent = { event in
+            guard case let .status(.needsAttention(message)) = event else { return }
+            XCTAssertTrue(
+                message.hasPrefix("OpenClaw rejected the token you entered."),
+                "Got: \(message)"
+            )
+            XCTAssertFalse(message.contains("unauthorized"))
+            surfaced.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [surfaced], timeout: 1)
+    }
+
+    // MARK: - Relay-upstream provider errors (live report 2026-07-25)
+
+    /// The gateway's OWN OpenAI key was rejected by OpenAI and relayed verbatim.
+    /// Shown as-is it reads as the user's VoiceKey key being wrong.
+    func testUpstreamProviderKeyErrorIsRewrittenAndRedacted() {
+        let upstream = """
+            Incorrect API key provided: sk-proj-****...JsMA. You can find your \
+            API key at https://platform.openai.com/account/api-keys.
+            """
+        let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages() + [
+            """
+            {"type":"event","event":"talk.event","payload":{"relaySessionId":"relay-1",\
+            "type":"error","message":"\(upstream)"}}
+            """
+        ])
+        let provider = makeProvider(
+            audioEngine: LifecycleAudioEngine(),
+            sockets: [socket],
+            watchdogs: ManualWatchdogScheduler()
+        )
+
+        let surfaced = expectation(description: "upstream error rewritten")
+        var events: [VoiceProviderEvent] = []
+        provider.onEvent = { event in
+            events.append(event)
+            guard case let .status(.needsAttention(message)) = event else { return }
+            XCTAssertEqual(
+                message,
+                """
+                OpenClaw's own AI provider key was rejected. Fix it in OpenClaw on \
+                the Mac running the gateway — there is nothing to change in VoiceKey.
+                """
+            )
+            surfaced.fulfill()
+        }
+        provider.toggleVoice()
+        wait(for: [surfaced], timeout: 1)
+
+        let diagnostics = events.compactMap { event -> String? in
+            guard case let .diagnostic(text) = event else { return nil }
+            return text
+        }
+        XCTAssertTrue(
+            diagnostics.contains {
+                $0.hasPrefix("OpenClaw gateway reported an upstream provider error:")
+                    && $0.contains("Incorrect API key provided")
+                    && $0.contains("platform.openai.com")
+            },
+            "The underlying detail must stay available in the log. Got: \(diagnostics)"
+        )
+        assertNoTokenValues(
+            in: events,
+            values: ["sk-proj-****...JsMA", "sk-proj", "JsMA"]
+        )
+    }
+
+    private func assertNoTokenValues(
+        in events: [VoiceProviderEvent],
+        values: [String],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        var log = VoiceSessionLog()
+        var texts: [String] = []
+        for event in events {
+            log.append(event, provider: .openClaw)
+            switch event {
+            case let .status(status):
+                texts.append(String(describing: status))
+            case let .transcript(text), let .diagnostic(text):
+                texts.append(text)
+            }
+        }
+        texts.append(log.displayText)
+        for value in values {
+            for text in texts {
+                XCTAssertFalse(
+                    text.contains(value),
+                    "Credential value leaked into \"\(text)\".",
+                    file: file,
+                    line: line
+                )
+            }
+        }
+    }
+
     func testFatalAudioFailureStopsSessionAndSurfacesNeedsAttention() {
         let socket = ScriptedOpenClawWebSocket(messages: liveSessionMessages())
         let audioEngine = LifecycleAudioEngine()
@@ -1121,13 +1326,17 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
         audioEngine: LifecycleAudioEngine,
         sockets: [ScriptedOpenClawWebSocket],
         watchdogs: ManualWatchdogScheduler,
-        deviceCredentials: OpenClawDeviceCredentials? = nil
+        deviceCredentials: OpenClawDeviceCredentials? = nil,
+        tokenResolution: OpenClawGatewayTokenResolution = defaultTokenResolution,
+        discoveredToken: String? = nil
     ) -> OpenClawTalkProvider {
         makeProvider(
             audioEngine: audioEngine,
             socketFactory: ScriptedOpenClawWebSocketFactory(sockets: sockets),
             watchdogs: watchdogs,
-            deviceCredentials: deviceCredentials
+            deviceCredentials: deviceCredentials,
+            tokenResolution: tokenResolution,
+            discoveredToken: discoveredToken
         )
     }
 
@@ -1135,7 +1344,9 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
         audioEngine: LifecycleAudioEngine,
         socketFactory: ScriptedOpenClawWebSocketFactory,
         watchdogs: ManualWatchdogScheduler,
-        deviceCredentials: OpenClawDeviceCredentials? = nil
+        deviceCredentials: OpenClawDeviceCredentials? = nil,
+        tokenResolution: OpenClawGatewayTokenResolution = defaultTokenResolution,
+        discoveredToken: String? = nil
     ) -> OpenClawTalkProvider {
         OpenClawTalkProvider(
             configuration: VoiceSessionConfiguration(
@@ -1145,14 +1356,34 @@ final class OpenClawTalkLifecycleTests: XCTestCase {
                 instructions: "",
                 endpointURL: ""
             ),
-            tokenProvider: { "gateway-token" },
+            tokenResolutionProvider: { tokenResolution },
             audioEngine: audioEngine,
+            discoveredTokenProvider: { discoveredToken },
             deviceCredentialsProvider: { deviceCredentials },
             webSocketFactory: { socketFactory.makeSocket(request: $0) },
             watchdogScheduler: { delay, action in
                 watchdogs.schedule(after: delay, action: action)
             }
         )
+    }
+
+    private static let defaultTokenResolution = OpenClawGatewayTokenResolution(
+        token: "gateway-token",
+        source: .enteredToken
+    )
+
+    private func connectChallengeFrame(nonce: String) -> String {
+        """
+        {"type":"event","event":"connect.challenge","payload":{"nonce":"\(nonce)","ts":1}}
+        """
+    }
+
+    private var gatewayTokenMismatchFrame: String {
+        """
+        {"type":"res","id":"1","ok":false,"error":{"code":"INVALID_REQUEST",\
+        "message":"unauthorized: gateway token mismatch (provide gateway auth token)",\
+        "details":{"code":"AUTH_TOKEN_MISMATCH","authReason":"token_mismatch"}}}
+        """
     }
 
     private var deviceCredentials: OpenClawDeviceCredentials {
