@@ -228,6 +228,10 @@ final class OnboardingWizardController: NSWindowController {
     private let userDefaults: UserDefaults
     private let openClawTester: OpenClawConnectionTesting
     private let retryScheduler: OnboardingRetryScheduler
+    /// Writes the walkthrough to the on-disk session log. A remote first-run
+    /// test cannot be watched on screen, so these lines are the only record of
+    /// what the owner did and where the wizard stopped.
+    private let diagnostics: OnboardingDiagnosticsLogging?
     private let applicationLocationProvider:
         () -> ApplicationLocationState
     private let microphoneAuthorizationProvider:
@@ -271,6 +275,9 @@ final class OnboardingWizardController: NSWindowController {
     private var hotKeyStatusLabel: NSTextField?
     private var microphoneHelpIsExpanded = false
     private var relocationStatusMessage: String?
+    private var loggedMicrophoneAuthorization:
+        MicrophoneAuthorizationState?
+    private var loggedEnsuredServices: Set<OnboardingService>?
     private var activationPolicySwitch =
         OnboardingActivationPolicySwitch()
     private var terminationObserver: NSObjectProtocol?
@@ -279,7 +286,8 @@ final class OnboardingWizardController: NSWindowController {
         tokenProvider: { [weak self] in
             self?.resolvedOpenClawToken()
         },
-        retryScheduler: retryScheduler
+        retryScheduler: retryScheduler,
+        diagnostics: diagnostics
     )
 
     init(
@@ -296,6 +304,7 @@ final class OnboardingWizardController: NSWindowController {
             )
             return workItem
         },
+        diagnostics: OnboardingDiagnosticsLogging? = nil,
         applicationLocationProvider: @escaping (
         ) -> ApplicationLocationState = {
             ApplicationLocationState.detect(
@@ -338,6 +347,7 @@ final class OnboardingWizardController: NSWindowController {
         self.userDefaults = userDefaults
         self.openClawTester = openClawTester
         self.retryScheduler = retryScheduler
+        self.diagnostics = diagnostics
         selectedServices =
             OnboardingServicePreferences.selectedServices(
                 defaults: userDefaults
@@ -456,8 +466,16 @@ final class OnboardingWizardController: NSWindowController {
         beginWizardSession()
         handledSteps.removeAll()
         handledHotKeyProfileIDs.removeAll()
+        let groundTruth = groundTruthSnapshot
         currentStep = OnboardingFlowPolicy.initialStep(
-            groundTruth: groundTruthSnapshot
+            groundTruth: groundTruth
+        )
+        logWizardOpened(
+            .fresh,
+            reason: currentStep == .location
+                ? .appNotInApplications
+                : .firstRun,
+            groundTruth: groundTruth
         )
         showAndRender()
     }
@@ -466,10 +484,71 @@ final class OnboardingWizardController: NSWindowController {
         beginWizardSession()
         handledSteps.removeAll()
         handledHotKeyProfileIDs.removeAll()
-        currentStep = OnboardingFlowPolicy.reentryStep(
-            groundTruth: groundTruthSnapshot
+        let groundTruth = groundTruthSnapshot
+        let resolved = OnboardingFlowPolicy
+            .firstIncompleteStepWithReason(
+                groundTruth: groundTruth
+            )
+        currentStep = resolved.step
+        logWizardOpened(
+            .reentrant,
+            reason: resolved.reason,
+            groundTruth: groundTruth
         )
         showAndRender()
+    }
+
+    private func logWizardOpened(
+        _ opening: OnboardingLogEvent.Opening,
+        reason: OnboardingStepReason,
+        groundTruth: OnboardingGroundTruth
+    ) {
+        diagnostics?.record(
+            .wizardOpened(
+                opening,
+                step: currentStep,
+                reason: reason
+            )
+        )
+        logStepEntry(currentStep, groundTruth: groundTruth)
+    }
+
+    /// Records what a step reveals the moment it is reached — today only the
+    /// relocation gate, which is a live fact rather than something the owner
+    /// did.
+    private func logStepEntry(
+        _ step: OnboardingStep,
+        groundTruth: OnboardingGroundTruth
+    ) {
+        guard step == .location else { return }
+        diagnostics?.record(
+            .relocation(.gate(groundTruth.applicationLocation))
+        )
+    }
+
+    /// The single seam every step change goes through, so no transition can
+    /// reach the screen without reaching the log.
+    private func transition(
+        to step: OnboardingStep,
+        trigger: OnboardingLogEvent.StepTrigger,
+        groundTruth: OnboardingGroundTruth? = nil
+    ) {
+        let from = currentStep
+        currentStep = step
+        guard from != step else { return }
+        let facts = groundTruth ?? groundTruthSnapshot
+        diagnostics?.record(
+            .stepTransition(
+                from: from,
+                to: step,
+                trigger: trigger,
+                reason: OnboardingFlowPolicy.reason(
+                    for: step,
+                    groundTruth: facts
+                )
+            )
+        )
+        logStepEntry(step, groundTruth: facts)
     }
 
     private func showAndRender() {
@@ -503,6 +582,10 @@ final class OnboardingWizardController: NSWindowController {
 
     private func beginWizardSession() {
         confirmedServicesThisSession.removeAll()
+        // Each opening re-states the facts it observes, so one window's log is
+        // readable without the previous one.
+        loggedEnsuredServices = nil
+        loggedMicrophoneAuthorization = nil
         let profiles = profileProvider()
         guard let persisted =
             OnboardingServicePreferences.selectedServices(
@@ -1116,13 +1199,19 @@ final class OnboardingWizardController: NSWindowController {
 
     private func renderMicrophone() {
         let status = microphoneAuthorizationProvider()
+        noteMicrophoneAuthorization(status)
         switch status {
         case .authorized:
             handledSteps.insert(.microphone)
-            currentStep = OnboardingFlowPolicy.nextStep(
-                after: .microphone,
-                groundTruth: groundTruthSnapshot,
-                handledSteps: handledSteps
+            let groundTruth = groundTruthSnapshot
+            transition(
+                to: OnboardingFlowPolicy.nextStep(
+                    after: .microphone,
+                    groundTruth: groundTruth,
+                    handledSteps: handledSteps
+                ),
+                trigger: .groundTruth,
+                groundTruth: groundTruth
             )
             render()
             return
@@ -1196,7 +1285,7 @@ final class OnboardingWizardController: NSWindowController {
     private func renderHotKey() {
         guard let profile = nextHotKeyProfile() else {
             handledSteps.insert(.hotKey)
-            currentStep = .done
+            transition(to: .done, trigger: .groundTruth)
             render()
             return
         }
@@ -1504,14 +1593,24 @@ final class OnboardingWizardController: NSWindowController {
             defaults: userDefaults
         )
         confirmedServicesThisSession = services
+        diagnostics?.record(
+            .servicesConfirmed(Array(services))
+        )
         ensureSelectedChannels()
     }
 
     @objc private func advance() {
+        advanceStep(trigger: .advance)
+    }
+
+    private func advanceStep(
+        trigger: OnboardingLogEvent.StepTrigger
+    ) {
         handledSteps.insert(currentStep)
+        var groundTruth = groundTruthSnapshot
         var nextStep = OnboardingFlowPolicy.nextStep(
             after: currentStep,
-            groundTruth: groundTruthSnapshot,
+            groundTruth: groundTruth,
             handledSteps: handledSteps
         )
         if [.services, .apiKey, .openClawConnect].contains(
@@ -1521,13 +1620,18 @@ final class OnboardingWizardController: NSWindowController {
                nextStep
            ) == false {
             ensureSelectedChannels()
+            groundTruth = groundTruthSnapshot
             nextStep = OnboardingFlowPolicy.nextStep(
                 after: currentStep,
-                groundTruth: groundTruthSnapshot,
+                groundTruth: groundTruth,
                 handledSteps: handledSteps
             )
         }
-        currentStep = nextStep
+        transition(
+            to: nextStep,
+            trigger: trigger,
+            groundTruth: groundTruth
+        )
         delegate?.onboardingControllerGroundTruthDidChange(
             self
         )
@@ -1537,14 +1641,22 @@ final class OnboardingWizardController: NSWindowController {
     @objc private func skipCurrentStep() {
         if currentStep == .hotKey {
             guard let profile = nextHotKeyProfile() else {
-                currentStep = .done
+                transition(to: .done, trigger: .skipped)
                 render()
                 return
             }
             handledHotKeyProfileIDs.insert(profile.id)
+            // The hot-key step walks one channel at a time, so skipping the
+            // first of two leaves the wizard where it is.
+            diagnostics?.record(
+                .stepSkippedInPlace(
+                    step: .hotKey,
+                    detail: "channel=\(profile.name)"
+                )
+            )
             if nextHotKeyProfile() == nil {
                 handledSteps.insert(.hotKey)
-                currentStep = .done
+                transition(to: .done, trigger: .skipped)
             }
             render()
             return
@@ -1555,7 +1667,7 @@ final class OnboardingWizardController: NSWindowController {
         ) else {
             return
         }
-        advance()
+        advanceStep(trigger: .skipped)
     }
 
     @objc private func continueOutsideApplications() {
@@ -1564,7 +1676,10 @@ final class OnboardingWizardController: NSWindowController {
             return
         }
         handledSteps.insert(.location)
-        currentStep = .welcome
+        diagnostics?.record(
+            .relocation(.continuedOutsideApplications)
+        )
+        transition(to: .welcome, trigger: .relocation)
         render()
     }
 
@@ -1572,12 +1687,25 @@ final class OnboardingWizardController: NSWindowController {
         guard isMovingApplication == false else { return }
         isMovingApplication = true
         relocationStatusMessage = nil
+        diagnostics?.record(.relocation(.moveStarted))
         render()
         moveApplication { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.isMovingApplication = false
-                if case let .failure(error) = result {
+                switch result {
+                case .success:
+                    self.diagnostics?.record(
+                        .relocation(.moveSucceeded)
+                    )
+                case let .failure(error):
+                    self.diagnostics?.record(
+                        .relocation(
+                            .moveFailed(
+                                error.localizedDescription
+                            )
+                        )
+                    )
                     self.relocationStatusMessage =
                         "Couldn’t move VoiceKey: \(error.localizedDescription)"
                     self.render()
@@ -1600,6 +1728,12 @@ final class OnboardingWizardController: NSWindowController {
             in: .whitespacesAndNewlines
         )
         enteredOpenClawToken = token
+        // Presence only: the token itself never reaches the log.
+        diagnostics?.record(
+            .openClawTokenEntered(
+                present: token.isEmpty == false
+            )
+        )
         guard token.isEmpty == false else {
             openClawState = .needsToken(
                 message: "Paste a gateway token to continue."
@@ -1622,6 +1756,12 @@ final class OnboardingWizardController: NSWindowController {
             )
             openClawWizard.retry(endpointURL: openClawEndpoint)
         } catch {
+            diagnostics?.record(
+                .credentialSaveFailed(
+                    channel: profile.name,
+                    message: error.localizedDescription
+                )
+            )
             openClawState = .failed(
                 message: "Couldn’t save the gateway token: \(error.localizedDescription)"
             )
@@ -1685,6 +1825,12 @@ final class OnboardingWizardController: NSWindowController {
             [weak self] result in
             guard let self else { return }
             self.verificationState.finish(result)
+            // Category only — never the key, and never the server's reply.
+            self.diagnostics?.record(
+                .apiKeyVerification(
+                    Self.verificationCategory(for: result)
+                )
+            )
             if case .success = result {
                 do {
                     try self.credentialStore.setAPIKey(
@@ -1702,6 +1848,12 @@ final class OnboardingWizardController: NSWindowController {
                             self
                         )
                 } catch {
+                    self.diagnostics?.record(
+                        .credentialSaveFailed(
+                            channel: profile.name,
+                            message: error.localizedDescription
+                        )
+                    )
                     self.verificationState = .failed(
                         "Couldn’t save the API key: \(error.localizedDescription)"
                     )
@@ -1711,21 +1863,42 @@ final class OnboardingWizardController: NSWindowController {
         }
     }
 
+    static func verificationCategory(
+        for result: Result<Void, APIKeyVerificationError>
+    ) -> OnboardingLogEvent.APIKeyOutcome {
+        switch result {
+        case .success:
+            return .verified
+        case .failure(.rejected):
+            return .rejected
+        case let .failure(.serverStatus(status)):
+            return .serverStatus(status)
+        case .failure(.network):
+            return .networkFailure
+        }
+    }
+
     @objc private func requestMicrophoneAccess() {
         let engine = audioEngine ?? audioEngineFactory()
         audioEngine = engine
         engine.requestMicrophoneAccess { [weak self] granted in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.noteMicrophoneAuthorization(
+                    self.microphoneAuthorizationProvider()
+                )
                 if granted {
                     self.handledSteps.insert(.microphone)
-                    self.currentStep =
-                        OnboardingFlowPolicy.nextStep(
+                    let groundTruth = self.groundTruthSnapshot
+                    self.transition(
+                        to: OnboardingFlowPolicy.nextStep(
                             after: .microphone,
-                            groundTruth:
-                                self.groundTruthSnapshot,
+                            groundTruth: groundTruth,
                             handledSteps: self.handledSteps
-                        )
+                        ),
+                        trigger: .groundTruth,
+                        groundTruth: groundTruth
+                    )
                     self.delegate?
                         .onboardingControllerGroundTruthDidChange(
                             self
@@ -1777,21 +1950,42 @@ final class OnboardingWizardController: NSWindowController {
     }
 
     private func refreshMicrophoneAuthorization() {
-        guard currentStep == .microphone,
-              microphoneAuthorizationProvider()
-                == .authorized else {
-            return
-        }
+        guard currentStep == .microphone else { return }
+        // Polled once a second; only a change is worth a line.
+        let authorization = microphoneAuthorizationProvider()
+        noteMicrophoneAuthorization(authorization)
+        guard authorization == .authorized else { return }
         handledSteps.insert(.microphone)
-        currentStep = OnboardingFlowPolicy.nextStep(
-            after: .microphone,
-            groundTruth: groundTruthSnapshot,
-            handledSteps: handledSteps
+        let groundTruth = groundTruthSnapshot
+        transition(
+            to: OnboardingFlowPolicy.nextStep(
+                after: .microphone,
+                groundTruth: groundTruth,
+                handledSteps: handledSteps
+            ),
+            trigger: .groundTruth,
+            groundTruth: groundTruth
         )
         delegate?.onboardingControllerGroundTruthDidChange(
             self
         )
         render()
+    }
+
+    private func noteMicrophoneAuthorization(
+        _ authorization: MicrophoneAuthorizationState
+    ) {
+        guard authorization != loggedMicrophoneAuthorization else {
+            return
+        }
+        let previous = loggedMicrophoneAuthorization
+        loggedMicrophoneAuthorization = authorization
+        diagnostics?.record(
+            .microphoneAuthorization(
+                from: previous,
+                to: authorization
+            )
+        )
     }
 
     @objc private func beginHotKeyRecording() {
@@ -1816,6 +2010,13 @@ final class OnboardingWizardController: NSWindowController {
                 && $0.hotKey?.carbonModifiers
                     == hotKey.carbonModifiers
         }) {
+            diagnostics?.record(
+                .hotKeyCapture(
+                    channel: profile.name,
+                    shortcut: hotKey.displayName,
+                    outcome: .conflict(channel: conflict.name)
+                )
+            )
             hotKeyRecorder?.hotKey = profile.hotKey
             hotKeyStatusLabel?.stringValue =
                 "Already used by \(conflict.name)."
@@ -1828,6 +2029,15 @@ final class OnboardingWizardController: NSWindowController {
             didRecordHotKey: hotKey,
             for: profile
         ) == true
+        diagnostics?.record(
+            .hotKeyCapture(
+                channel: profile.name,
+                shortcut: hotKey.displayName,
+                outcome: accepted
+                    ? .registered
+                    : .registrationFailed
+            )
+        )
         guard accepted else {
             hotKeyRecorder?.hotKey = profile.hotKey
             hotKeyStatusLabel?.stringValue =
@@ -1842,7 +2052,7 @@ final class OnboardingWizardController: NSWindowController {
             self
         )
         if nextHotKeyProfile() == nil {
-            currentStep = .done
+            transition(to: .done, trigger: .groundTruth)
         }
         render()
     }
@@ -1858,6 +2068,17 @@ final class OnboardingWizardController: NSWindowController {
     private func ensureSelectedChannels() {
         guard confirmedServicesThisSession.isEmpty == false else {
             return
+        }
+        // Ensuring is idempotent and runs on several paths through a session;
+        // only a request the log has not already seen is news.
+        if loggedEnsuredServices != confirmedServicesThisSession {
+            loggedEnsuredServices = confirmedServicesThisSession
+            diagnostics?.record(
+                .channelsEnsured(
+                    services: Array(confirmedServicesThisSession),
+                    hasOpenClawEndpoint: openClawEndpoint.isEmpty == false
+                )
+            )
         }
         delegate?.onboardingController(
             self,
@@ -1974,6 +2195,9 @@ extension OnboardingWizardController: NSWindowDelegate {
     // programmatic dismissal — ends here, so the activation policy goes back
     // exactly once and VoiceKey returns to being a menu-bar-only app.
     func windowWillClose(_ notification: Notification) {
+        diagnostics?.record(
+            .wizardClosed(step: currentStep)
+        )
         microphoneTimer?.invalidate()
         microphoneTimer = nil
         openClawWizard.leave()
