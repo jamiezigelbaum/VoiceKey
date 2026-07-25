@@ -11,6 +11,9 @@ enum OnboardingStepReason: String {
     case microphoneNotAuthorized = "microphone-not-authorized"
     case hotKeysMissing = "hotkeys-missing"
     case everythingComplete = "everything-complete"
+    /// Nothing is left to finish and the owner opened the assistant anyway, so
+    /// the picker is the only screen that can still do something for them.
+    case addAnotherService = "add-another-service"
     case userChoice = "user-choice"
 }
 
@@ -109,7 +112,13 @@ enum OnboardingLogEvent {
     /// A skip that leaves the wizard on the same step — the hot-key step walks
     /// one channel at a time, so skipping one is invisible in a transition.
     case stepSkippedInPlace(step: OnboardingStep, detail: String)
-    case servicesConfirmed([OnboardingService])
+    /// `added` is the subset with no channel yet — the difference between a
+    /// walkthrough that re-confirms what the owner already had and one that is
+    /// actually adding a service.
+    case servicesConfirmed(
+        [OnboardingService],
+        added: [OnboardingService]
+    )
     case channelsEnsured(
         services: [OnboardingService],
         hasOpenClawEndpoint: Bool
@@ -174,8 +183,9 @@ enum OnboardingLogEvent {
             return text
         case let .stepSkippedInPlace(step, detail):
             return "\(step.logName) skipped \(detail)"
-        case let .servicesConfirmed(services):
+        case let .servicesConfirmed(services, added):
             return "confirmed \(Self.list(services))"
+                + " added=\(Self.list(added))"
         case let .channelsEnsured(services, hasOpenClawEndpoint):
             return "ensured \(Self.list(services)) openClawEndpoint="
                 + (hasOpenClawEndpoint ? "present" : "absent")

@@ -190,10 +190,30 @@ enum OnboardingFlowPolicy {
         return .welcome
     }
 
+    /// Where an entry the app made on the owner's behalf resumes: the first
+    /// thing still unfinished.
     static func reentryStep(
         groundTruth: OnboardingGroundTruth
     ) -> OnboardingStep {
         firstIncompleteStep(groundTruth: groundTruth)
+    }
+
+    /// Where re-entry the owner asked for lands.
+    ///
+    /// Unfinished setup resumes where it stopped — that is what "Finish Setup…"
+    /// means. Completion is different: the first incomplete step is then `.done`,
+    /// which sits after the picker, so a wizard opening there could never reach
+    /// the service list again and a second service could never be added. The
+    /// menu item is the only way back in, so completion is exactly when the
+    /// picker becomes the useful screen (2026-07-25).
+    static func manualReentryStepWithReason(
+        groundTruth: OnboardingGroundTruth
+    ) -> (step: OnboardingStep, reason: OnboardingStepReason) {
+        let resolved = firstIncompleteStepWithReason(
+            groundTruth: groundTruth
+        )
+        guard resolved.step == .done else { return resolved }
+        return (.services, .addAnotherService)
     }
 
     static func firstIncompleteStep(

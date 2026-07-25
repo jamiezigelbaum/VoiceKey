@@ -470,7 +470,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
            OnboardingFlowPolicy.firstIncompleteStep(
                groundTruth: onboardingGroundTruth
            ) != .done {
-            presentOnboarding(initial: false)
+            presentOnboarding(.resume)
             return
         }
         let preservesStatus =
@@ -651,7 +651,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSetupAssistant() {
-        presentOnboarding(initial: false)
+        presentOnboarding(.menu)
     }
 
     private func presentSettings(
@@ -676,11 +676,22 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private func openOnboardingOnFirstRunIfNeeded() {
         guard isFreshInstallAtLaunch else { return }
         DispatchQueue.main.async { [weak self] in
-            self?.presentOnboarding(initial: true)
+            self?.presentOnboarding(.firstRun)
         }
     }
 
-    private func presentOnboarding(initial: Bool) {
+    private enum OnboardingEntry {
+        case firstRun
+        /// VoiceKey opened the wizard on the owner's behalf, so it resumes at
+        /// whatever is unfinished.
+        case resume
+        /// The owner picked the menu item. A finished setup then opens the
+        /// service picker instead of the closing screen, which is the only route
+        /// left for adding a second service.
+        case menu
+    }
+
+    private func presentOnboarding(_ entry: OnboardingEntry) {
         let controller = onboardingWizardController
             ?? OnboardingWizardController(
                 profileProvider: { [weak self] in
@@ -693,10 +704,13 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             )
         controller.delegate = self
         onboardingWizardController = controller
-        if initial {
+        switch entry {
+        case .firstRun:
             controller.showInitial()
-        } else {
+        case .resume:
             controller.showReentrant()
+        case .menu:
+            controller.showManualReentry()
         }
     }
 
