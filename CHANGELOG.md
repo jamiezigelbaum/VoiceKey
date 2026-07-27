@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+Setting VoiceKey up is now a guided walkthrough instead of a settings hunt.
+
+- **First-run setup assistant.** A new Mac is taken through the whole
+  path — what to connect, credentials, microphone access, and a hotkey —
+  instead of opening an empty Settings window. It reopens from the menu
+  ("Setup Assistant…") whenever you want to add another service.
+- **"What would you like to connect?"** The assistant starts by offering the
+  services VoiceKey can actually connect today: the OpenAI Realtime API and
+  OpenClaw Talk. Pick either or both; each one is then set up in turn.
+- **A real OpenClaw connection walkthrough.** Connecting to an OpenClaw
+  gateway used to mean pasting a token into Settings and reading raw protocol
+  errors. VoiceKey now finds this Mac's existing OpenClaw pairing on its own,
+  and when the gateway needs the device approved it says so plainly, shows the
+  request waiting for approval, and keeps retrying until you approve it —
+  rather than failing once with "pairing required" and stopping.
+- **The credential in use is visible and recoverable.** When VoiceKey is using
+  this Mac's own OpenClaw pairing it says so, and no longer offers an empty
+  paste field that invites overwriting a working connection with a stale
+  token. Every connection test names which credential it used, and a token the
+  gateway rejects offers one-click recovery back to the Mac's own pairing.
+- **Errors name the right machine.** When the gateway's own AI provider key is
+  the thing being rejected, VoiceKey says so and points at the Mac running
+  OpenClaw, instead of surfacing a raw upstream error that reads as though
+  your VoiceKey key were wrong. Key fragments are stripped from the log.
+- **Settings: Test Connection** for OpenClaw channels, reporting the gateway
+  version and what it authorized.
+- The setup assistant records its walkthrough in the session log
+  (`~/Library/Logs/VoiceKey/session-*.log`) — steps, outcomes, and failures,
+  with no keys or tokens.
+
 ## 0.2.2 - 2026-07-24
 
 Critical fix: the microphone works on fresh installs.

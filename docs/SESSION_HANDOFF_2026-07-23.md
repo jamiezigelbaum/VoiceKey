@@ -1,5 +1,17 @@
 # VoiceKey — session handoff (2026-07-23)
 
+> **Not the current handoff.** For the state of play, read
+> [`SESSION_HANDOFF_2026-07-27.md`](SESSION_HANDOFF_2026-07-27.md).
+> Sections 1–3 below (state, open items, repo state) are historical: the
+> release they describe shipped as v0.2.0 on 2026-07-24 and the branch they
+> name is merged and gone.
+>
+> **§4 "Ground-truth reference" remains accurate and in force** — the
+> OpenClaw Talk relay protocol, the OpenAI Realtime tools/MCP contract, and
+> the sparta access/restart rules are still the canonical write-up and are
+> deliberately not duplicated in the newer document. §5–§7 (release,
+> delegation, environment) are still broadly correct.
+
 This document lets a new session take over from exactly where the previous
 one stopped. Paste the **PROMPT FOR THE NEW SESSION** block into a fresh
 session; everything below it is the reference the prompt points to.
