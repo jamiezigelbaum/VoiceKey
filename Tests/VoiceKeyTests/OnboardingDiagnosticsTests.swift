@@ -421,7 +421,10 @@ final class OnboardingWizardDiagnosticsTests: XCTestCase {
         )
         perform(title: "Move to Applications", in: controller)
         // The relocator answers on the main queue.
-        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        waitUntil(
+            { log.lines(ofKind: "location").count >= 3 },
+            "The relocation failure never reached the log."
+        )
         perform(title: "continue anyway", in: controller)
 
         XCTAssertEqual(

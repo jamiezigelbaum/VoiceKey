@@ -683,10 +683,10 @@ final class OnboardingWizardControllerServiceTests:
         )
 
         // The connect step starts on the next main-queue turn.
-        RunLoop.current.run(
-            until: Date().addingTimeInterval(0.05)
+        waitUntil(
+            { tester.testCount == 1 },
+            "The OpenClaw connect step never started its connection test."
         )
-        XCTAssertEqual(tester.testCount, 1)
         tester.completeNext(
             .ok(serverVersion: "2026.7.1-2", scopes: [])
         )
@@ -1648,8 +1648,20 @@ private final class FakeOpenClawConnectionTester:
     }
 
     func completeNext(
-        _ outcome: OpenClawConnectionOutcome
+        _ outcome: OpenClawConnectionOutcome,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) {
+        // Never trap: an empty queue means the wizard hasn't started its test
+        // yet, and trapping here takes the whole suite down with it.
+        guard completions.isEmpty == false else {
+            XCTFail(
+                "No pending connection test to complete.",
+                file: file,
+                line: line
+            )
+            return
+        }
         completions.removeFirst()(outcome)
     }
 }

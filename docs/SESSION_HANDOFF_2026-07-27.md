@@ -19,9 +19,9 @@ repeated here.
 > You are taking over the VoiceKey project mid-flight, acting as CTO/engineer
 > for Jamie. Read `docs/SESSION_HANDOFF_2026-07-27.md` in
 > `/Users/zig/Code/VoiceKey` in full before doing anything — it is the
-> complete state of play. Branch `main`, HEAD `db3421e`, clean tree, pushed,
-> 449 tests green, CI green. Nothing is in flight; no worktrees, no
-> delegated work outstanding.
+> complete state of play. Branch `main`, clean tree, pushed, 449 tests green,
+> CI green. Nothing is in flight; no worktrees, no delegated work
+> outstanding.
 >
 > **Where the work stands:** the guided setup path (first-run assistant →
 > service picker → per-service connection walkthroughs) is built, merged,
@@ -107,8 +107,19 @@ The entire guided-setup workstream. Summarized user-facing in the
 - **Wizard re-entry** — the menu item opens the picker when everything
   selected is already complete, so a second service can be added.
 
-Verified at `db3421e`: `swift test` → **449 tests, 0 failures**; CI run
-`30165026690` green; working tree clean; `main` == `origin/main`.
+Verified at handoff: `swift test` → **449 tests, 0 failures**; CI green;
+working tree clean; `main` == `origin/main`.
+
+One flaky test was found and fixed on the way out, because it turned CI red
+on a docs-only commit. `testAddingASecondServiceWalksOnlyThatServicesRemainingSteps`
+waited a fixed 50 ms for work the wizard schedules onto the next main-queue
+turn; under load that starves, and the `removeFirst()` that followed trapped
+the **whole process**, so one racy test took the entire suite down. Waits now
+poll the observable condition with a bound (`waitUntil` in
+`Tests/VoiceKeyTests/OnboardingAsyncWait.swift`) and the fake tester fails the
+test instead of trapping. Measured under identical CPU load: 2 failures in 5
+full-suite runs before, 0 in 8 after. If you add a test that waits on
+main-queue work, use `waitUntil` — never a fixed sleep.
 
 ### Deployed but unverified by Jamie
 `scripts/dev/fresh-air-test.zsh` put a fresh install of this build on the
