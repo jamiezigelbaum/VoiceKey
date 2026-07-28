@@ -922,6 +922,12 @@ final class SettingsWindowController: NSWindowController {
         addArranged(nameRow)
         endSection(after: nameRow)
 
+        // Directly under the channel picker: the only placement that is above
+        // the fold at the default size for every provider, including OpenClaw
+        // whose runtime block is long. A freshly added channel always has
+        // something outstanding, so this is what the owner should see first.
+        buildSetupSection()
+
         // Voice Provider: adapter choice plus its model/voice/endpoint knobs.
         addSection("Voice Provider")
         let providerRow = makeRow(
@@ -1160,8 +1166,6 @@ final class SettingsWindowController: NSWindowController {
         openClawConnectionTestRow = connectionTestRow
         addArranged(connectionTestRow)
         endSection(after: connectionTestRow)
-
-        buildSetupSection()
 
         // Instructions: system prompt for the selected voice channel.
         addSection("Instructions")
