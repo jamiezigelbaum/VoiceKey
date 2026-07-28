@@ -1643,6 +1643,59 @@ final class SettingsAutoApplyTests: XCTestCase {
         )
     }
 
+    func testSetupSitsBetweenTheChannelAndProviderSections() throws {
+        let controller = SettingsWindowController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+        _ = controller.windowSizingSnapshot
+
+        let headers = descendantViews(in: controller.window?.contentView)
+            .compactMap { $0 as? NSTextField }
+        func header(_ title: String) throws -> NSTextField {
+            try XCTUnwrap(headers.first(where: {
+                $0.stringValue == title
+                    && $0.font == NSFont.systemFont(
+                        ofSize: 13,
+                        weight: .bold
+                    )
+            }))
+        }
+        let channel = try header(VoiceChannelUIStrings.channelSectionTitle)
+        let setup = try header("Setup")
+        let provider = try header("Voice Provider")
+
+        // The form stack is vertical and unflipped, so higher minY is higher
+        // on screen.
+        XCTAssertGreaterThan(channel.frame.minY, setup.frame.minY)
+        XCTAssertGreaterThan(setup.frame.minY, provider.frame.minY)
+    }
+
+    /// The picker inherited a hard-coded 72pt height with no bottom pin, so a
+    /// third wrapping line clipped silently. Nothing renders in a unit test,
+    /// but the geometry is still checkable.
+    func testProviderPickerGrowsToFitItsRequirementsLine() {
+        let picker = VoiceChannelProviderPickerView()
+        picker.layoutSubtreeIfNeeded()
+
+        let content = descendantViews(in: picker).dropFirst()
+        XCTAssertFalse(content.isEmpty)
+        for view in content where view.superview === picker {
+            XCTAssertGreaterThanOrEqual(
+                view.frame.minY,
+                -0.5,
+                "\(view) hangs below the picker"
+            )
+            XCTAssertLessThanOrEqual(
+                view.frame.maxY,
+                picker.bounds.height + 0.5,
+                "\(view) is clipped by the picker's frame"
+            )
+        }
+        XCTAssertGreaterThan(picker.bounds.height, 72)
+    }
+
     private func assertEverySetupRowIsHidden(
         in controller: SettingsWindowController,
         file: StaticString = #filePath,
