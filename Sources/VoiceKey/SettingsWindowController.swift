@@ -816,8 +816,14 @@ final class SettingsWindowController: NSWindowController {
             // Capturing tears every Carbon registration down by design, so the
             // section must stop reading registration state until it is over.
             self.isRecordingHotKey = isRecording
-            self.syncChannelSetup()
+            // Order matters: the delegate is what tears the registrations down
+            // and puts them back. Rendering first would read the torn-down set
+            // when recording ends and paint a false "Accessibility · Needs
+            // access" row until the next poll tick. The flag above already
+            // suppresses that row on the way in, so rendering last is correct
+            // in both directions.
             self.delegate?.settingsController(self, isRecordingHotKey: isRecording)
+            self.syncChannelSetup()
         }
     }
 
@@ -870,6 +876,11 @@ final class SettingsWindowController: NSWindowController {
     }
 
     func beginHotKeyRecording() {
+        // The recorder only sees key events as first responder. Clicking the
+        // field does this in `mouseDown`; arming it from the Setup section's
+        // Record… button has to do it here, or the shortcut is typed into
+        // whichever field still holds focus while every registration is down.
+        window?.makeFirstResponder(recorderView)
         recorderView.beginRecording()
     }
 
@@ -900,7 +911,15 @@ final class SettingsWindowController: NSWindowController {
         NSLayoutConstraint.activate([
             formStackView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             formStackView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            formStackView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor)
+            formStackView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            // NSClipView is unflipped, so a document shorter than the clip is
+            // parked against the *bottom* and the form floats down the window:
+            // measured 64pt of blank above the first header at 900pt and 144pt
+            // at 980pt, tracking the window height 1:1. Making the document
+            // fill the clip keeps the form at the top at every size.
+            formStackView.heightAnchor.constraint(
+                greaterThanOrEqualTo: scrollView.contentView.heightAnchor
+            )
         ])
 
         configureProfileControls()
@@ -3216,8 +3235,7 @@ final class VoiceChannelProviderPickerView: NSView {
         requirementsLabel.font = NSFont.systemFont(ofSize: 11)
         requirementsLabel.textColor = .secondaryLabelColor
         requirementsLabel.translatesAutoresizingMaskIntoConstraints = false
-        // The accessory view has no bottom pin to grow against on its own, so
-        // both wrapping labels need a width to wrap at before `fittingSize`
+        // Both wrapping labels need a width to wrap at before `fittingSize`
         // can report an honest height.
         for label in [descriptionLabel, requirementsLabel] {
             label.preferredMaxLayoutWidth = Self.width
@@ -3236,10 +3254,41 @@ final class VoiceChannelProviderPickerView: NSView {
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            // The reserved height below fits the tallest provider, so this pin
+            // never binds; it stays as the loud failure if that ever stops
+            // being true, instead of silent clipping.
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
             popup.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
+
+        // NSAlert lays its accessory view out exactly once, before `runModal()`
+        // returns, and ignores any later frame change: resizing on every popup
+        // change slid the popup up over the alert's informative text for the
+        // three providers whose requirements line wraps. So reserve the tallest
+        // provider's height up front and never touch the frame again.
+        let reserved = tallestProviderHeight()
         selectionChanged()
+        // Both the frame and `fittingSize` have to report the reserved height,
+        // because which of the two NSAlert measures is not contractual: with
+        // only the frame set, `fittingSize` still shrank to 69pt for Gemini and
+        // 84pt for OpenAI, and an alert sized from that clips the two-line
+        // providers.
+        heightAnchor.constraint(equalToConstant: reserved).isActive = true
+        frame = NSRect(x: 0, y: 0, width: Self.width, height: reserved)
+    }
+
+    /// Measures the wrapped height of every provider's copy, so the reserved
+    /// height is a measurement rather than a guessed constant.
+    private func tallestProviderHeight() -> CGFloat {
+        var tallest: CGFloat = 0
+        for provider in VoiceProviderID.allCases {
+            descriptionLabel.stringValue = provider.settingsDescription
+            requirementsLabel.stringValue =
+                ChannelSetupPolicy.requirementSummary(for: provider)
+            layoutSubtreeIfNeeded()
+            tallest = max(tallest, stack.fittingSize.height)
+        }
+        return tallest
     }
 
     @available(*, unavailable)
@@ -3253,16 +3302,9 @@ final class VoiceChannelProviderPickerView: NSView {
         requirementsLabel.stringValue = selectedProvider.map {
             ChannelSetupPolicy.requirementSummary(for: $0)
         } ?? ""
-        // A third wrapping line clips against the inherited fixed height, and
-        // no test can see clipping — measure instead of guessing.
+        // Deliberately no frame change: the height reserved in `init` already
+        // fits the tallest provider, and the alert cannot re-lay-out.
         layoutSubtreeIfNeeded()
-        let fitting = stack.fittingSize
-        frame = NSRect(
-            x: 0,
-            y: 0,
-            width: max(Self.width, fitting.width),
-            height: fitting.height
-        )
     }
 }
 
