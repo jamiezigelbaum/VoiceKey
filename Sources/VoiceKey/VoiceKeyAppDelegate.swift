@@ -915,15 +915,29 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    /// A pure `Set` lookup with no side effects. It must never reach
+    /// `HotKeyFallbackPolicy.diagnostic`, which requests Accessibility trust as
+    /// a side effect of building its log string — Settings calls this once a
+    /// second while its window is open.
+    func hotKeyRegistration(
+        for profileID: UUID
+    ) -> ChannelHotKeyRegistration {
+        guard profiles.first(where: { $0.id == profileID })?.hotKey != nil else {
+            return .noHotKey
+        }
+        return carbonRegisteredProfileIDs.contains(profileID)
+            ? .carbonRegistered
+            : .eventMonitorFallback
+    }
+
     private func hotKeyDiagnosticLine(for profile: VoiceProfile) -> String {
         guard let hotKey = profile.hotKey else {
             return "\(profile.name): no hotkey"
         }
-        let registration = carbonRegisteredProfileIDs.contains(profile.id)
-            ? "Carbon registered"
-            : isAccessibilityTrusted()
-                ? "trusted event-monitor fallback"
-                : "unavailable without Accessibility access"
+        let registration = hotKeyRegistration(for: profile.id)
+            .diagnosticTerm(
+                isAccessibilityTrusted: isAccessibilityTrusted()
+            )
         return "\(profile.name): \(hotKey.displayName) (\(registration))"
     }
 
@@ -1034,6 +1048,22 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
     // session instead of reaching the recorder (and its conflict check).
     func settingsController(_ controller: SettingsWindowController, isRecordingHotKey: Bool) {
         setHotKeyRecording(isRecordingHotKey)
+    }
+
+    func settingsController(
+        _ controller: SettingsWindowController,
+        hotKeyRegistrationFor profileID: UUID
+    ) -> ChannelHotKeyRegistration {
+        hotKeyRegistration(for: profileID)
+    }
+
+    /// `updateMenuContent()` has eleven other call sites and not one is
+    /// permission-driven, so granting the microphone from Settings used to
+    /// leave the menu reading "Finish Setup…" until something unrelated fired.
+    func settingsControllerDidChangeSetup(
+        _ controller: SettingsWindowController
+    ) {
+        updateMenuContent()
     }
 
     private func setHotKeyRecording(_ isRecordingHotKey: Bool) {
