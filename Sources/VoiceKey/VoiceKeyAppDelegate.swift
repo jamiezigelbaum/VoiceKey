@@ -73,6 +73,10 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private var globalHotKeyMonitor: Any?
     private let iconAnimator = MenuBarIconAnimator()
     private let stopWatchdog = StopWatchdog()
+    private let mediaPlayback = MediaPlaybackController(
+        scripting: AppleScriptMediaPlayerScripting()
+    )
+    private var mediaPlaybackChannels = MediaPlaybackChannelPolicy()
     private var isAccessibilityTrusted: () -> Bool = {
         AXIsProcessTrusted()
     }
@@ -114,6 +118,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private let settingsMenuItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        configureMediaPlaybackLogging()
         if let selectedProfile {
             providerConfiguration = sessionConfiguration(for: selectedProfile)
         }
@@ -451,8 +456,44 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         voiceProvider?.stopVoice()
 
         activeProfileID = profile.id
+        // The app has committed to this channel, so other media stays paused
+        // from here. The stop above reports `.ready` a turn or two from now,
+        // and without this the owner's music would come back in the gap
+        // between the outgoing session and the incoming one.
+        mediaPlaybackChannels.channelRequested(profile.id)
+        syncMediaPlayback()
         updateProviderConfiguration(sessionConfiguration(for: profile))
         voiceProvider?.toggleVoice()
+    }
+
+    /// The one place that observes "is any channel active" changing.
+    ///
+    /// Driven by the status funnel, so it is self-healing: whatever ends a
+    /// session — the owner, a provider error, the stop watchdog — ends with a
+    /// status that is not live, and the music comes back. Nothing here can
+    /// block or fail the session, because the controller returns before its
+    /// scripting layer answers.
+    private func syncMediaPlayback() {
+        mediaPlayback.setActiveChannel(
+            mediaPlaybackChannels.activeChannel(
+                activeProfileID: activeProfileID,
+                status: currentStatus
+            )
+        )
+    }
+
+    private func configureMediaPlaybackLogging() {
+        mediaPlayback.onDiagnostic = { [weak self] message in
+            // Arrives on the media queue; everything below is AppKit.
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.recordProviderEvent(
+                    .diagnostic(message),
+                    provider: self.selectedProfile?.providerID
+                        ?? self.providerConfiguration.providerID
+                )
+            }
+        }
     }
 
     private func handleActivationFailure(
@@ -776,6 +817,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             appOwnedAttention = nil
         }
         currentStatus = status
+        syncMediaPlayback()
         statusMenuItem.title = "Status: \(status.menuTitle)"
         if let detail = status.detail {
             statusMenuItem.title = "Status: \(status.menuTitle) - \(detail)"
@@ -970,6 +1012,13 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
             newProfiles: sortedProfiles,
             provider: voiceProvider
         )
+        if activeProfileID == nil {
+            // The live channel was deleted out from under the session. Nobody
+            // is going to report a status for it, so release the music here
+            // rather than wait for one.
+            mediaPlaybackChannels.runtimeWasReset()
+            syncMediaPlayback()
+        }
 
         profiles = sortedProfiles
         registerAllHotKeys()
@@ -996,6 +1045,9 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
         voiceProvider = nil
         activeProfileID = nil
         appOwnedAttention = nil
+        // There is no runtime left to honour a pending request, so it must not
+        // go on holding the owner's music. updateStatus below resumes it.
+        mediaPlaybackChannels.runtimeWasReset()
         updateStatus(.ready)
     }
 

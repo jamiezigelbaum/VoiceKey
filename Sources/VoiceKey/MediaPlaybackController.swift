@@ -66,6 +66,82 @@ protocol MediaPlayerScripting: AnyObject {
     ) -> Result<Void, MediaScriptingFailure>
 }
 
+/// Which channel, if any, holds the audio session for the purpose of pausing
+/// other media.
+///
+/// Provider status alone cannot answer this. Stopping a channel and switching
+/// channels emit the *identical* `.stopping` → `.ready` pair from the outgoing
+/// session — `RealtimeVoiceProvider.emit` hops through `DispatchQueue.main`, so
+/// the incoming session's `.starting` lands a turn or two later, and the two
+/// cases are indistinguishable until it does. Resuming the owner's music in
+/// that gap and pausing it again a moment afterwards is what requirement 4
+/// forbids, so the app's *intent* to start a channel is carried here
+/// explicitly rather than guessed at from a timer.
+struct MediaPlaybackChannelPolicy: Equatable {
+    /// A channel the app has asked to start and has not yet seen report in.
+    private(set) var requestedChannelID: UUID?
+
+    /// Called when the app commits to starting a channel.
+    mutating func channelRequested(_ channelID: UUID) {
+        requestedChannelID = channelID
+    }
+
+    /// Called when the runtime is torn down — the request can no longer be
+    /// honoured by anyone, so it must not go on holding the music.
+    mutating func runtimeWasReset() {
+        requestedChannelID = nil
+    }
+
+    /// Folds one status update in and returns the channel that should hold
+    /// other media paused, or nil if nothing should.
+    mutating func activeChannel(
+        activeProfileID: UUID?,
+        status: ProviderStatus
+    ) -> UUID? {
+        if let requested = requestedChannelID {
+            switch status {
+            case .needsAttention:
+                // The requested channel could not start. Nothing is going to
+                // hold the audio session, so stop holding the music.
+                requestedChannelID = nil
+            case _ where Self.isStartedSession(status)
+                && activeProfileID == requested:
+                // It reported in. The live status carries it from here.
+                requestedChannelID = nil
+            default:
+                // Still in flight — including the outgoing session's `.ready`,
+                // which is the whole reason this exists.
+                return requested
+            }
+        }
+
+        guard let activeProfileID, status.isLiveSessionStatus else {
+            return nil
+        }
+        return activeProfileID
+    }
+
+    /// A status only a *running* session reports.
+    ///
+    /// `.stopping` is deliberately excluded even though it is a live status.
+    /// It can only come from a session being torn down, and during a switch
+    /// the outgoing session's `.stopping` arrives when `activeProfileID` is
+    /// already the incoming channel — so counting it as "the requested channel
+    /// reported in" clears the request one status too early and lets the very
+    /// next `.ready` release the music. That is the blip this policy exists to
+    /// prevent, and it is what the switch test caught.
+    private static func isStartedSession(_ status: ProviderStatus) -> Bool {
+        switch status {
+        case .starting, .listening, .thinking, .speaking,
+             .clickSent, .voiceActive:
+            return true
+        case .loading, .checking, .loginRequired, .ready,
+             .stopping, .needsAttention:
+            return false
+        }
+    }
+}
+
 /// Pauses whatever is playing while a voice channel is open, and puts back
 /// exactly what it paused when the last one closes.
 ///
