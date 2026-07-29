@@ -408,6 +408,12 @@ final class SettingsAutoApplyTests: XCTestCase {
                 openedURLs.append($0)
             }
         )
+        // The accessibility row now appears only for a shortcut that fell back
+        // to the untrusted event monitor, and only the delegate knows that.
+        // `delegate` is weak, so the double is held for the whole test.
+        let delegate = ChannelSetupSettingsDelegate()
+        delegate.registration = .eventMonitorFallback
+        controller.delegate = delegate
 
         var visibleButtons = descendantButtons(
             in: controller.window?.contentView
@@ -1184,6 +1190,884 @@ final class SettingsAutoApplyTests: XCTestCase {
         )
     }
 
+    // MARK: - Channel setup section
+
+    func testChannelSetupSnapshotIsDerivedLive() {
+        var microphone = MicrophoneAuthorizationState.denied
+        var accessibility = false
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.hotKey = nil
+        let credentials = InMemoryCredentialStore()
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: credentials,
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { microphone },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { accessibility },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+
+        let before = controller.channelSetupSnapshot
+        XCTAssertEqual(
+            before.outstanding.map(\.id),
+            [.activation, .microphone]
+        )
+        XCTAssertFalse(before.isReady)
+
+        microphone = .authorized
+        accessibility = true
+        let after = controller.channelSetupSnapshot
+        XCTAssertNotEqual(before, after)
+        XCTAssertEqual(after.outstanding.map(\.id), [.activation])
+    }
+
+    func testReadyChannelCollapsesToTheSummaryLine() throws {
+        let profile = VoiceProfile.defaultOpenAI()
+        let credentials = InMemoryCredentialStore()
+        credentials.apiKeys[profile.id] = "sk-test"
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: credentials,
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { .authorized },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { false },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+
+        XCTAssertTrue(controller.channelSetupSnapshot.isReady)
+        assertEverySetupRowIsHidden(in: controller)
+        let summary = try XCTUnwrap(
+            descendantViews(in: controller.window?.contentView)
+                .compactMap { $0 as? NSTextField }
+                .first(where: {
+                    $0.stringValue == ChannelSetupPolicy.readySummary
+                })
+        )
+        XCTAssertFalse(summary.isHidden)
+    }
+
+    func testEmptyFormShowsTheAddAChannelSummary() throws {
+        let controller = SettingsWindowController(
+            profiles: [],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { .denied },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { false },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+
+        XCTAssertEqual(
+            controller.channelSetupSnapshot.summary,
+            ChannelSetupPolicy.noChannelSummary
+        )
+        XCTAssertTrue(controller.channelSetupSnapshot.outstanding.isEmpty)
+        assertEverySetupRowIsHidden(in: controller)
+        XCTAssertTrue(
+            descendantViews(in: controller.window?.contentView)
+                .compactMap { $0 as? NSTextField }
+                .contains(where: {
+                    $0.stringValue == ChannelSetupPolicy.noChannelSummary
+                        && $0.isHidden == false
+                })
+        )
+    }
+
+    func testSwitchingChannelsResyncsSetup() throws {
+        var carbon = VoiceProfile.defaultOpenAI(name: "Carbon")
+        carbon.hotKey = .defaultVoiceToggle
+        var fallback = VoiceProfile.defaultOpenAI(name: "Fallback")
+        fallback.hotKey = makeFunctionHotKey(keyCode: 122, number: 1)
+        let credentials = InMemoryCredentialStore()
+        credentials.apiKeys[carbon.id] = "sk-test"
+        credentials.apiKeys[fallback.id] = "sk-test"
+        let controller = SettingsWindowController(
+            profiles: [carbon, fallback],
+            credentialStore: credentials,
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { .authorized },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { false },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+        let delegate = ChannelSetupSettingsDelegate()
+        delegate.registrationsByProfile = [
+            carbon.id: .carbonRegistered,
+            fallback.id: .eventMonitorFallback
+        ]
+        controller.delegate = delegate
+
+        let popup = try XCTUnwrap(
+            descendantViews(in: controller.window?.contentView)
+                .compactMap { $0 as? NSPopUpButton }
+                .first(where: { popup in
+                    popup.itemArray.contains(where: {
+                        ($0.representedObject as? String)
+                            == fallback.id.uuidString
+                    })
+                })
+        )
+
+        popup.selectItem(withTitle: "Carbon")
+        sendAction(for: popup)
+        XCTAssertFalse(
+            controller.channelSetupSnapshot.outstanding.contains(where: {
+                $0.id == .accessibility
+            })
+        )
+
+        popup.selectItem(withTitle: "Fallback")
+        sendAction(for: popup)
+        XCTAssertTrue(
+            controller.channelSetupSnapshot.outstanding.contains(where: {
+                $0.id == .accessibility
+            })
+        )
+        XCTAssertTrue(
+            descendantButtons(in: controller.window?.contentView)
+                .contains(where: {
+                    $0.identifier?.rawValue
+                        == ChannelSetupRequirementID.accessibility.rawValue
+                        && $0.isHidden == false
+                })
+        )
+    }
+
+    func testAddingAChannelNeverRequestsMicrophoneAccess() {
+        var microphoneRequestCount = 0
+        var accessibilityRequestCount = 0
+        let controller = SettingsWindowController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { .notDetermined },
+            requestMicrophoneAccess: { _ in
+                microphoneRequestCount += 1
+            },
+            isAccessibilityTrusted: { false },
+            requestAccessibilityAccess: {
+                accessibilityRequestCount += 1
+            },
+            openSystemSettingsURL: { _ in }
+        )
+
+        let added = VoiceChannelOperations.makeChannel(
+            provider: .openAIRealtime,
+            existingNames: []
+        )
+        XCTAssertTrue(controller.commitNewProfile(added))
+
+        XCTAssertEqual(microphoneRequestCount, 0)
+        XCTAssertEqual(accessibilityRequestCount, 0)
+    }
+
+    /// Rendering the section — repeatedly, in every registration state — must
+    /// never ask the OS for anything. A 1 Hz permission prompt would be a
+    /// serious regression.
+    func testRepeatedRenderingNeverRequestsPermissions() {
+        var microphoneRequestCount = 0
+        var accessibilityRequestCount = 0
+        let profile = VoiceProfile.defaultOpenAI()
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { .notDetermined },
+            requestMicrophoneAccess: { _ in
+                microphoneRequestCount += 1
+            },
+            isAccessibilityTrusted: { false },
+            requestAccessibilityAccess: {
+                accessibilityRequestCount += 1
+            },
+            openSystemSettingsURL: { _ in }
+        )
+        let delegate = ChannelSetupSettingsDelegate()
+        controller.delegate = delegate
+
+        for registration: ChannelHotKeyRegistration in [
+            .noHotKey, .carbonRegistered, .eventMonitorFallback, .unknown
+        ] {
+            delegate.registration = registration
+            for _ in 0..<25 {
+                controller.showAndFocus()
+                _ = controller.channelSetupSnapshot
+            }
+        }
+        controller.close()
+
+        XCTAssertEqual(microphoneRequestCount, 0)
+        XCTAssertEqual(accessibilityRequestCount, 0)
+    }
+
+    func testAddingAChannelSurfacesTheMissingShortcut() throws {
+        let controller = SettingsWindowController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { .denied },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { false },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+
+        let added = VoiceChannelOperations.makeChannel(
+            provider: .openAIRealtime,
+            existingNames: []
+        )
+        XCTAssertTrue(controller.commitNewProfile(added))
+        let popup = try XCTUnwrap(
+            descendantViews(in: controller.window?.contentView)
+                .compactMap { $0 as? NSPopUpButton }
+                .first(where: { popup in
+                    popup.itemArray.contains(where: {
+                        ($0.representedObject as? String)
+                            == added.id.uuidString
+                    })
+                })
+        )
+        popup.selectItem(withTitle: added.name)
+        sendAction(for: popup)
+
+        let outstanding = controller.channelSetupSnapshot.outstanding
+        XCTAssertEqual(outstanding.map(\.id), [.activation, .microphone])
+        let activation = try XCTUnwrap(outstanding.first)
+        XCTAssertEqual(activation.title, "Shortcut")
+        XCTAssertEqual(activation.row.status, "Not set")
+        XCTAssertEqual(
+            activation.reason,
+            ProfileActivationFailure.missingHotKey.settingsMessage
+        )
+    }
+
+    func testChangingProviderRebuildsRequirements() throws {
+        let profile = VoiceProfile.defaultOpenAI()
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { .denied },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { false },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+
+        XCTAssertEqual(
+            controller.channelSetupSnapshot.outstanding.map(\.id),
+            [.activation, .microphone]
+        )
+
+        let providerPopup = try XCTUnwrap(
+            descendantViews(in: controller.window?.contentView)
+                .compactMap { $0 as? NSPopUpButton }
+                .first(where: { popup in
+                    popup.itemArray.contains(where: {
+                        ($0.representedObject as? String)
+                            == VoiceProviderID.chatGPTWeb.rawValue
+                    })
+                })
+        )
+        let index = try XCTUnwrap(
+            providerPopup.itemArray.firstIndex(where: {
+                ($0.representedObject as? String)
+                    == VoiceProviderID.chatGPTWeb.rawValue
+            })
+        )
+        providerPopup.selectItem(at: index)
+        sendAction(for: providerPopup)
+
+        XCTAssertEqual(
+            controller.channelSetupSnapshot.outstanding.map(\.id),
+            [.microphone]
+        )
+    }
+
+    func testSetupChangeNotifiesTheDelegate() {
+        var microphone = MicrophoneAuthorizationState.denied
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.hotKey = .defaultVoiceToggle
+        let credentials = InMemoryCredentialStore()
+        credentials.apiKeys[profile.id] = "sk-test"
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: credentials,
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { microphone },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { true },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+        let delegate = ChannelSetupSettingsDelegate()
+        controller.delegate = delegate
+        controller.showAndFocus()
+        XCTAssertEqual(delegate.setupChangeCount, 0)
+
+        microphone = .authorized
+        waitUntil(
+            { delegate.setupChangeCount > 0 },
+            "polling never noticed the granted microphone"
+        )
+        controller.close()
+    }
+
+    func testNoStaleButtonSurvivesASatisfiedRequirement() {
+        var microphone = MicrophoneAuthorizationState.denied
+        let profile = VoiceProfile.defaultOpenAI()
+        let credentials = InMemoryCredentialStore()
+        credentials.apiKeys[profile.id] = "sk-test"
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: credentials,
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { microphone },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { false },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+        let delegate = ChannelSetupSettingsDelegate()
+        delegate.registration = .carbonRegistered
+        controller.delegate = delegate
+        controller.showAndFocus()
+
+        XCTAssertTrue(
+            descendantButtons(in: controller.window?.contentView)
+                .contains(where: {
+                    $0.isHidden == false && $0.title == "Open Settings"
+                })
+        )
+
+        microphone = .authorized
+        controller.showAndFocus()
+
+        XCTAssertFalse(
+            descendantButtons(in: controller.window?.contentView)
+                .contains(where: {
+                    $0.isHidden == false
+                        && ["Enable", "Open Settings"].contains($0.title)
+                })
+        )
+        controller.close()
+    }
+
+    func testWindowIsTallEnoughForAChannelMissingEverything() {
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.hotKey = nil
+        profile.mcpServers = [
+            MCPServerConfiguration(
+                label: "tools",
+                urlString: "https://mcp.example.com"
+            )
+        ]
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { .denied },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { false },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+        // Worst case: all three rows and all three reason lines at once.
+        let delegate = ChannelSetupSettingsDelegate()
+        delegate.registration = .eventMonitorFallback
+        controller.delegate = delegate
+        controller.showAndFocus()
+        XCTAssertEqual(
+            controller.channelSetupSnapshot.outstanding.count,
+            3
+        )
+
+        let sizing = controller.windowSizingSnapshot
+        XCTAssertGreaterThanOrEqual(
+            sizing.contentHeight,
+            sizing.formHeight
+        )
+        controller.close()
+    }
+
+    func testProviderPickerStatesWhatTheChannelWillNeed() throws {
+        let picker = VoiceChannelProviderPickerView()
+        let labels = descendantViews(in: picker)
+            .compactMap { $0 as? NSTextField }
+        XCTAssertTrue(
+            labels.contains(where: {
+                $0.stringValue == ChannelSetupPolicy.requirementSummary(
+                    for: .openAIRealtime
+                )
+            }),
+            "picker never states what an OpenAI channel needs"
+        )
+
+        let popup = try XCTUnwrap(
+            descendantViews(in: picker)
+                .compactMap { $0 as? NSPopUpButton }
+                .first
+        )
+        let index = try XCTUnwrap(
+            popup.itemArray.firstIndex(where: {
+                ($0.representedObject as? String)
+                    == VoiceProviderID.openClaw.rawValue
+            })
+        )
+        popup.selectItem(at: index)
+        sendAction(for: popup)
+
+        XCTAssertTrue(
+            descendantViews(in: picker)
+                .compactMap { $0 as? NSTextField }
+                .contains(where: {
+                    $0.stringValue == ChannelSetupPolicy.requirementSummary(
+                        for: .openClaw
+                    )
+                }),
+            "picker did not follow the popup selection"
+        )
+    }
+
+    func testSetupSitsBetweenTheChannelAndProviderSections() throws {
+        let controller = SettingsWindowController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+        _ = controller.windowSizingSnapshot
+
+        let headers = descendantViews(in: controller.window?.contentView)
+            .compactMap { $0 as? NSTextField }
+        func header(_ title: String) throws -> NSTextField {
+            try XCTUnwrap(headers.first(where: {
+                $0.stringValue == title
+                    && $0.font == NSFont.systemFont(
+                        ofSize: 13,
+                        weight: .bold
+                    )
+            }))
+        }
+        let channel = try header(VoiceChannelUIStrings.channelSectionTitle)
+        let setup = try header("Setup")
+        let provider = try header("Voice Provider")
+
+        // The form stack is vertical and unflipped, so higher minY is higher
+        // on screen.
+        XCTAssertGreaterThan(channel.frame.minY, setup.frame.minY)
+        XCTAssertGreaterThan(setup.frame.minY, provider.frame.minY)
+    }
+
+    /// The picker inherited a hard-coded 72pt height with no bottom pin, so a
+    /// third wrapping line clipped silently. Nothing renders in a unit test,
+    /// but the geometry is still checkable.
+    func testProviderPickerGrowsToFitItsRequirementsLine() {
+        let picker = VoiceChannelProviderPickerView()
+        picker.layoutSubtreeIfNeeded()
+
+        let content = descendantViews(in: picker).dropFirst()
+        XCTAssertFalse(content.isEmpty)
+        for view in content where view.superview === picker {
+            XCTAssertGreaterThanOrEqual(
+                view.frame.minY,
+                -0.5,
+                "\(view) hangs below the picker"
+            )
+            XCTAssertLessThanOrEqual(
+                view.frame.maxY,
+                picker.bounds.height + 0.5,
+                "\(view) is clipped by the picker's frame"
+            )
+        }
+        XCTAssertGreaterThan(picker.bounds.height, 72)
+    }
+
+    /// NSAlert lays its accessory view out once and ignores later frame
+    /// changes, so a picker that resized itself on every popup change slid up
+    /// over the alert's informative text. The reserved size has to fit every
+    /// provider and never move.
+    func testProviderPickerKeepsOneSizeForEveryProvider() throws {
+        let picker = VoiceChannelProviderPickerView()
+        picker.layoutSubtreeIfNeeded()
+        let reserved = picker.frame.size
+        let popup = try XCTUnwrap(
+            descendantViews(in: picker)
+                .compactMap { $0 as? NSPopUpButton }
+                .first
+        )
+
+        for provider in VoiceProviderID.allCases where provider.isImplemented {
+            let index = try XCTUnwrap(
+                popup.itemArray.firstIndex(where: {
+                    ($0.representedObject as? String) == provider.rawValue
+                })
+            )
+            popup.selectItem(at: index)
+            sendAction(for: popup)
+            picker.layoutSubtreeIfNeeded()
+
+            XCTAssertEqual(
+                picker.frame.size,
+                reserved,
+                "\(provider.rawValue) resized the accessory the alert already laid out"
+            )
+            XCTAssertEqual(
+                picker.fittingSize.height,
+                reserved.height,
+                accuracy: 0.5,
+                "\(provider.rawValue) reports a fitting height the alert would size to instead"
+            )
+            for view in descendantViews(in: picker).dropFirst()
+            where view.superview !== picker {
+                let inPicker = view.convert(view.bounds, to: picker)
+                XCTAssertGreaterThanOrEqual(
+                    inPicker.minY,
+                    -0.5,
+                    "\(provider.rawValue) pushes \(view) below the accessory"
+                )
+                XCTAssertLessThanOrEqual(
+                    inPicker.maxY,
+                    reserved.height + 0.5,
+                    "\(provider.rawValue) clips \(view) against the accessory"
+                )
+            }
+        }
+    }
+
+    /// The picker only ever renders inside an NSAlert, and the alert lays its
+    /// accessory out once. This drives the real alert, so a picker that resizes
+    /// itself is caught where it actually breaks.
+    func testAlertKeepsThePickerWhereItLaidItOut() throws {
+        let picker = VoiceChannelProviderPickerView()
+        let alert = NSAlert()
+        alert.messageText = "Add Voice Channel"
+        alert.informativeText = "Choose how this voice channel connects."
+        alert.addButton(withTitle: "Add Channel")
+        alert.addButton(withTitle: "Cancel")
+        alert.accessoryView = picker
+        alert.layout()
+
+        let popup = try XCTUnwrap(
+            descendantViews(in: picker)
+                .compactMap { $0 as? NSPopUpButton }
+                .first
+        )
+        let container = try XCTUnwrap(picker.superview).frame
+        let popupInWindow = popup.convert(popup.bounds, to: nil)
+        let alertSize = alert.window.frame.size
+
+        for provider in VoiceProviderID.allCases where provider.isImplemented {
+            let index = try XCTUnwrap(
+                popup.itemArray.firstIndex(where: {
+                    ($0.representedObject as? String) == provider.rawValue
+                })
+            )
+            popup.selectItem(at: index)
+            sendAction(for: popup)
+            alert.window.layoutIfNeeded()
+
+            XCTAssertEqual(
+                picker.superview?.frame,
+                container,
+                "\(provider.rawValue) needs a band the alert never reserved"
+            )
+            XCTAssertEqual(
+                picker.frame.height,
+                container.height,
+                accuracy: 0.5,
+                "\(provider.rawValue) overflows the band the alert reserved"
+            )
+            XCTAssertEqual(
+                popup.convert(popup.bounds, to: nil),
+                popupInWindow,
+                "\(provider.rawValue) moved the popup after the alert laid out"
+            )
+            XCTAssertEqual(
+                alert.window.frame.size,
+                alertSize,
+                "\(provider.rawValue) changed the alert's size"
+            )
+        }
+    }
+
+    /// NSClipView is unflipped, so a form shorter than the window used to be
+    /// parked against the bottom: 64pt of blank above the first header at the
+    /// old 900pt default, 144pt at 980pt.
+    func testTheFormStartsAtTheTopOfTheWindow() throws {
+        let profile = VoiceProfile.defaultOpenAI()
+        let credentials = InMemoryCredentialStore()
+        credentials.apiKeys[profile.id] = "sk-test"
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: credentials,
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { .authorized },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { true },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+        let delegate = ChannelSetupSettingsDelegate()
+        delegate.registration = .carbonRegistered
+        controller.delegate = delegate
+        controller.showAndFocus()
+
+        let scrollView = try XCTUnwrap(
+            descendantViews(in: controller.window?.contentView)
+                .compactMap { $0 as? NSScrollView }
+                .first
+        )
+        scrollView.layoutSubtreeIfNeeded()
+        let document = try XCTUnwrap(scrollView.documentView)
+        XCTAssertLessThan(
+            document.fittingSize.height,
+            scrollView.contentView.bounds.height,
+            "this only measures anything while the form is shorter than the window"
+        )
+        XCTAssertEqual(
+            document.frame.maxY,
+            scrollView.contentView.bounds.maxY,
+            accuracy: 0.5,
+            "the form floats away from the top of the window"
+        )
+        controller.close()
+    }
+
+    func testRecordButtonArmsTheRecorderAndGivesItTheKeyboard() throws {
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.hotKey = nil
+        let credentials = InMemoryCredentialStore()
+        credentials.apiKeys[profile.id] = "sk-test"
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: credentials,
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { .authorized },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { true },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+        let delegate = ChannelSetupSettingsDelegate()
+        delegate.registration = .noHotKey
+        controller.delegate = delegate
+        controller.showAndFocus()
+
+        XCTAssertEqual(
+            controller.channelSetupSnapshot.outstanding.map(\.id),
+            [.activation]
+        )
+        sendAction(for: try activationButton(in: controller))
+
+        let recorder = try XCTUnwrap(
+            descendantViews(in: controller.window?.contentView)
+                .compactMap { $0 as? HotKeyRecorderView }
+                .first
+        )
+        XCTAssertTrue(
+            recorder.isRecording,
+            "Record… did not arm the recorder"
+        )
+        // Armed but unfocused would swallow every shortcut into whichever
+        // field still had focus, while every global hotkey stays torn down.
+        XCTAssertTrue(
+            controller.window?.firstResponder === recorder,
+            "the armed recorder never got the keyboard"
+        )
+        controller.close()
+    }
+
+    func testAddKeyFocusesTheCredentialField() throws {
+        let profile = VoiceProfile.defaultOpenAI()
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { .authorized },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { true },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+        let delegate = ChannelSetupSettingsDelegate()
+        delegate.registration = .carbonRegistered
+        controller.delegate = delegate
+        controller.showAndFocus()
+
+        XCTAssertEqual(
+            controller.channelSetupSnapshot.outstanding.map(\.id),
+            [.activation]
+        )
+        sendAction(for: try activationButton(in: controller))
+
+        let field = try XCTUnwrap(
+            descendantViews(in: controller.window?.contentView)
+                .compactMap { $0 as? NSSecureTextField }
+                .first
+        )
+        XCTAssertTrue(
+            focusedTextField(in: controller) === field,
+            "Add Key did not focus the credential field"
+        )
+        controller.close()
+    }
+
+    func testSetEndpointFocusesTheEndpointField() throws {
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.providerID = .custom
+        profile.endpointURL = "   "
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { .authorized },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { true },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+        let delegate = ChannelSetupSettingsDelegate()
+        delegate.registration = .carbonRegistered
+        controller.delegate = delegate
+        controller.showAndFocus()
+
+        XCTAssertEqual(
+            controller.channelSetupSnapshot.outstanding.map(\.id),
+            [.activation]
+        )
+        sendAction(for: try activationButton(in: controller))
+
+        let field = try XCTUnwrap(
+            findTextField(
+                in: controller.window?.contentView,
+                placeholder: VoiceProviderID.custom.endpointPlaceholder
+            )
+        )
+        XCTAssertTrue(
+            focusedTextField(in: controller) === field,
+            "Set Endpoint did not focus the endpoint field"
+        )
+        controller.close()
+    }
+
+    /// Recording tears every Carbon registration down and puts it back through
+    /// the delegate. Rendering the section before that callback made the
+    /// channel read `.eventMonitorFallback` and flashed a red Accessibility row
+    /// on a shortcut that works fine.
+    func testEndingARecordingNeverFlashesTheAccessibilityRow() throws {
+        let profile = VoiceProfile.defaultOpenAI()
+        let credentials = InMemoryCredentialStore()
+        credentials.apiKeys[profile.id] = "sk-test"
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: credentials,
+            saveProfiles: { _ in },
+            microphoneAuthorizationProvider: { .authorized },
+            requestMicrophoneAccess: { _ in },
+            isAccessibilityTrusted: { false },
+            requestAccessibilityAccess: {},
+            openSystemSettingsURL: { _ in }
+        )
+        let delegate = ChannelSetupSettingsDelegate()
+        delegate.registration = .carbonRegistered
+        // Mirrors `setHotKeyRecording`: registrations are gone for as long as
+        // the recorder is capturing, and back the moment it stops.
+        delegate.onRecordingStateChanged = { [weak delegate] isRecording in
+            delegate?.registration = isRecording
+                ? .eventMonitorFallback
+                : .carbonRegistered
+        }
+        controller.delegate = delegate
+        controller.showAndFocus()
+
+        func accessibilityRowIsVisible() -> Bool {
+            descendantButtons(in: controller.window?.contentView)
+                .contains(where: {
+                    $0.identifier?.rawValue
+                        == ChannelSetupRequirementID.accessibility.rawValue
+                        && $0.isHidden == false
+                })
+        }
+
+        XCTAssertFalse(accessibilityRowIsVisible())
+        let recorder = try XCTUnwrap(
+            descendantViews(in: controller.window?.contentView)
+                .compactMap { $0 as? HotKeyRecorderView }
+                .first
+        )
+        recorder.beginRecording()
+        XCTAssertFalse(
+            accessibilityRowIsVisible(),
+            "a red Accessibility row appeared while the recorder was capturing"
+        )
+        recorder.cancelRecording()
+        XCTAssertFalse(
+            accessibilityRowIsVisible(),
+            "the section rendered before the delegate re-registered the shortcut"
+        )
+        controller.close()
+    }
+
+    private func activationButton(
+        in controller: SettingsWindowController
+    ) throws -> NSButton {
+        try XCTUnwrap(
+            descendantButtons(in: controller.window?.contentView)
+                .first(where: {
+                    $0.identifier?.rawValue
+                        == ChannelSetupRequirementID.activation.rawValue
+                        && $0.isHidden == false
+                }),
+            "no visible activation button"
+        )
+    }
+
+    /// A focused `NSTextField` hands first responder to the window's shared
+    /// field editor, so identity has to be read back through its delegate.
+    private func focusedTextField(
+        in controller: SettingsWindowController
+    ) -> NSTextField? {
+        let responder = controller.window?.firstResponder
+        if let field = responder as? NSTextField {
+            return field
+        }
+        return (responder as? NSTextView)?.delegate as? NSTextField
+    }
+
+    private func assertEverySetupRowIsHidden(
+        in controller: SettingsWindowController,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let buttons = descendantButtons(in: controller.window?.contentView)
+        for requirement: ChannelSetupRequirementID in [
+            .activation, .microphone, .accessibility
+        ] {
+            let button = buttons.first(where: {
+                $0.identifier?.rawValue == requirement.rawValue
+            })
+            XCTAssertNotNil(button, "\(requirement) has no button", file: file, line: line)
+            XCTAssertTrue(
+                button?.isHidden == true,
+                "\(requirement) button is still visible",
+                file: file,
+                line: line
+            )
+            XCTAssertTrue(
+                button?.superview?.isHidden == true,
+                "\(requirement) row is still visible",
+                file: file,
+                line: line
+            )
+        }
+    }
+
     private func makeController(
         profiles: [VoiceProfile],
         defaults: UserDefaults,
@@ -1291,6 +2175,51 @@ private final class AutoApplySettingsDelegate:
         _ controller: SettingsWindowController,
         isRecordingHotKey: Bool
     ) {}
+}
+
+/// Answers the two setup-related delegate questions. `delegate` is weak, so
+/// every test holds one of these in a strong local for its whole duration.
+private final class ChannelSetupSettingsDelegate:
+    SettingsWindowControllerDelegate {
+    var registration: ChannelHotKeyRegistration = .unknown
+    var registrationsByProfile: [UUID: ChannelHotKeyRegistration] = [:]
+    /// Lets a test model the app delegate, which tears every Carbon
+    /// registration down while the recorder captures and restores it after.
+    var onRecordingStateChanged: ((Bool) -> Void)?
+    private(set) var setupChangeCount = 0
+
+    func settingsController(
+        _ controller: SettingsWindowController,
+        didUpdateProfiles profiles: [VoiceProfile]
+    ) {}
+
+    func settingsController(
+        _ controller: SettingsWindowController,
+        didRecordHotKey hotKey: HotKeyConfiguration,
+        for profile: VoiceProfile
+    ) -> Bool {
+        true
+    }
+
+    func settingsController(
+        _ controller: SettingsWindowController,
+        isRecordingHotKey: Bool
+    ) {
+        onRecordingStateChanged?(isRecordingHotKey)
+    }
+
+    func settingsController(
+        _ controller: SettingsWindowController,
+        hotKeyRegistrationFor profileID: UUID
+    ) -> ChannelHotKeyRegistration {
+        registrationsByProfile[profileID] ?? registration
+    }
+
+    func settingsControllerDidChangeSetup(
+        _ controller: SettingsWindowController
+    ) {
+        setupChangeCount += 1
+    }
 }
 
 private final class SettingsCommitRecorder {

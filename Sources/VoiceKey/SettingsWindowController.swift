@@ -383,6 +383,17 @@ protocol SettingsWindowControllerDelegate: AnyObject {
     )
     func settingsController(_ controller: SettingsWindowController, isRecordingHotKey: Bool)
     func settingsControllerDidClose(_ controller: SettingsWindowController)
+    /// How this channel's shortcut is actually served right now. Only the app
+    /// delegate knows; Settings built standalone gets `.unknown`.
+    func settingsController(
+        _ controller: SettingsWindowController,
+        hotKeyRegistrationFor profileID: UUID
+    ) -> ChannelHotKeyRegistration
+    /// A real change in what the selected channel still needs — the menu title
+    /// depends on it and nothing else notices.
+    func settingsControllerDidChangeSetup(
+        _ controller: SettingsWindowController
+    )
 }
 
 extension SettingsWindowControllerDelegate {
@@ -392,6 +403,17 @@ extension SettingsWindowControllerDelegate {
     ) {}
 
     func settingsControllerDidClose(
+        _ controller: SettingsWindowController
+    ) {}
+
+    func settingsController(
+        _ controller: SettingsWindowController,
+        hotKeyRegistrationFor profileID: UUID
+    ) -> ChannelHotKeyRegistration {
+        .unknown
+    }
+
+    func settingsControllerDidChangeSetup(
         _ controller: SettingsWindowController
     ) {}
 }
@@ -498,6 +520,30 @@ final class SettingsWindowController: NSWindowController {
         )
     }
 
+    /// What the selected channel still needs, derived live. Nothing is cached
+    /// here; `renderedChannelSetup` is the only memory, and it exists to keep
+    /// the 1 Hz poll from touching the form when nothing changed.
+    var channelSetupSnapshot: ChannelSetupSnapshot {
+        guard let index = selectedProfileIndex else {
+            return ChannelSetupSnapshot(
+                outstanding: [],
+                summary: ChannelSetupPolicy.noChannelSummary
+            )
+        }
+        let profile = workingProfiles[index]
+        return ChannelSetupPolicy.snapshot(
+            profile: profile,
+            hasCredential: credentialStore.hasAPIKey(for: profile),
+            registration: delegate?.settingsController(
+                self,
+                hotKeyRegistrationFor: profile.id
+            ) ?? .unknown,
+            isRecordingHotKey: isRecordingHotKey,
+            microphone: microphoneAuthorizationProvider(),
+            isAccessibilityTrusted: isAccessibilityTrusted()
+        )
+    }
+
     private let formStackView = NSStackView()
 
     private let profilePopup = NSPopUpButton()
@@ -576,6 +622,12 @@ final class SettingsWindowController: NSWindowController {
     private let editMCPServerButton = NSButton(title: "Edit", target: nil, action: nil)
     private let removeMCPServerButton = NSButton(title: "Remove", target: nil, action: nil)
     private var mcpSectionViews: [NSView] = []
+    private let setupActivationTitleLabel =
+        NSTextField(labelWithString: "")
+    private let setupActivationStatusLabel =
+        NSTextField(labelWithString: "")
+    private let setupActivationButton =
+        NSButton(title: "", target: nil, action: nil)
     private let microphonePermissionStatusLabel =
         NSTextField(labelWithString: "")
     private let microphonePermissionButton =
@@ -584,6 +636,27 @@ final class SettingsWindowController: NSWindowController {
         NSTextField(labelWithString: "")
     private let accessibilityPermissionButton =
         NSButton(title: "", target: nil, action: nil)
+    private let setupActivationReasonLabel =
+        NSTextField(wrappingLabelWithString: "")
+    private let microphoneSetupReasonLabel =
+        NSTextField(wrappingLabelWithString: "")
+    private let accessibilitySetupReasonLabel =
+        NSTextField(wrappingLabelWithString: "")
+    private let setupSummaryLabel =
+        NSTextField(wrappingLabelWithString: "")
+    private var setupSectionHeader: NSTextField?
+    private var setupActivationRow: NSStackView?
+    private var setupActivationReasonRow: NSStackView?
+    private var microphonePermissionRow: NSStackView?
+    private var microphoneSetupReasonRow: NSStackView?
+    private var accessibilityPermissionRow: NSStackView?
+    private var accessibilitySetupReasonRow: NSStackView?
+    /// The last snapshot actually written to the form. The render runs on a
+    /// 1 Hz timer over a scrolled form, so it must be a no-op when nothing
+    /// changed.
+    private var renderedChannelSetup: ChannelSetupSnapshot?
+    private var renderedActivationAction: ChannelSetupAction?
+    private var isRecordingHotKey = false
     private let instructionsScrollView = NSScrollView()
     private let instructionsTextView = NSTextView()
     private let tipLabel = NSTextField(wrappingLabelWithString: "If the voice hears phrases you did not say, use headphones — speaker audio feeding back into the microphone causes phantom turns.")
@@ -611,7 +684,7 @@ final class SettingsWindowController: NSWindowController {
     /// Injected so credential UX can be exercised without touching the real
     /// OpenClaw install.
     private let hasDiscoveredGatewayToken: () -> Bool
-    private var permissionsTimer: Timer?
+    private var setupTimer: Timer?
     private var activationObserver: NSObjectProtocol?
     private var credentialProfileIDsBeingChanged: Set<UUID> =
         []
@@ -705,7 +778,11 @@ final class SettingsWindowController: NSWindowController {
         )
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 900),
+            // 980, not 900: a channel missing its key with a fallback shortcut
+            // and a denied microphone fits three rows and three reason lines,
+            // measured at 966pt. The reason lines are the part that answers
+            // "what does this channel still need", so the window grows instead.
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 980),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -723,7 +800,7 @@ final class SettingsWindowController: NSWindowController {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.syncPermissionsPanel()
+            self?.syncChannelSetup()
         }
 
         buildContent()
@@ -736,12 +813,22 @@ final class SettingsWindowController: NSWindowController {
         }
         recorderView.onRecordingStateChanged = { [weak self] isRecording in
             guard let self else { return }
+            // Capturing tears every Carbon registration down by design, so the
+            // section must stop reading registration state until it is over.
+            self.isRecordingHotKey = isRecording
+            // Order matters: the delegate is what tears the registrations down
+            // and puts them back. Rendering first would read the torn-down set
+            // when recording ends and paint a false "Accessibility · Needs
+            // access" row until the next poll tick. The flag above already
+            // suppresses that row on the way in, so rendering last is correct
+            // in both directions.
             self.delegate?.settingsController(self, isRecordingHotKey: isRecording)
+            self.syncChannelSetup()
         }
     }
 
     deinit {
-        permissionsTimer?.invalidate()
+        setupTimer?.invalidate()
         if let activationObserver {
             NotificationCenter.default.removeObserver(
                 activationObserver
@@ -759,8 +846,8 @@ final class SettingsWindowController: NSWindowController {
     }
 
     func showAndFocus() {
-        syncPermissionsPanel()
-        startPermissionsPolling()
+        syncChannelSetup()
+        startSetupPolling()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -789,6 +876,11 @@ final class SettingsWindowController: NSWindowController {
     }
 
     func beginHotKeyRecording() {
+        // The recorder only sees key events as first responder. Clicking the
+        // field does this in `mouseDown`; arming it from the Setup section's
+        // Record… button has to do it here, or the shortcut is typed into
+        // whichever field still holds focus while every registration is down.
+        window?.makeFirstResponder(recorderView)
         recorderView.beginRecording()
     }
 
@@ -819,7 +911,15 @@ final class SettingsWindowController: NSWindowController {
         NSLayoutConstraint.activate([
             formStackView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             formStackView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            formStackView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor)
+            formStackView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            // NSClipView is unflipped, so a document shorter than the clip is
+            // parked against the *bottom* and the form floats down the window:
+            // measured 64pt of blank above the first header at 900pt and 144pt
+            // at 980pt, tracking the window height 1:1. Making the document
+            // fill the clip keeps the form at the top at every size.
+            formStackView.heightAnchor.constraint(
+                greaterThanOrEqualTo: scrollView.contentView.heightAnchor
+            )
         ])
 
         configureProfileControls()
@@ -829,7 +929,7 @@ final class SettingsWindowController: NSWindowController {
         configureInstructionsEditor()
         configureStaticControls()
         configureMCPServerControls()
-        configurePermissionControls()
+        configureSetupControls()
 
         // Voice channel: picker with add/delete/duplicate, plus the display name.
         addSection(VoiceChannelUIStrings.channelSectionTitle)
@@ -840,6 +940,12 @@ final class SettingsWindowController: NSWindowController {
         let nameRow = makeRow(label: "Name", views: [nameField], stretching: nameField)
         addArranged(nameRow)
         endSection(after: nameRow)
+
+        // Directly under the channel picker: the only placement that is above
+        // the fold at the default size for every provider, including OpenClaw
+        // whose runtime block is long. A freshly added channel always has
+        // something outstanding, so this is what the owner should see first.
+        buildSetupSection()
 
         // Voice Provider: adapter choice plus its model/voice/endpoint knobs.
         addSection("Voice Provider")
@@ -1080,23 +1186,6 @@ final class SettingsWindowController: NSWindowController {
         addArranged(connectionTestRow)
         endSection(after: connectionTestRow)
 
-        // Permissions: live state with a concrete action for each missing
-        // capability.
-        addSection("Permissions")
-        let microphoneRow = makePermissionRow(
-            title: "Microphone",
-            statusLabel: microphonePermissionStatusLabel,
-            actionButton: microphonePermissionButton
-        )
-        addArranged(microphoneRow)
-        let accessibilityRow = makePermissionRow(
-            title: "Accessibility",
-            statusLabel: accessibilityPermissionStatusLabel,
-            actionButton: accessibilityPermissionButton
-        )
-        addArranged(accessibilityRow)
-        endSection(after: accessibilityRow)
-
         // Instructions: system prompt for the selected voice channel.
         addSection("Instructions")
         addArranged(instructionsScrollView)
@@ -1108,6 +1197,56 @@ final class SettingsWindowController: NSWindowController {
         formStackView.setCustomSpacing(12, after: footerSeparator)
         addArranged(tipLabel)
         addArranged(formStatusLabel)
+    }
+
+    /// Every view the Setup section can ever show is built here, once. Render
+    /// only writes `stringValue` / `title` / `textColor` / `isHidden`: a
+    /// rebuild on the 1 Hz timer would re-activate constraints on a scrolled
+    /// form forever, and a rebuild landing between mouse-down and mouse-up
+    /// swallows the click.
+    private func buildSetupSection() {
+        setupSectionHeader = addSection("Setup")
+
+        let activationRow = makeRequirementRow(
+            titleLabel: setupActivationTitleLabel,
+            statusLabel: setupActivationStatusLabel,
+            actionButton: setupActivationButton
+        )
+        setupActivationRow = activationRow
+        addArranged(activationRow)
+        formStackView.setCustomSpacing(4, after: activationRow)
+        let activationReasonRow = indentedRow(setupActivationReasonLabel)
+        setupActivationReasonRow = activationReasonRow
+        addArranged(activationReasonRow)
+
+        let microphoneRow = makePermissionRow(
+            title: "Microphone",
+            statusLabel: microphonePermissionStatusLabel,
+            actionButton: microphonePermissionButton
+        )
+        microphonePermissionRow = microphoneRow
+        addArranged(microphoneRow)
+        formStackView.setCustomSpacing(4, after: microphoneRow)
+        let microphoneReasonRow = indentedRow(microphoneSetupReasonLabel)
+        microphoneSetupReasonRow = microphoneReasonRow
+        addArranged(microphoneReasonRow)
+
+        let accessibilityRow = makePermissionRow(
+            title: "Accessibility",
+            statusLabel: accessibilityPermissionStatusLabel,
+            actionButton: accessibilityPermissionButton
+        )
+        accessibilityPermissionRow = accessibilityRow
+        addArranged(accessibilityRow)
+        formStackView.setCustomSpacing(4, after: accessibilityRow)
+        let accessibilityReasonRow = indentedRow(
+            accessibilitySetupReasonLabel
+        )
+        accessibilitySetupReasonRow = accessibilityReasonRow
+        addArranged(accessibilityReasonRow)
+
+        addArranged(setupSummaryLabel)
+        endSection(after: setupSummaryLabel)
     }
 
     private func configureProfileControls() {
@@ -1241,8 +1380,9 @@ final class SettingsWindowController: NSWindowController {
             #selector(removeMCPServerWithConfirmation)
     }
 
-    private func configurePermissionControls() {
+    private func configureSetupControls() {
         for label in [
+            setupActivationStatusLabel,
             microphonePermissionStatusLabel,
             accessibilityPermissionStatusLabel
         ] {
@@ -1252,19 +1392,30 @@ final class SettingsWindowController: NSWindowController {
             )
             label.alignment = .right
         }
-        for button in [
-            microphonePermissionButton,
-            accessibilityPermissionButton
+        for (button, requirement) in [
+            (setupActivationButton, ChannelSetupRequirementID.activation),
+            (microphonePermissionButton, .microphone),
+            (accessibilityPermissionButton, .accessibility)
         ] {
             button.bezelStyle = .rounded
             button.controlSize = .small
             button.target = self
+            // Tests target identity, not prose.
+            button.identifier = NSUserInterfaceItemIdentifier(
+                requirement.rawValue
+            )
+            button.action = #selector(handleSetupRequirementAction(_:))
         }
-        microphonePermissionButton.action =
-            #selector(handleMicrophonePermissionAction)
-        accessibilityPermissionButton.action =
-            #selector(handleAccessibilityPermissionAction)
-        syncPermissionsPanel()
+        for label in [
+            setupActivationReasonLabel,
+            microphoneSetupReasonLabel,
+            accessibilitySetupReasonLabel,
+            setupSummaryLabel
+        ] {
+            label.font = NSFont.systemFont(ofSize: 11)
+            label.textColor = .secondaryLabelColor
+            label.maximumNumberOfLines = 3
+        }
     }
 
     private func configureInstructionsEditor() {
@@ -1364,9 +1515,18 @@ final class SettingsWindowController: NSWindowController {
         statusLabel: NSTextField,
         actionButton: NSButton
     ) -> NSStackView {
-        let titleLabel = NSTextField(
-            labelWithString: title
+        makeRequirementRow(
+            titleLabel: NSTextField(labelWithString: title),
+            statusLabel: statusLabel,
+            actionButton: actionButton
         )
+    }
+
+    private func makeRequirementRow(
+        titleLabel: NSTextField,
+        statusLabel: NSTextField,
+        actionButton: NSButton
+    ) -> NSStackView {
         styleFormLabel(titleLabel)
         let spacer = NSView()
         spacer.setContentHuggingPriority(
@@ -1412,11 +1572,13 @@ final class SettingsWindowController: NSWindowController {
     }
 
     /// Adds a bold section header followed by a hairline separator.
-    private func addSection(_ title: String) {
+    @discardableResult
+    private func addSection(_ title: String) -> NSTextField {
         let header = sectionLabel(title)
         addArranged(header)
         formStackView.setCustomSpacing(4, after: header)
         addArranged(makeSeparator())
+        return header
     }
 
     /// Restores the wider 20pt rhythm between one section and the next header.
@@ -1657,6 +1819,7 @@ final class SettingsWindowController: NSWindowController {
         syncOpenClawConnectionTest(for: profile)
         syncMCPServerControls(for: profile)
         syncOpenClawRuntimePanel(for: profile)
+        syncChannelSetup()
 
         clearFormStatus()
     }
@@ -1689,6 +1852,7 @@ final class SettingsWindowController: NSWindowController {
         for view in mcpSectionViews + openClawRuntimeSectionViews {
             view.isHidden = true
         }
+        syncChannelSetup()
         clearFormStatus()
     }
 
@@ -1937,6 +2101,7 @@ final class SettingsWindowController: NSWindowController {
         )
         guard commitNewProfile(profile) else { return }
         selectProfile(id: profile.id)
+        revealChannelSetup()
     }
 
     @discardableResult
@@ -1965,6 +2130,7 @@ final class SettingsWindowController: NSWindowController {
             return
         }
         selectProfile(id: copy.id)
+        revealChannelSetup()
     }
 
     @discardableResult
@@ -2653,19 +2819,110 @@ final class SettingsWindowController: NSWindowController {
         }
     }
 
-    private func syncPermissionsPanel() {
-        let snapshot = permissionsSnapshot
-        renderPermissionRow(
-            snapshot.microphone,
+    private func syncChannelSetup() {
+        let snapshot = channelSetupSnapshot
+        let hadPrevious = renderedChannelSetup != nil
+        // Required, not polish: this runs on a repeating 1 Hz timer over a
+        // scrolled form.
+        guard snapshot != renderedChannelSetup else { return }
+        renderedChannelSetup = snapshot
+
+        let activation = snapshot.outstanding.first(where: {
+            $0.id == .activation
+        })
+        renderedActivationAction = activation?.action
+        if let activation {
+            setupActivationTitleLabel.stringValue = activation.title
+        }
+        renderSetupRequirement(
+            activation,
+            row: setupActivationRow,
+            statusLabel: setupActivationStatusLabel,
+            button: setupActivationButton,
+            reasonLabel: setupActivationReasonLabel,
+            reasonRow: setupActivationReasonRow
+        )
+        renderSetupRequirement(
+            snapshot.outstanding.first(where: { $0.id == .microphone }),
+            row: microphonePermissionRow,
             statusLabel: microphonePermissionStatusLabel,
-            button: microphonePermissionButton
+            button: microphonePermissionButton,
+            reasonLabel: microphoneSetupReasonLabel,
+            reasonRow: microphoneSetupReasonRow
         )
+        renderSetupRequirement(
+            snapshot.outstanding.first(where: { $0.id == .accessibility }),
+            row: accessibilityPermissionRow,
+            statusLabel: accessibilityPermissionStatusLabel,
+            button: accessibilityPermissionButton,
+            reasonLabel: accessibilitySetupReasonLabel,
+            reasonRow: accessibilitySetupReasonRow
+        )
+
+        setupSummaryLabel.stringValue = snapshot.summary
+        setupSummaryLabel.isHidden = snapshot.summary.isEmpty
+        restoreSetupSectionSpacing()
+
+        if hadPrevious {
+            delegate?.settingsControllerDidChangeSetup(self)
+        }
+    }
+
+    /// Writes one requirement's row. `isHidden` is assigned on the row *and*
+    /// its button every time, satisfied or not: hiding only the containing row
+    /// leaves a stale button findable and clickable.
+    private func renderSetupRequirement(
+        _ requirement: ChannelSetupRequirement?,
+        row: NSStackView?,
+        statusLabel: NSTextField,
+        button: NSButton,
+        reasonLabel: NSTextField,
+        reasonRow: NSStackView?
+    ) {
+        guard let requirement else {
+            row?.isHidden = true
+            button.isHidden = true
+            reasonRow?.isHidden = true
+            reasonLabel.stringValue = ""
+            return
+        }
+        row?.isHidden = false
         renderPermissionRow(
-            snapshot.accessibility,
-            statusLabel:
-                accessibilityPermissionStatusLabel,
-            button: accessibilityPermissionButton
+            requirement.row,
+            statusLabel: statusLabel,
+            button: button
         )
+        reasonLabel.stringValue = requirement.reason
+        reasonRow?.isHidden = false
+    }
+
+    /// `endSection(after:)` pinned the 20pt gap to the summary label, which is
+    /// hidden whenever anything is outstanding — and `NSStackView` detaches
+    /// hidden arranged subviews, taking the custom spacing with them. Re-pin it
+    /// to whatever is actually last.
+    private func restoreSetupSectionSpacing() {
+        // A requirement row keeps its reason line tight at 4pt; everything else
+        // takes the form's default rhythm.
+        let candidates: [(NSView?, CGFloat)] = [
+            (setupActivationRow, 4),
+            (setupActivationReasonRow, NSStackView.useDefaultSpacing),
+            (microphonePermissionRow, 4),
+            (microphoneSetupReasonRow, NSStackView.useDefaultSpacing),
+            (accessibilityPermissionRow, 4),
+            (accessibilitySetupReasonRow, NSStackView.useDefaultSpacing),
+            (setupSummaryLabel, NSStackView.useDefaultSpacing)
+        ]
+        let sectionViews: [(NSView, CGFloat)] = candidates.compactMap {
+            view, spacing in
+            view.map { ($0, spacing) }
+        }
+        let last = sectionViews.last(where: { $0.0.isHidden == false })?.0
+        for (view, spacing) in sectionViews {
+            formStackView.setCustomSpacing(
+                view === last ? 20 : spacing,
+                after: view
+            )
+        }
     }
 
     private func renderPermissionRow(
@@ -2680,49 +2937,94 @@ final class SettingsWindowController: NSWindowController {
         button.isHidden = snapshot.actionTitle == nil
     }
 
-    private func startPermissionsPolling() {
-        permissionsTimer?.invalidate()
-        permissionsTimer = Timer(
+    private func startSetupPolling() {
+        setupTimer?.invalidate()
+        setupTimer = Timer(
             timeInterval: 1,
             repeats: true
         ) { [weak self] _ in
-            self?.syncPermissionsPanel()
+            self?.syncChannelSetup()
         }
-        if let permissionsTimer {
+        if let setupTimer {
             RunLoop.main.add(
-                permissionsTimer,
+                setupTimer,
                 forMode: .common
             )
         }
     }
 
-    @objc private func handleMicrophonePermissionAction() {
-        switch microphoneAuthorizationProvider() {
-        case .notDetermined:
-            requestMicrophoneAccess { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.syncPermissionsPanel()
+    /// The only place in this file that reaches `requestMicrophoneAccess` or
+    /// `requestAccessibilityAccess`. That is the mechanical guarantee that
+    /// adding a channel — or rendering the section at 1 Hz — never fires an OS
+    /// permission prompt: a prompt requires this click.
+    @objc private func handleSetupRequirementAction(
+        _ sender: NSButton
+    ) {
+        guard let rawValue = sender.identifier?.rawValue,
+              let requirement = ChannelSetupRequirementID(
+                  rawValue: rawValue
+              ) else {
+            return
+        }
+        switch requirement {
+        case .activation:
+            handleActivationRequirementAction()
+        case .microphone:
+            switch microphoneAuthorizationProvider() {
+            case .notDetermined:
+                requestMicrophoneAccess { [weak self] _ in
+                    DispatchQueue.main.async {
+                        self?.syncChannelSetup()
+                    }
                 }
+            case .denied, .restricted:
+                openSettingsPane(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+                )
+            case .authorized:
+                syncChannelSetup()
             }
-        case .denied, .restricted:
+        case .accessibility:
+            guard isAccessibilityTrusted() == false else {
+                syncChannelSetup()
+                return
+            }
+            requestAccessibilityAccess()
             openSettingsPane(
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
             )
-        case .authorized:
-            syncPermissionsPanel()
+            syncChannelSetup()
         }
     }
 
-    @objc private func handleAccessibilityPermissionAction() {
-        guard isAccessibilityTrusted() == false else {
-            syncPermissionsPanel()
-            return
+    private func handleActivationRequirementAction() {
+        switch renderedActivationAction {
+        case .recordHotKey:
+            scrollIntoView(recorderView)
+            beginHotKeyRecording()
+        case .focusEndpoint:
+            scrollIntoView(endpointRow)
+            window?.makeFirstResponder(endpointField)
+        case .focusCredential:
+            scrollIntoView(apiKeyField)
+            window?.makeFirstResponder(apiKeyField)
+        case .requestMicrophone, .requestAccessibility, .none:
+            break
         }
-        requestAccessibilityAccess()
-        openSettingsPane(
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-        )
-        syncPermissionsPanel()
+    }
+
+    private func scrollIntoView(_ view: NSView) {
+        formStackView.layoutSubtreeIfNeeded()
+        view.scrollToVisible(view.bounds)
+    }
+
+    /// Puts the Setup header on screen after a channel is added. Deliberately
+    /// does not move first responder — the owner is expected to be naming the
+    /// channel.
+    private func revealChannelSetup() {
+        guard let setupSectionHeader else { return }
+        formStackView.layoutSubtreeIfNeeded()
+        setupSectionHeader.scrollToVisible(setupSectionHeader.bounds)
     }
 
     private func openSettingsPane(_ string: String) {
@@ -2871,8 +3173,8 @@ extension SettingsWindowController: NSTextViewDelegate {
 
 extension SettingsWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
-        permissionsTimer?.invalidate()
-        permissionsTimer = nil
+        setupTimer?.invalidate()
+        setupTimer = nil
         openClawConnectionTest?.cancel()
         openClawConnectionTest = nil
         commitFocusedControl()
@@ -2882,8 +3184,8 @@ extension SettingsWindowController: NSWindowDelegate {
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        syncPermissionsPanel()
-        startPermissionsPolling()
+        syncChannelSetup()
+        startSetupPolling()
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -2892,8 +3194,15 @@ extension SettingsWindowController: NSWindowDelegate {
 }
 
 final class VoiceChannelProviderPickerView: NSView {
+    private static let width: CGFloat = 440
+
     private let popup = NSPopUpButton()
     private let descriptionLabel = NSTextField(wrappingLabelWithString: "")
+    /// What this channel will still need after it exists. Static copy from a
+    /// pure function: nothing here reads live permission state, so it can never
+    /// prompt while the modal owns the run loop.
+    private let requirementsLabel = NSTextField(wrappingLabelWithString: "")
+    private let stack = NSStackView()
 
     var selectedProvider: VoiceProviderID? {
         guard let rawValue = popup.selectedItem?.representedObject as? String else {
@@ -2923,8 +3232,19 @@ final class VoiceChannelProviderPickerView: NSView {
         descriptionLabel.font = NSFont.systemFont(ofSize: 12)
         descriptionLabel.textColor = .secondaryLabelColor
         descriptionLabel.translatesAutoresizingMaskIntoConstraints = false
+        requirementsLabel.font = NSFont.systemFont(ofSize: 11)
+        requirementsLabel.textColor = .secondaryLabelColor
+        requirementsLabel.translatesAutoresizingMaskIntoConstraints = false
+        // Both wrapping labels need a width to wrap at before `fittingSize`
+        // can report an honest height.
+        for label in [descriptionLabel, requirementsLabel] {
+            label.preferredMaxLayoutWidth = Self.width
+        }
 
-        let stack = NSStackView(views: [popup, descriptionLabel])
+        stack.setViews(
+            [popup, descriptionLabel, requirementsLabel],
+            in: .top
+        )
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -2934,9 +3254,41 @@ final class VoiceChannelProviderPickerView: NSView {
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.topAnchor.constraint(equalTo: topAnchor),
+            // The reserved height below fits the tallest provider, so this pin
+            // never binds; it stays as the loud failure if that ever stops
+            // being true, instead of silent clipping.
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
             popup.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
+
+        // NSAlert lays its accessory view out exactly once, before `runModal()`
+        // returns, and ignores any later frame change: resizing on every popup
+        // change slid the popup up over the alert's informative text for the
+        // three providers whose requirements line wraps. So reserve the tallest
+        // provider's height up front and never touch the frame again.
+        let reserved = tallestProviderHeight()
         selectionChanged()
+        // Both the frame and `fittingSize` have to report the reserved height,
+        // because which of the two NSAlert measures is not contractual: with
+        // only the frame set, `fittingSize` still shrank to 69pt for Gemini and
+        // 84pt for OpenAI, and an alert sized from that clips the two-line
+        // providers.
+        heightAnchor.constraint(equalToConstant: reserved).isActive = true
+        frame = NSRect(x: 0, y: 0, width: Self.width, height: reserved)
+    }
+
+    /// Measures the wrapped height of every provider's copy, so the reserved
+    /// height is a measurement rather than a guessed constant.
+    private func tallestProviderHeight() -> CGFloat {
+        var tallest: CGFloat = 0
+        for provider in VoiceProviderID.allCases {
+            descriptionLabel.stringValue = provider.settingsDescription
+            requirementsLabel.stringValue =
+                ChannelSetupPolicy.requirementSummary(for: provider)
+            layoutSubtreeIfNeeded()
+            tallest = max(tallest, stack.fittingSize.height)
+        }
+        return tallest
     }
 
     @available(*, unavailable)
@@ -2947,6 +3299,12 @@ final class VoiceChannelProviderPickerView: NSView {
     @objc private func selectionChanged() {
         descriptionLabel.stringValue =
             selectedProvider?.settingsDescription ?? ""
+        requirementsLabel.stringValue = selectedProvider.map {
+            ChannelSetupPolicy.requirementSummary(for: $0)
+        } ?? ""
+        // Deliberately no frame change: the height reserved in `init` already
+        // fits the tallest provider, and the alert cannot re-lay-out.
+        layoutSubtreeIfNeeded()
     }
 }
 
