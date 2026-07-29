@@ -3,15 +3,19 @@ import Foundation
 struct VoiceSessionLog: Equatable {
     private enum Entry: Equatable {
         case status(timestamp: Date, provider: VoiceProviderID, title: String)
-        case transcript(timestamp: Date, provider: VoiceProviderID, text: String)
+        case transcript(
+            timestamp: Date,
+            provider: VoiceProviderID,
+            summary: PublishableTranscriptSummary
+        )
         case diagnostic(timestamp: Date, provider: VoiceProviderID, text: String)
 
         var line: String {
             switch self {
             case let .status(timestamp, provider, title):
                 return "\(prefix(timestamp: timestamp, provider: provider)) status: \(title)"
-            case let .transcript(timestamp, provider, text):
-                return "\(prefix(timestamp: timestamp, provider: provider)) transcript: \(text)"
+            case let .transcript(timestamp, provider, summary):
+                return "\(prefix(timestamp: timestamp, provider: provider)) transcript: \(summary.text)"
             case let .diagnostic(timestamp, provider, text):
                 return "\(prefix(timestamp: timestamp, provider: provider)) diagnostic: \(text)"
             }
@@ -64,16 +68,31 @@ struct VoiceSessionLog: Equatable {
     }
 
     private mutating func appendTranscriptDelta(_ delta: String, provider: VoiceProviderID, timestamp: Date) {
-        guard delta.isEmpty == false else { return }
-
-        if let last = entries.last,
-           case let .transcript(lastTimestamp, lastProvider, text) = last,
-           lastProvider == provider {
-            entries[entries.count - 1] = .transcript(timestamp: lastTimestamp, provider: provider, text: text + delta)
+        guard let summary = PublishableTranscriptSummary(delta: delta) else {
             return
         }
 
-        entries.append(.transcript(timestamp: timestamp, provider: provider, text: delta))
+        if let last = entries.last,
+           case let .transcript(
+               lastTimestamp,
+               lastProvider,
+               lastSummary
+           ) = last,
+           lastProvider == provider,
+           let combined = lastSummary.appending(summary) {
+            entries[entries.count - 1] = .transcript(
+                timestamp: lastTimestamp,
+                provider: provider,
+                summary: combined
+            )
+            return
+        }
+
+        entries.append(.transcript(
+            timestamp: timestamp,
+            provider: provider,
+            summary: summary
+        ))
     }
 
     private mutating func appendDiagnostic(_ message: String, provider: VoiceProviderID, timestamp: Date) {

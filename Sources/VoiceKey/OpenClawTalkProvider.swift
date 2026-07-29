@@ -1587,7 +1587,10 @@ final class OpenClawTalkProvider: NSObject, RealtimeVoiceProvider {
         relaySessionID = nil
         currentEndpoint = endpoint
         handshakePhase = .awaitingSocketOpen
-        emit(.diagnostic("Connecting to OpenClaw gateway at \(endpoint)."))
+        let publishableEndpoint = PublishableDiagnosticEndpoint(endpoint)
+        emit(.diagnostic(
+            "Connecting to OpenClaw gateway at \(publishableEndpoint)."
+        ))
         let socket = webSocketFactory(request)
         socket.onOpen = { [weak self, weak socket] in
             guard let socket else { return }

@@ -2,7 +2,6 @@ import Foundation
 
 struct VoiceKeyDiagnosticsSnapshot {
     var provider: VoiceProviderID
-    var configuration: VoiceSessionConfiguration
     var readiness: VoiceProviderReadiness
     var hotKeys: [String]
     var currentStatus: ProviderStatus
@@ -10,6 +9,35 @@ struct VoiceKeyDiagnosticsSnapshot {
     var supportsProviderInterface: Bool
     var supportsConnectionCheck: Bool
     var hasSessionLog: Bool
+    private var model: String
+    private var voice: String
+    private var endpoint: PublishableDiagnosticEndpoint?
+
+    init(
+        provider: VoiceProviderID,
+        configuration: VoiceSessionConfiguration,
+        readiness: VoiceProviderReadiness,
+        hotKeys: [String],
+        currentStatus: ProviderStatus,
+        hasAPIKey: Bool,
+        supportsProviderInterface: Bool,
+        supportsConnectionCheck: Bool,
+        hasSessionLog: Bool
+    ) {
+        self.provider = provider
+        self.readiness = readiness
+        self.hotKeys = hotKeys
+        self.currentStatus = currentStatus
+        self.hasAPIKey = hasAPIKey
+        self.supportsProviderInterface = supportsProviderInterface
+        self.supportsConnectionCheck = supportsConnectionCheck
+        self.hasSessionLog = hasSessionLog
+        model = configuration.model
+        voice = configuration.voice
+        endpoint = configuration.endpointURL.isEmpty
+            ? nil
+            : PublishableDiagnosticEndpoint(configuration.endpointURL)
+    }
 
     var displayText: String {
         var lines = [
@@ -19,11 +47,11 @@ struct VoiceKeyDiagnosticsSnapshot {
             "Provider implemented: \(yesNo(provider.isImplemented))",
             "Readiness: \(readinessTitle)",
             "API key: \(apiKeyStatus)",
-            "Model: \(configuration.model)",
-            "Voice: \(configuration.voice)"
+            "Model: \(model)",
+            "Voice: \(voice)"
         ]
-        if configuration.endpointURL.isEmpty == false {
-            lines.append("Endpoint: \(configuration.endpointURL)")
+        if let endpoint {
+            lines.append("Endpoint: \(endpoint)")
         }
         if hotKeys.isEmpty {
             lines.append("Hotkeys: none")
