@@ -2,6 +2,26 @@ import AppKit
 import ApplicationServices
 import WebKit
 
+enum WebMediaCapturePermissionPolicy {
+    enum Decision: Equatable {
+        case grant
+        case prompt
+    }
+
+    static func decision(forHost host: String) -> Decision {
+        let normalizedHost = host.lowercased()
+        let allowedHosts = ["chatgpt.com", "openai.com"]
+        let isAllowed = allowedHosts.contains { allowedHost in
+            normalizedHost == allowedHost || normalizedHost.hasSuffix(".\(allowedHost)")
+        }
+
+        if isAllowed {
+            return .grant
+        }
+        return .prompt
+    }
+}
+
 final class WebWindowController: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate {
     /// Presented to every host EXCEPT Google's OAuth pages (see
     /// decidePolicyFor): chatgpt.com strips GPT-Live's server-side tools
@@ -184,10 +204,11 @@ final class WebWindowController: NSObject, NSWindowDelegate, WKNavigationDelegat
         type: WKMediaCaptureType,
         decisionHandler: @escaping (WKPermissionDecision) -> Void
     ) {
-        if origin.host.contains("chatgpt.com") || origin.host.contains("openai.com") {
+        switch WebMediaCapturePermissionPolicy.decision(forHost: origin.host) {
+        case .grant:
             onDiagnostic?("Granting microphone capture permission for \(origin.host)")
             decisionHandler(.grant)
-        } else {
+        case .prompt:
             onDiagnostic?("Prompting for microphone capture permission for \(origin.host)")
             decisionHandler(.prompt)
         }
