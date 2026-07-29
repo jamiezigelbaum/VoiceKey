@@ -68,10 +68,20 @@ final class AppleScriptMediaPlayerScriptingTests: XCTestCase {
 
     func testStateSourceReadsPlayerStateWithoutCoercingIt() {
         let source = AppleScriptMediaPlayerScripting.stateSource(for: .music)
+        let terminationSource =
+            AppleScriptMediaPlayerScripting.stateSource(
+                for: .music,
+                timeoutSeconds: AppleScriptMediaPlayerScripting
+                    .terminationAppleEventTimeoutSeconds
+            )
 
         XCTAssertTrue(source.contains("set currentState to player state"))
         XCTAssertTrue(source.contains("if currentState is playing"))
         XCTAssertTrue(source.contains("if currentState is paused"))
+        XCTAssertTrue(
+            terminationSource.contains("with timeout of 1 seconds"),
+            "termination inherited the consent-capable 30-second timeout"
+        )
         XCTAssertFalse(
             source.contains("as text"),
             "coercing the ePlS enumeration is the part that differs between "
