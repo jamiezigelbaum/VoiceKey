@@ -2,6 +2,31 @@
 import XCTest
 
 final class WebWindowControllerTests: XCTestCase {
+    func testMediaCapturePermissionRequiresAnExactAllowedHostOrTrueSubdomain() {
+        let cases: [(host: String, expected: WebMediaCapturePermissionPolicy.Decision)] = [
+            ("chatgpt.com", .grant),
+            ("openai.com", .grant),
+            ("auth.openai.com", .grant),
+            ("chat.chatgpt.com", .grant),
+            ("openai.com.attacker.example", .prompt),
+            ("chatgpt.com.evil.test", .prompt),
+            ("notopenai.com", .prompt),
+            ("myopenai.com.co", .prompt),
+            ("openai.company", .prompt),
+            ("evil.com/openai.com", .prompt),
+            ("", .prompt),
+            ("AuTh.OpEnAi.CoM", .grant),
+        ]
+
+        for testCase in cases {
+            XCTAssertEqual(
+                WebMediaCapturePermissionPolicy.decision(forHost: testCase.host),
+                testCase.expected,
+                "Unexpected media capture permission for host \(testCase.host)"
+            )
+        }
+    }
+
     func testWebViewPresentsSafariUserAgent() {
         // chatgpt.com strips GPT-Live's server-side tools (web search) when
         // it sees a bare WKWebView embed UA (verified live 2026-07-24).
