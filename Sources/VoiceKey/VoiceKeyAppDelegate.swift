@@ -48,6 +48,10 @@ enum ActiveVoiceProfileLifecycle {
 
 final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private static let hotKeyDebounceInterval: TimeInterval = 0.25
+    /// How long the app's intent to start a channel may hold other media paused
+    /// on its own. Every provider reports `.starting` in the turn it starts, so
+    /// this only ever fires for a channel that did not.
+    private static let mediaPlaybackRequestTimeout: TimeInterval = 5
     private static let microphonePrivacySettingsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
 
     private let isFreshInstallAtLaunch =
@@ -73,6 +77,10 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private var globalHotKeyMonitor: Any?
     private let iconAnimator = MenuBarIconAnimator()
     private let stopWatchdog = StopWatchdog()
+    private let mediaPlayback = MediaPlaybackController(
+        scripting: AppleScriptMediaPlayerScripting()
+    )
+    private var mediaPlaybackChannels = MediaPlaybackChannelPolicy()
     private var isAccessibilityTrusted: () -> Bool = {
         AXIsProcessTrusted()
     }
@@ -114,6 +122,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private let settingsMenuItem = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        configureMediaPlaybackLogging()
         if let selectedProfile {
             providerConfiguration = sessionConfiguration(for: selectedProfile)
         }
@@ -140,6 +149,16 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // The hotkey is toggle-to-stop, so quitting with a channel still open
+        // is an ordinary way for a session to end — and it is the one ending
+        // that produces no status. Without this the owner quits VoiceKey and
+        // their music stays paused with nothing left running that could ever
+        // put it back.
+        mediaPlaybackChannels.runtimeWasReset()
+        mediaPlayback.resumeBeforeTermination()
     }
 
     private var selectedProfile: VoiceProfile? {
@@ -451,8 +470,68 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
         voiceProvider?.stopVoice()
 
         activeProfileID = profile.id
+        // The app has committed to this channel, so other media stays paused
+        // from here. The stop above reports `.ready` a turn or two from now,
+        // and without this the owner's music would come back in the gap
+        // between the outgoing session and the incoming one.
+        mediaPlaybackChannels.channelRequested(profile.id)
+        // Held directly, not folded through the policy: `currentStatus` here is
+        // the *outgoing* session's, and handing it to the policy as if it were
+        // news from the incoming channel is what used to clear the hold on its
+        // first evaluation. The app does not have to infer which channel holds
+        // the audio session — it just decided.
+        mediaPlayback.setActiveChannel(profile.id)
+        armMediaPlaybackRequestTimeout()
         updateProviderConfiguration(sessionConfiguration(for: profile))
         voiceProvider?.toggleVoice()
+    }
+
+    /// The one place that observes "is any channel active" changing.
+    ///
+    /// Driven by the status funnel, so it is self-healing: whatever ends a
+    /// session — the owner, a provider error, the stop watchdog — ends with a
+    /// status that is not live, and the music comes back. Nothing here can
+    /// block or fail the session, because the controller returns before its
+    /// scripting layer answers.
+    private func syncMediaPlayback() {
+        mediaPlayback.setActiveChannel(
+            mediaPlaybackChannels.activeChannel(
+                activeProfileID: activeProfileID,
+                status: currentStatus
+            )
+        )
+    }
+
+    /// The hold on other media is the app's intent, and an intent can go
+    /// unfulfilled without ever producing a status to say so. This is what
+    /// stops that from stranding the owner's music: whatever happens, the hold
+    /// ends. If the channel did start, the live status is holding it by then
+    /// and this changes nothing.
+    private func armMediaPlaybackRequestTimeout() {
+        let generation = mediaPlaybackChannels.requestGeneration
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.mediaPlaybackRequestTimeout
+        ) { [weak self] in
+            guard let self else { return }
+            self.mediaPlaybackChannels.requestDidExpire(
+                generation: generation
+            )
+            self.syncMediaPlayback()
+        }
+    }
+
+    private func configureMediaPlaybackLogging() {
+        mediaPlayback.onDiagnostic = { [weak self] message in
+            // Arrives on the media queue; everything below is AppKit.
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.recordProviderEvent(
+                    .diagnostic(message),
+                    provider: self.selectedProfile?.providerID
+                        ?? self.providerConfiguration.providerID
+                )
+            }
+        }
     }
 
     private func handleActivationFailure(
@@ -776,6 +855,7 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
             appOwnedAttention = nil
         }
         currentStatus = status
+        syncMediaPlayback()
         statusMenuItem.title = "Status: \(status.menuTitle)"
         if let detail = status.detail {
             statusMenuItem.title = "Status: \(status.menuTitle) - \(detail)"
@@ -970,6 +1050,13 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
             newProfiles: sortedProfiles,
             provider: voiceProvider
         )
+        if activeProfileID == nil {
+            // The live channel was deleted out from under the session. Nobody
+            // is going to report a status for it, so release the music here
+            // rather than wait for one.
+            mediaPlaybackChannels.runtimeWasReset()
+            syncMediaPlayback()
+        }
 
         profiles = sortedProfiles
         registerAllHotKeys()
@@ -996,6 +1083,9 @@ extension VoiceKeyAppDelegate: SettingsWindowControllerDelegate {
         voiceProvider = nil
         activeProfileID = nil
         appOwnedAttention = nil
+        // There is no runtime left to honour a pending request, so it must not
+        // go on holding the owner's music. updateStatus below resumes it.
+        mediaPlaybackChannels.runtimeWasReset()
         updateStatus(.ready)
     }
 

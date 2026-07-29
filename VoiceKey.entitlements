@@ -9,5 +9,14 @@
        every fresh Mac; found on first fresh-hardware test 2026-07-24). -->
   <key>com.apple.security.device.audio-input</key>
   <true/>
+
+  <!-- Same trap, second instance: under the hardened runtime an Apple Event
+       to another app is refused unless this is present, and Info.plist must
+       carry NSAppleEventsUsageDescription before macOS will even prompt.
+       Without both, pausing the owner's music fails silently on a notarized
+       build — no prompt, no error, nothing in the log — exactly the way the
+       microphone entitlement above shipped a dead mic. -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
 </dict>
 </plist>

@@ -18,6 +18,7 @@ can be re-verified after an upstream upgrade instead of re-derived.
 | `probe-mcp-continuation.js` | Does the OpenAI Realtime API auto-continue after a server-side MCP call? (No — the client must send `response.create`, and must loop, because the follow-up can chain another call.) |
 | `probe-echo-fields.js` | Which echo/barge-in session fields does the real Realtime endpoint accept, and what does `session.updated` echo back? |
 | `probe-truncate.js` | The exact accepted shapes for client-side interruption (`response.cancel` + `conversation.item.truncate`). |
+| `probe-media-scripting.swift` | Does `NSAppleScript` work off the main thread, do VoiceKey's pause/play/state sources compile against the real Music and Spotify terminology, and does compiling a `tell` launch the app? (Yes, yes, no.) Compiles the player scripts but never executes them, so it cannot change anyone's playback. |
 
 The OpenAI probes read `OPENAI_API_KEY` from the environment. The OpenClaw
 ones read that Mac's own `~/.openclaw` identity and secrets — run them **on
