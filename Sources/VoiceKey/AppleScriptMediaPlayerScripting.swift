@@ -84,15 +84,26 @@ final class AppleScriptMediaPlayerScripting: MediaPlayerScripting {
     /// players (`scripts/dev/probe-media-scripting.swift`). Deliberately does
     /// not coerce `player state` to text: it compares against the enumerators
     /// instead, which both players define identically as `ePlS`.
+    /// Apple Events default to a 60-second timeout, and a real one was observed
+    /// on 2026-07-29: with the Mac locked, the automation-consent prompt could
+    /// not be shown, so the event sat for a full minute before returning -1712.
+    /// It did not block the voice session — that work is on its own queue — but
+    /// it did occupy the queue the resume has to come back through. Two seconds
+    /// is longer than a healthy player needs and short enough that a wedged one
+    /// cannot hold the music hostage.
+    static let appleEventTimeoutSeconds = 2
+
     static func stateSource(for player: MediaPlayer) -> String {
         """
         if application "\(player.name)" is running then
-            tell application "\(player.name)"
-                set currentState to player state
-                if currentState is playing then return "playing"
-                if currentState is paused then return "paused"
-                return "stopped"
-            end tell
+            with timeout of \(appleEventTimeoutSeconds) seconds
+                tell application "\(player.name)"
+                    set currentState to player state
+                    if currentState is playing then return "playing"
+                    if currentState is paused then return "paused"
+                    return "stopped"
+                end tell
+            end timeout
         end if
         return "notrunning"
         """
@@ -106,7 +117,9 @@ final class AppleScriptMediaPlayerScripting: MediaPlayerScripting {
     ) -> String {
         """
         if application "\(player.name)" is running then
-            tell application "\(player.name)" to \(command)
+            with timeout of \(appleEventTimeoutSeconds) seconds
+                tell application "\(player.name)" to \(command)
+            end timeout
         end if
         return "ok"
         """
