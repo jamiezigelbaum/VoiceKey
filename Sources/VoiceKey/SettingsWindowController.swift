@@ -270,6 +270,7 @@ enum SettingsPermissionPolicy {
 struct VoiceProfileProviderSettings: Equatable {
     var model: String
     var voice: String
+    var endpointURL: String
 }
 
 struct VoiceProfileProviderSettingsCache {
@@ -284,7 +285,8 @@ struct VoiceProfileProviderSettingsCache {
     mutating func remember(_ profile: VoiceProfile) {
         settingsByProfile[profile.id, default: [:]][profile.providerID.rawValue] = VoiceProfileProviderSettings(
             model: profile.model,
-            voice: profile.voice
+            voice: profile.voice,
+            endpointURL: profile.endpointURL
         )
     }
 
@@ -1675,6 +1677,7 @@ final class SettingsWindowController: NSWindowController {
             )
             profile.model = cached?.model ?? provider.defaultModel
             profile.voice = cached?.voice ?? provider.defaultVoice
+            profile.endpointURL = cached?.endpointURL ?? ""
             if provider == .custom {
                 do {
                     try credentialStore.initializeCredentialScope(

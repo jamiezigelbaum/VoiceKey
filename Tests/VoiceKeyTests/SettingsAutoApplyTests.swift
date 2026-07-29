@@ -69,6 +69,121 @@ final class SettingsAutoApplyTests: XCTestCase {
         )
     }
 
+    func testSwitchingCustomEndpointToOpenAIDoesNotSendOpenAIKeyToCustomHost()
+        throws {
+        let defaults = try makeDefaults()
+        let customEndpoint = "wss://vendor.example/realtime"
+        let profile = VoiceProfile(
+            name: "Vendor",
+            providerID: .custom,
+            model: VoiceProviderID.custom.defaultModel,
+            voice: VoiceProviderID.custom.defaultVoice,
+            endpointURL: customEndpoint
+        )
+        let controller = makeController(
+            profiles: [profile],
+            defaults: defaults
+        )
+
+        XCTAssertTrue(controller.apply(.provider(.openAIRealtime)))
+
+        let switched = try XCTUnwrap(
+            VoiceProfileStore.load(defaults: defaults).first
+        )
+        XCTAssertEqual(switched.providerID, .openAIRealtime)
+        XCTAssertEqual(switched.endpointURL, "")
+
+        let configuration = VoiceSessionConfiguration(
+            profileID: switched.id,
+            providerID: switched.providerID,
+            model: switched.model,
+            voice: switched.voice,
+            instructions: switched.instructions,
+            endpointURL: switched.endpointURL
+        )
+        let request = try XCTUnwrap(
+            OpenAIRealtimeRequestBuilder.webSocketRequest(
+                baseURL: OpenAIRealtimeRequestBuilder.normalizedBaseURL(
+                    for: configuration.endpointURL
+                ),
+                apiKey: "owner-openai-key",
+                configuration: configuration
+            )
+        )
+
+        XCTAssertNotEqual(request.url?.host, "vendor.example")
+        XCTAssertNotNil(
+            request.value(forHTTPHeaderField: "Authorization")
+        )
+    }
+
+    func testSwitchingBackRestoresTheProvidersOwnEndpoint() throws {
+        let defaults = try makeDefaults()
+        let customEndpoint = "wss://vendor.example/realtime"
+        let profile = VoiceProfile(
+            name: "Vendor",
+            providerID: .custom,
+            model: VoiceProviderID.custom.defaultModel,
+            voice: VoiceProviderID.custom.defaultVoice,
+            endpointURL: customEndpoint
+        )
+        let controller = makeController(
+            profiles: [profile],
+            defaults: defaults
+        )
+
+        XCTAssertTrue(controller.apply(.provider(.openAIRealtime)))
+        XCTAssertEqual(
+            VoiceProfileStore.load(defaults: defaults).first?.endpointURL,
+            ""
+        )
+
+        XCTAssertTrue(controller.apply(.provider(.custom)))
+        let restored = try XCTUnwrap(
+            VoiceProfileStore.load(defaults: defaults).first
+        )
+        XCTAssertEqual(restored.providerID, .custom)
+        XCTAssertEqual(restored.endpointURL, customEndpoint)
+    }
+
+    func testProviderSwitchesNeverCarryEndpointsAcrossTrustDomains()
+        throws {
+        let switches: [(VoiceProviderID, VoiceProviderID)] = [
+            (.openClaw, .openAIRealtime),
+            (.openAIRealtime, .openClaw),
+            (.custom, .openClaw),
+            (.openClaw, .custom)
+        ]
+
+        for (outgoing, incoming) in switches {
+            let defaults = try makeDefaults()
+            let profile = VoiceProfile(
+                name: "Outgoing",
+                providerID: outgoing,
+                model: outgoing.defaultModel,
+                voice: outgoing.defaultVoice,
+                endpointURL: "wss://outgoing.example/realtime"
+            )
+            let controller = makeController(
+                profiles: [profile],
+                defaults: defaults
+            )
+
+            XCTAssertTrue(
+                controller.apply(.provider(incoming)),
+                "\(outgoing.rawValue) -> \(incoming.rawValue)"
+            )
+            let switched = try XCTUnwrap(
+                VoiceProfileStore.load(defaults: defaults).first
+            )
+            XCTAssertEqual(
+                switched.endpointURL,
+                "",
+                "\(outgoing.rawValue) -> \(incoming.rawValue)"
+            )
+        }
+    }
+
     func testAppKitControlEventsAutoApplyBeforeWindowClose() throws {
         let defaults = try makeDefaults()
         var openAI = VoiceProfile.defaultOpenAI(name: "OpenAI")

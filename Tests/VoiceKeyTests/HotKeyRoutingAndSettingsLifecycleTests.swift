@@ -39,12 +39,13 @@ final class HotKeyDispatchTableTests: XCTestCase {
 }
 
 final class VoiceProfileProviderSettingsCacheTests: XCTestCase {
-    func testSwitchingBackRestoresProviderSpecificModelAndVoice() {
+    func testSwitchingBackRestoresProviderSpecificSettings() {
         let profile = VoiceProfile(
             name: "Custom OpenAI",
             providerID: .openAIRealtime,
             model: "custom-model",
-            voice: "custom-voice"
+            voice: "custom-voice",
+            endpointURL: "wss://openai.example/realtime"
         )
         var cache = VoiceProfileProviderSettingsCache(profiles: [profile])
 
@@ -52,15 +53,24 @@ final class VoiceProfileProviderSettingsCacheTests: XCTestCase {
         switchedProfile.providerID = .openClaw
         switchedProfile.model = "openclaw-model"
         switchedProfile.voice = "openclaw-voice"
+        switchedProfile.endpointURL = "wss://openclaw.example/realtime"
         cache.remember(switchedProfile)
 
         XCTAssertEqual(
             cache.settings(for: profile.id, provider: .openAIRealtime),
-            VoiceProfileProviderSettings(model: "custom-model", voice: "custom-voice")
+            VoiceProfileProviderSettings(
+                model: "custom-model",
+                voice: "custom-voice",
+                endpointURL: "wss://openai.example/realtime"
+            )
         )
         XCTAssertEqual(
             cache.settings(for: profile.id, provider: .openClaw),
-            VoiceProfileProviderSettings(model: "openclaw-model", voice: "openclaw-voice")
+            VoiceProfileProviderSettings(
+                model: "openclaw-model",
+                voice: "openclaw-voice",
+                endpointURL: "wss://openclaw.example/realtime"
+            )
         )
     }
 }
