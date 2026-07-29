@@ -39,8 +39,8 @@ extension OnboardingDiagnosticsLogging {
 /// The cases carry categories, step names, request ids, endpoints and shortcut
 /// names. They never carry an API key, a gateway token or a device token, not
 /// even truncated or masked: only presence/absence. Anything that could smuggle
-/// one — an endpoint the owner typed — is run through `sanitizedEndpoint`,
-/// which keeps the address and drops user info and query.
+/// one — an endpoint the owner typed — is run through the shared publishable
+/// endpoint formatter, which keeps the address and drops user info and query.
 enum OnboardingLogEvent {
     /// Fills the slot the provider wire name takes on voice-session lines.
     static let component = "onboarding"
@@ -247,25 +247,11 @@ enum OnboardingLogEvent {
             : String(message.prefix(200)) + "…"
     }
 
-    /// Endpoints are typed by the owner, so they are the one field that could
-    /// smuggle a credential into the log. The address itself is evidence worth
-    /// keeping; user info and query string are dropped unconditionally.
+    /// Compatibility entry point for the onboarding diagnostics contract.
+    /// Formatting is owned by `PublishableDiagnosticEndpoint` so every
+    /// persisted or pasteable endpoint has one mandatory representation.
     static func sanitizedEndpoint(_ endpoint: String) -> String {
-        let trimmed = endpoint.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        guard trimmed.isEmpty == false else {
-            return "auto-discovery"
-        }
-        guard var components = URLComponents(string: trimmed) else {
-            return "unparsable"
-        }
-        guard components.host != nil else { return "unparsable" }
-        components.user = nil
-        components.password = nil
-        components.query = nil
-        components.fragment = nil
-        return components.string ?? "unparsable"
+        PublishableDiagnosticEndpoint(endpoint).description
     }
 
     private static func describe(

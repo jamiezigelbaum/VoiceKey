@@ -33,10 +33,26 @@ final class VoiceSessionLogTests: XCTestCase {
         XCTAssertEqual(
             log.displayText,
             """
-            [2026-06-14T12:00:00Z] OpenAI Realtime API transcript: hello
-            [2026-06-14T12:00:01Z] ChatGPT (web) transcript: hi
+            [2026-06-14T12:00:00Z] OpenAI Realtime API transcript: assistant turn occurred (1 delta, 5 characters)
+            [2026-06-14T12:00:01Z] ChatGPT (web) transcript: assistant turn occurred (1 delta, 2 characters)
             """
         )
+    }
+
+    func testUserTranscriptBecomesRoleAndCountsWithoutText() {
+        var log = VoiceSessionLog()
+
+        log.append(
+            .transcript("You: account number 482917"),
+            provider: .openClaw,
+            timestamp: timestamp
+        )
+
+        XCTAssertEqual(
+            log.displayText,
+            "[2026-06-14T12:00:00Z] OpenClaw Talk transcript: user turn occurred (1 delta, 21 characters)"
+        )
+        XCTAssertFalse(log.displayText.contains("482917"))
     }
 
     func testStatusAndDiagnosticsAreLogged() {

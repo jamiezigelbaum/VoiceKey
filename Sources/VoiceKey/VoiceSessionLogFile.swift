@@ -2,8 +2,8 @@ import Foundation
 
 /// Appends every session-log event to a daily file under
 /// ~/Library/Logs/VoiceKey so live-test evidence survives app relaunches.
-/// Local-only, with stable provider wire names (transcripts are written as
-/// deltas, uncoalesced); never contains credentials.
+/// Publishable, with stable provider wire names. Transcript content is reduced
+/// to role and counts before it reaches the queue or disk.
 /// Subsystems that are not voice providers — the onboarding wizard — write
 /// through `append(component:kind:text:)` into the same file.
 final class VoiceSessionLogFile {
@@ -41,9 +41,13 @@ final class VoiceSessionLogFile {
             kind = "status"
             text = status.detail.map { "\(status.menuTitle) - \($0)" } ?? status.menuTitle
         case let .transcript(delta):
-            guard delta.isEmpty == false else { return }
+            guard let summary = PublishableTranscriptSummary(
+                delta: delta
+            ) else {
+                return
+            }
             kind = "transcript"
-            text = delta
+            text = summary.text
         case let .diagnostic(message):
             guard message.isEmpty == false else { return }
             kind = "diagnostic"
