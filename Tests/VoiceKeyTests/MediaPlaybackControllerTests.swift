@@ -11,36 +11,80 @@ private final class FakeMediaPlayerScripting: MediaPlayerScripting {
         case play(String)
     }
 
-    var running: Set<String> = []
-    var states: [String: Result<MediaPlayerState, MediaScriptingFailure>] = [:]
-    var pauseResults: [String: Result<Void, MediaScriptingFailure>] = [:]
-    var playResults: [String: Result<Void, MediaScriptingFailure>] = [:]
-    private(set) var calls: [Call] = []
+    /// The controller answers on its own serial queue, and the quit tests read
+    /// these from the test thread, so every access goes through the lock.
+    private let lock = NSLock()
+    private var runningNames: Set<String> = []
+    private var stateResults:
+        [String: Result<MediaPlayerState, MediaScriptingFailure>] = [:]
+    private var pauseOutcomes: [String: Result<Void, MediaScriptingFailure>] =
+        [:]
+    private var playOutcomes: [String: Result<Void, MediaScriptingFailure>] =
+        [:]
+    private var recordedCalls: [Call] = []
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    var running: Set<String> {
+        get { locked { runningNames } }
+        set { locked { runningNames = newValue } }
+    }
+
+    var states: [String: Result<MediaPlayerState, MediaScriptingFailure>] {
+        get { locked { stateResults } }
+        set { locked { stateResults = newValue } }
+    }
+
+    var pauseResults: [String: Result<Void, MediaScriptingFailure>] {
+        get { locked { pauseOutcomes } }
+        set { locked { pauseOutcomes = newValue } }
+    }
+
+    var playResults: [String: Result<Void, MediaScriptingFailure>] {
+        get { locked { playOutcomes } }
+        set { locked { playOutcomes = newValue } }
+    }
+
+    var calls: [Call] {
+        locked { recordedCalls }
+    }
 
     func isRunning(_ player: MediaPlayer) -> Bool {
-        calls.append(.isRunning(player.name))
-        return running.contains(player.name)
+        locked {
+            recordedCalls.append(.isRunning(player.name))
+            return runningNames.contains(player.name)
+        }
     }
 
     func state(
         of player: MediaPlayer
     ) -> Result<MediaPlayerState, MediaScriptingFailure> {
-        calls.append(.state(player.name))
-        return states[player.name] ?? .success(.stopped)
+        locked {
+            recordedCalls.append(.state(player.name))
+            return stateResults[player.name] ?? .success(.stopped)
+        }
     }
 
     func pause(
         _ player: MediaPlayer
     ) -> Result<Void, MediaScriptingFailure> {
-        calls.append(.pause(player.name))
-        return pauseResults[player.name] ?? .success(())
+        locked {
+            recordedCalls.append(.pause(player.name))
+            return pauseOutcomes[player.name] ?? .success(())
+        }
     }
 
     func play(
         _ player: MediaPlayer
     ) -> Result<Void, MediaScriptingFailure> {
-        calls.append(.play(player.name))
-        return playResults[player.name] ?? .success(())
+        locked {
+            recordedCalls.append(.play(player.name))
+            return playOutcomes[player.name] ?? .success(())
+        }
     }
 
     /// Every call that would have crossed the Apple Event boundary. `isRunning`
@@ -415,6 +459,90 @@ final class MediaPlaybackControllerTests: XCTestCase {
         waitUntil(
             { blocking.didFinish },
             "the scripting work never completed"
+        )
+    }
+
+    // MARK: - Quitting
+
+    /// Quit is the one channel close no status reports. Without this the owner
+    /// quits VoiceKey and is left with music VoiceKey paused and nothing
+    /// running that could ever put it back.
+    func testQuittingWithAChannelOpenResumesWhatWePaused() {
+        scripting.running = ["Music"]
+        scripting.states["Music"] = .success(.playing)
+        let controller = makeController(players: [.music])
+
+        controller.setActiveChannel(UUID())
+        scripting.states["Music"] = .success(.paused)
+
+        controller.resumeBeforeTermination()
+
+        XCTAssertEqual(
+            scripting.scriptedCalls,
+            [.state("Music"), .pause("Music"), .state("Music"), .play("Music")]
+        )
+        XCTAssertEqual(log, [
+            "Paused Music while a voice channel is active.",
+            "Resumed Music after the last voice channel closed."
+        ])
+    }
+
+    /// The decisive one for quit: the resume runs on the executor's queue, and
+    /// the process is about to exit, so the call has to still be inside it when
+    /// the play lands. An async reconcile here would never run at all.
+    func testQuittingWaitsForWorkTheExecutorRunsElsewhere() {
+        scripting.running = ["Music"]
+        scripting.states["Music"] = .success(.playing)
+        let queue = DispatchQueue(label: "media-playback-test")
+        let controller = MediaPlaybackController(
+            scripting: scripting,
+            players: [.music],
+            execute: { queue.async(execute: $0) }
+        )
+
+        controller.setActiveChannel(UUID())
+        waitUntil(
+            { self.scripting.scriptedCalls.contains(.pause("Music")) },
+            "the pause never reached the scripting layer"
+        )
+        scripting.states["Music"] = .success(.paused)
+
+        controller.resumeBeforeTermination()
+
+        XCTAssertTrue(
+            scripting.scriptedCalls.contains(.play("Music")),
+            "resumeBeforeTermination returned before the music was put back"
+        )
+    }
+
+    /// A player that has stopped answering Apple Events must not be able to
+    /// wedge quit. The executor here never runs the work at all, which is the
+    /// worst case the bound exists for.
+    func testQuittingIsBoundedWhenTheResumeCannotRun() {
+        let controller = MediaPlaybackController(
+            scripting: scripting,
+            players: [.music],
+            execute: { _ in }
+        )
+
+        controller.resumeBeforeTermination(timeout: 0.05)
+
+        // Returning at all is the assertion; a controller without the bound
+        // hangs here and the suite times out rather than failing.
+        XCTAssertEqual(scripting.calls, [])
+    }
+
+    func testQuittingWithNothingPausedContactsNobody() {
+        scripting.running = ["Music"]
+        scripting.states["Music"] = .success(.playing)
+        let controller = makeController(players: [.music])
+
+        controller.resumeBeforeTermination()
+
+        XCTAssertEqual(
+            scripting.calls,
+            [],
+            "VoiceKey paused nothing, so quitting starts nothing"
         )
     }
 

@@ -77,18 +77,49 @@ protocol MediaPlayerScripting: AnyObject {
 /// that gap and pausing it again a moment afterwards is what requirement 4
 /// forbids, so the app's *intent* to start a channel is carried here
 /// explicitly rather than guessed at from a timer.
+///
+/// Only `.starting` ends that hold, because it is the one status a session can
+/// only report by opening. Every other live status — `.listening`, `.speaking`,
+/// `.stopping` — is one the *outgoing* session can still be emitting, and it
+/// arrives with `activeProfileID` already pointing at the incoming channel, so
+/// treating it as "the new one reported in" clears the hold a status early and
+/// lets the very next `.ready` release the music. Every provider here emits
+/// `.starting` in the same turn it starts (`ChatGPTProvider.startVoice`,
+/// `OpenAIRealtimeProvider.startOnStateQueue`, `OpenClawTalkProvider`), and a
+/// provider that somehow did not would only hold the music until the request
+/// expires.
 struct MediaPlaybackChannelPolicy: Equatable {
     /// A channel the app has asked to start and has not yet seen report in.
     private(set) var requestedChannelID: UUID?
 
+    /// Names one request, so a fallback release armed for an earlier request
+    /// cannot cancel a later one that happens to be for the same channel.
+    private(set) var requestGeneration: UInt64 = 0
+
     /// Called when the app commits to starting a channel.
     mutating func channelRequested(_ channelID: UUID) {
         requestedChannelID = channelID
+        requestGeneration &+= 1
     }
 
     /// Called when the runtime is torn down — the request can no longer be
     /// honoured by anyone, so it must not go on holding the music.
     mutating func runtimeWasReset() {
+        requestedChannelID = nil
+    }
+
+    /// The bound on the hold, and the reason it cannot strand the owner's
+    /// music.
+    ///
+    /// A request is an intent, and an intent can go unfulfilled without ever
+    /// producing a status: a provider whose `toggleVoice` declines to start
+    /// (ChatGPT's does, when the instance it shares with the outgoing channel
+    /// is still `.stopping`) settles back to `.ready` and then says nothing at
+    /// all. Nothing further would arrive to release the hold, and stuck-paused
+    /// forever is worse than never pausing. The caller arms this; it releases
+    /// only its own request, so a later one survives.
+    mutating func requestDidExpire(generation: UInt64) {
+        guard generation == requestGeneration else { return }
         requestedChannelID = nil
     }
 
@@ -100,13 +131,13 @@ struct MediaPlaybackChannelPolicy: Equatable {
     ) -> UUID? {
         if let requested = requestedChannelID {
             switch status {
-            case .needsAttention:
-                // The requested channel could not start. Nothing is going to
-                // hold the audio session, so stop holding the music.
+            case .needsAttention, .loginRequired:
+                // The requested channel cannot start without the owner doing
+                // something first. Nothing is going to hold the audio session,
+                // so stop holding the music.
                 requestedChannelID = nil
-            case _ where Self.isStartedSession(status)
-                && activeProfileID == requested:
-                // It reported in. The live status carries it from here.
+            case .starting where activeProfileID == requested:
+                // It opened its session. The live status carries it from here.
                 requestedChannelID = nil
             default:
                 // Still in flight — including the outgoing session's `.ready`,
@@ -119,26 +150,6 @@ struct MediaPlaybackChannelPolicy: Equatable {
             return nil
         }
         return activeProfileID
-    }
-
-    /// A status only a *running* session reports.
-    ///
-    /// `.stopping` is deliberately excluded even though it is a live status.
-    /// It can only come from a session being torn down, and during a switch
-    /// the outgoing session's `.stopping` arrives when `activeProfileID` is
-    /// already the incoming channel — so counting it as "the requested channel
-    /// reported in" clears the request one status too early and lets the very
-    /// next `.ready` release the music. That is the blip this policy exists to
-    /// prevent, and it is what the switch test caught.
-    private static func isStartedSession(_ status: ProviderStatus) -> Bool {
-        switch status {
-        case .starting, .listening, .thinking, .speaking,
-             .clickSent, .voiceActive:
-            return true
-        case .loading, .checking, .loginRequired, .ready,
-             .stopping, .needsAttention:
-            return false
-        }
     }
 }
 
@@ -223,6 +234,25 @@ final class MediaPlaybackController {
     func setActiveChannels(_ channelIDs: Set<UUID>) {
         activeChannels = channelIDs
         reconcile()
+    }
+
+    /// Quitting is the one way a channel closes that no status reports, and by
+    /// the time anything asynchronous could run the process is gone. Left to
+    /// the ordinary path the owner is quit out of VoiceKey with music VoiceKey
+    /// paused, nothing left running to put it back, and no log line saying so.
+    ///
+    /// So this one entry point blocks — and only this one. Blocking on the way
+    /// out is acceptable where blocking a hotkey never is, and the wait is
+    /// bounded so a player that has stopped answering Apple Events cannot wedge
+    /// quit: after the timeout VoiceKey exits anyway, exactly as it does today.
+    func resumeBeforeTermination(timeout: TimeInterval = 2) {
+        activeChannels = []
+        let finished = DispatchSemaphore(value: 0)
+        execute { [weak self] in
+            self?.resumeWhatWePaused()
+            finished.signal()
+        }
+        _ = finished.wait(timeout: .now() + timeout)
     }
 
     private func reconcile() {
