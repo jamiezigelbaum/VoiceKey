@@ -1590,8 +1590,13 @@ final class SettingsAutoApplyTests: XCTestCase {
 
         let sizing = controller.windowSizingSnapshot
         XCTAssertGreaterThanOrEqual(
-            sizing.contentHeight,
-            sizing.formHeight
+            sizing.defaultContentHeight,
+            sizing.formHeight,
+            """
+            the default window must fit the worst case without scrolling. \
+            Asserted against the requested height, not the realized one: a \
+            screen smaller than the window clamps it, and CI runners have one.
+            """
         )
         controller.close()
     }
@@ -1825,10 +1830,20 @@ final class SettingsAutoApplyTests: XCTestCase {
         )
         scrollView.layoutSubtreeIfNeeded()
         let document = try XCTUnwrap(scrollView.documentView)
+        // Make the clip taller than the form by hand: the assertion below is
+        // about the alignment constraint, and on a screen too small to show the
+        // whole form there would otherwise be no slack to detect it in.
+        scrollView.setFrameSize(
+            NSSize(
+                width: scrollView.frame.width,
+                height: document.fittingSize.height + 200
+            )
+        )
+        scrollView.layoutSubtreeIfNeeded()
         XCTAssertLessThan(
             document.fittingSize.height,
             scrollView.contentView.bounds.height,
-            "this only measures anything while the form is shorter than the window"
+            "the clip view was just sized to guarantee this"
         )
         XCTAssertEqual(
             document.frame.maxY,
