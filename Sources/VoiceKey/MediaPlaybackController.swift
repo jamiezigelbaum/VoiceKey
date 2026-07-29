@@ -164,15 +164,25 @@ final class MediaPlaybackController {
 
     private let players: [MediaPlayer]
     private let scripting: MediaPlayerScripting
+    private let terminationScripting: MediaPlayerScripting
     private let execute: WorkExecutor
+    private let executeTermination: WorkExecutor
 
     /// Written on whichever thread drives the channel lifecycle (the main
     /// thread, in the app). Never read by the executor — `reconcile()` hands
     /// the executor a snapshot instead, so the two sides share no state.
     private var activeChannels: Set<UUID> = []
 
-    /// Everything below is touched only inside `execute`, which is serial.
+    /// A termination resume must be able to read this while `execute` is stuck
+    /// in another player's scripting call. The lock is deliberately limited to
+    /// ownership bookkeeping; no scripting call runs while it is held.
+    private let pausedPlayersLock = NSLock()
     private var pausedPlayers: [MediaPlayer] = []
+    private var terminationRequested = false
+
+    /// `hasPausedForCurrentActivation` is executor-confined. Permission
+    /// reporting can also happen on the independent termination executor, so
+    /// its once-only flag is protected by `pausedPlayersLock`.
     private var hasPausedForCurrentActivation = false
     private var hasReportedPermissionDenial = false
 
@@ -184,14 +194,19 @@ final class MediaPlaybackController {
 
     init(
         scripting: MediaPlayerScripting,
+        terminationScripting: MediaPlayerScripting,
         players: [MediaPlayer] = MediaPlayer.all,
         execute: @escaping WorkExecutor =
             MediaPlaybackController.makeDefaultExecutor(),
+        executeTermination: @escaping WorkExecutor =
+            MediaPlaybackController.makeDefaultTerminationExecutor(),
         now: @escaping () -> Date = Date.init
     ) {
         self.scripting = scripting
+        self.terminationScripting = terminationScripting
         self.players = players
         self.execute = execute
+        self.executeTermination = executeTermination
         self.now = now
     }
 
@@ -239,6 +254,29 @@ final class MediaPlaybackController {
         return { queue.async(execute: $0) }
     }
 
+    /// Shutdown is independent from ordinary media work. A slow player can
+    /// still occupy the ordinary queue when the app needs to restore a player
+    /// it already paused.
+    static func makeDefaultTerminationExecutor() -> WorkExecutor {
+        let queue = DispatchQueue(
+            label: "com.zigelbaum.VoiceKey.media-playback-termination"
+        )
+        return { queue.async(execute: $0) }
+    }
+
+    /// Two Apple Events per registered player (state, then play), each bounded
+    /// to one second on the termination scripting instance, plus one second of
+    /// scheduling margin. The budget therefore cannot silently be shorter than
+    /// the work it is waiting for.
+    static let terminationTimeout: TimeInterval =
+        TimeInterval(
+            MediaPlayer.all.count
+                * 2
+                * AppleScriptMediaPlayerScripting
+                    .terminationAppleEventTimeoutSeconds
+                + 1
+        )
+
     // MARK: - Channel lifecycle
 
     func channelDidActivate(_ channelID: UUID) {
@@ -271,15 +309,21 @@ final class MediaPlaybackController {
     /// the ordinary path the owner is quit out of VoiceKey with music VoiceKey
     /// paused, nothing left running to put it back, and no log line saying so.
     ///
-    /// So this one entry point blocks — and only this one. Blocking on the way
-    /// out is acceptable where blocking a hotkey never is, and the wait is
-    /// bounded so a player that has stopped answering Apple Events cannot wedge
-    /// quit: after the timeout VoiceKey exits anyway, exactly as it does today.
-    func resumeBeforeTermination(timeout: TimeInterval = 2) {
+    /// So this one entry point blocks — and only this one. It uses a separate
+    /// executor and short-timeout scripting instance: the resume cannot queue
+    /// behind an ordinary pause pass whose consent-capable Apple Event may take
+    /// 30 seconds. The bound covers the termination pass's own worst case.
+    func resumeBeforeTermination(
+        timeout: TimeInterval = MediaPlaybackController.terminationTimeout
+    ) {
         activeChannels = []
+        pausedPlayersLock.lock()
+        terminationRequested = true
+        pausedPlayersLock.unlock()
+
         let finished = DispatchSemaphore(value: 0)
-        execute { [weak self] in
-            self?.resumeWhatWePaused()
+        executeTermination { [weak self] in
+            self?.resumeForTermination()
             finished.signal()
         }
         _ = finished.wait(timeout: .now() + timeout)
@@ -310,6 +354,7 @@ final class MediaPlaybackController {
 
         var paused: [MediaPlayer] = []
         for player in players {
+            guard isTerminationRequested() == false else { break }
             // The launch guard. `tell application "Music"` *launches* Music in
             // order to ask it anything; the process list does not.
             guard isResting(player) == false else { continue }
@@ -319,7 +364,7 @@ final class MediaPlaybackController {
             case .success(.playing):
                 switch scripting.pause(player) {
                 case .success:
-                    pausedPlayers.append(player)
+                    rememberPaused(player)
                     paused.append(player)
                 case let .failure(failure):
                     rest(player)
@@ -347,36 +392,71 @@ final class MediaPlaybackController {
 
     private func resumeWhatWePaused() {
         hasPausedForCurrentActivation = false
+        guard isTerminationRequested() == false else { return }
 
         // Resuming is only ever putting back what this controller paused, so
         // requirement 3 holds structurally rather than by a guard: with the app
         // open and no channel ever activated, this set is empty and the pass
         // below contacts nobody. (A guard here tested as dead code — no
         // mutation of it changed an observable outcome.)
-        let candidates = pausedPlayers
-        pausedPlayers = []
+        resume(
+            candidates: pausedPlayersSnapshot(),
+            with: scripting,
+            respectsRest: true,
+            stopsForTermination: true
+        )
+    }
 
+    private func resumeForTermination() {
+        resume(
+            candidates: pausedPlayersSnapshot(),
+            with: terminationScripting,
+            respectsRest: false,
+            stopsForTermination: false
+        )
+    }
+
+    private func resume(
+        candidates: [MediaPlayer],
+        with scripting: MediaPlayerScripting,
+        respectsRest: Bool,
+        stopsForTermination: Bool
+    ) {
         var resumed: [MediaPlayer] = []
         for player in candidates {
+            if stopsForTermination, isTerminationRequested() {
+                break
+            }
             // Quit while we were talking. Asking would relaunch it.
-            guard isResting(player) == false else { continue }
-            guard scripting.isRunning(player) else { continue }
+            if respectsRest, isResting(player) {
+                continue
+            }
+            guard scripting.isRunning(player) else {
+                forgetPaused(player)
+                continue
+            }
 
             switch scripting.state(of: player) {
             case .success(.paused):
                 switch scripting.play(player) {
                 case .success:
+                    forgetPaused(player)
                     resumed.append(player)
                 case let .failure(failure):
-                    rest(player)
+                    if respectsRest {
+                        rest(player)
+                    }
                     report(failure, couldNot: "resume", player: player)
                 }
             case .success(.playing), .success(.stopped):
                 // The owner pressed play, or stopped it outright and moved on.
                 // Either way the state it is in now is the one they chose.
+                forgetPaused(player)
                 continue
             case let .failure(failure):
-                rest(player)
+                if respectsRest {
+                    rest(player)
+                }
                 report(
                     failure,
                     couldNot: "read the state of",
@@ -391,6 +471,33 @@ final class MediaPlaybackController {
         )
     }
 
+    // MARK: - Paused-player ownership
+
+    private func rememberPaused(_ player: MediaPlayer) {
+        pausedPlayersLock.lock()
+        defer { pausedPlayersLock.unlock() }
+        guard pausedPlayers.contains(player) == false else { return }
+        pausedPlayers.append(player)
+    }
+
+    private func forgetPaused(_ player: MediaPlayer) {
+        pausedPlayersLock.lock()
+        defer { pausedPlayersLock.unlock() }
+        pausedPlayers.removeAll { $0 == player }
+    }
+
+    private func pausedPlayersSnapshot() -> [MediaPlayer] {
+        pausedPlayersLock.lock()
+        defer { pausedPlayersLock.unlock() }
+        return pausedPlayers
+    }
+
+    private func isTerminationRequested() -> Bool {
+        pausedPlayersLock.lock()
+        defer { pausedPlayersLock.unlock() }
+        return terminationRequested
+    }
+
     // MARK: - Logging
 
     private func report(
@@ -402,8 +509,13 @@ final class MediaPlaybackController {
         case .permissionDenied:
             // Once per session. The owner declined; repeating it every time a
             // channel opens would bury the log they are meant to read.
-            guard hasReportedPermissionDenial == false else { return }
+            pausedPlayersLock.lock()
+            guard hasReportedPermissionDenial == false else {
+                pausedPlayersLock.unlock()
+                return
+            }
             hasReportedPermissionDenial = true
+            pausedPlayersLock.unlock()
             onDiagnostic?(
                 "VoiceKey is not allowed to control \(player.name), so other "
                 + "media was left playing. Allow it under System Settings > "

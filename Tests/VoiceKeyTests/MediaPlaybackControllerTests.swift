@@ -118,8 +118,10 @@ final class MediaPlaybackControllerTests: XCTestCase {
     ) -> MediaPlaybackController {
         let controller = MediaPlaybackController(
             scripting: scripting,
+            terminationScripting: scripting,
             players: players,
             execute: { $0() },
+            executeTermination: { $0() },
             now: { [weak self] in
                 self?.clock ?? Date(timeIntervalSince1970: 1_000_000)
             }
@@ -229,10 +231,15 @@ final class MediaPlaybackControllerTests: XCTestCase {
 
         controller.channelDidDeactivate(channel)
 
+        scripting.running = ["Music"]
+        scripting.states["Music"] = .success(.paused)
+        controller.setActiveChannel(nil)
+
         XCTAssertEqual(
             scripting.scriptedCalls,
             [.state("Music"), .pause("Music")],
-            "the player quit; resuming it would launch it again"
+            "quitting resolved the obligation; reopening the player later "
+            + "must not resurrect it"
         )
     }
 
@@ -436,6 +443,77 @@ final class MediaPlaybackControllerTests: XCTestCase {
         ])
     }
 
+    func testFailedResumeIsRetriedAfterThePlayersRest() {
+        scripting.running = ["Music"]
+        scripting.states["Music"] = .success(.playing)
+        let controller = makeController(players: [.music])
+        let channel = UUID()
+
+        controller.channelDidActivate(channel)
+        scripting.states["Music"] = .success(.paused)
+        scripting.playResults["Music"] =
+            .failure(.scriptingError(code: -1712))
+        controller.channelDidDeactivate(channel)
+
+        controller.setActiveChannel(nil)
+        XCTAssertEqual(
+            scripting.calls.filter { $0 == .play("Music") }.count,
+            1,
+            "the failed player must keep its ten-minute rest"
+        )
+
+        clock = clock.addingTimeInterval(
+            MediaPlaybackController.failureBackoff + 1
+        )
+        scripting.playResults["Music"] = .success(())
+        controller.setActiveChannel(nil)
+
+        XCTAssertEqual(
+            scripting.calls.filter { $0 == .play("Music") }.count,
+            2,
+            "the resume obligation was forgotten after its first failure"
+        )
+        XCTAssertEqual(
+            log.last,
+            "Resumed Music after the last voice channel closed."
+        )
+    }
+
+    func testRetryDropsObligationWhenTheOwnerPlayedOrStoppedThePlayer() {
+        for ownerState in [MediaPlayerState.playing, .stopped] {
+            scripting = FakeMediaPlayerScripting()
+            log = []
+            scripting.running = ["Music"]
+            scripting.states["Music"] = .success(.playing)
+            let controller = makeController(players: [.music])
+            let channel = UUID()
+
+            controller.channelDidActivate(channel)
+            scripting.states["Music"] = .success(.paused)
+            scripting.playResults["Music"] =
+                .failure(.scriptingError(code: -1712))
+            controller.channelDidDeactivate(channel)
+
+            clock = clock.addingTimeInterval(
+                MediaPlaybackController.failureBackoff + 1
+            )
+            scripting.playResults["Music"] = .success(())
+            scripting.states["Music"] = .success(ownerState)
+            controller.setActiveChannel(nil)
+
+            // If the owner decision did not resolve the obligation, this
+            // later paused observation would incorrectly send play.
+            scripting.states["Music"] = .success(.paused)
+            controller.setActiveChannel(nil)
+
+            XCTAssertEqual(
+                scripting.calls.filter { $0 == .play("Music") }.count,
+                1,
+                "VoiceKey overrode the owner's \(ownerState) decision"
+            )
+        }
+    }
+
     func testPauseThatFailsLeavesThePlayerOutOfTheResumeSet() {
         scripting.running = ["Music"]
         scripting.states["Music"] = .success(.playing)
@@ -464,6 +542,7 @@ final class MediaPlaybackControllerTests: XCTestCase {
         let blocking = BlockingScripting()
         let controller = MediaPlaybackController(
             scripting: blocking,
+            terminationScripting: blocking,
             players: [.music]
         )
 
@@ -518,6 +597,7 @@ final class MediaPlaybackControllerTests: XCTestCase {
         let queue = DispatchQueue(label: "media-playback-test")
         let controller = MediaPlaybackController(
             scripting: scripting,
+            terminationScripting: scripting,
             players: [.music],
             execute: { queue.async(execute: $0) }
         )
@@ -537,14 +617,56 @@ final class MediaPlaybackControllerTests: XCTestCase {
         )
     }
 
+    func testTerminationResumeOvertakesABlockedPausePass() {
+        let blocking = TerminationOrderingScripting()
+        let queue = DispatchQueue(label: "media-playback-ordering-test")
+        let controller = MediaPlaybackController(
+            scripting: blocking,
+            terminationScripting: blocking,
+            players: [.music, .spotify],
+            execute: { queue.async(execute: $0) }
+        )
+        defer { blocking.unblockSpotify() }
+
+        controller.setActiveChannel(UUID())
+        waitUntil(
+            { blocking.didPauseMusic },
+            "Music was not paused and recorded before the blocker"
+        )
+        waitUntil(
+            { blocking.didBlockOnSpotify },
+            "the second player never blocked the executor"
+        )
+
+        controller.resumeBeforeTermination(timeout: 0.2)
+
+        XCTAssertTrue(
+            blocking.didAttemptToResumeMusic,
+            "the termination resume sat behind the blocked pause pass"
+        )
+    }
+
     /// A player that has stopped answering Apple Events must not be able to
     /// wedge quit. The executor here never runs the work at all, which is the
     /// worst case the bound exists for.
     func testQuittingIsBoundedWhenTheResumeCannotRun() {
+        XCTAssertGreaterThan(
+            MediaPlaybackController.terminationTimeout,
+            TimeInterval(
+                MediaPlayer.all.count
+                    * 2
+                    * AppleScriptMediaPlayerScripting
+                        .terminationAppleEventTimeoutSeconds
+            ),
+            "shutdown must cover state and play for every registered player"
+        )
+
         let controller = MediaPlaybackController(
             scripting: scripting,
+            terminationScripting: scripting,
             players: [.music],
-            execute: { _ in }
+            execute: { _ in },
+            executeTermination: { _ in }
         )
 
         controller.resumeBeforeTermination(timeout: 0.05)
@@ -662,5 +784,74 @@ private final class BlockingScripting: MediaPlayerScripting {
         _ player: MediaPlayer
     ) -> Result<Void, MediaScriptingFailure> {
         .success(())
+    }
+}
+
+/// Reproduces the shutdown ordering defect without contacting any application:
+/// Music is paused first, then Spotify holds the ordinary serial executor while
+/// the termination path tries to put Music back.
+private final class TerminationOrderingScripting: MediaPlayerScripting {
+    private let spotifyGate = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var musicIsPaused = false
+    private var blockedOnSpotify = false
+    private var attemptedToResumeMusic = false
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    var didPauseMusic: Bool {
+        locked { musicIsPaused }
+    }
+
+    var didBlockOnSpotify: Bool {
+        locked { blockedOnSpotify }
+    }
+
+    var didAttemptToResumeMusic: Bool {
+        locked { attemptedToResumeMusic }
+    }
+
+    func unblockSpotify() {
+        spotifyGate.signal()
+    }
+
+    func isRunning(_ player: MediaPlayer) -> Bool {
+        true
+    }
+
+    func state(
+        of player: MediaPlayer
+    ) -> Result<MediaPlayerState, MediaScriptingFailure> {
+        if player == .spotify {
+            locked { blockedOnSpotify = true }
+            _ = spotifyGate.wait(timeout: .now() + 5)
+            return .success(.stopped)
+        }
+        return locked { .success(musicIsPaused ? .paused : .playing) }
+    }
+
+    func pause(
+        _ player: MediaPlayer
+    ) -> Result<Void, MediaScriptingFailure> {
+        if player == .music {
+            locked { musicIsPaused = true }
+        }
+        return .success(())
+    }
+
+    func play(
+        _ player: MediaPlayer
+    ) -> Result<Void, MediaScriptingFailure> {
+        if player == .music {
+            locked {
+                attemptedToResumeMusic = true
+                musicIsPaused = false
+            }
+        }
+        return .success(())
     }
 }

@@ -72,8 +72,10 @@ final class MediaPlaybackDelegateSeamTests: XCTestCase {
         seam = MediaPlaybackDelegateSeam(
             playback: MediaPlaybackController(
                 scripting: scripting,
+                terminationScripting: scripting,
                 players: [.music],
-                execute: { $0() }
+                execute: { $0() },
+                executeTermination: { $0() }
             )
         )
     }

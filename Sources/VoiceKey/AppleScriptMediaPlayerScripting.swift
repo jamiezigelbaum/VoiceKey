@@ -20,6 +20,17 @@ final class AppleScriptMediaPlayerScripting: MediaPlayerScripting {
     /// terminology from its `.sdef` and a channel opens many times a day.
     private var scripts: [String: NSAppleScript] = [:]
 
+    /// Ordinary calls must leave enough time for the owner to answer the first
+    /// automation-consent prompt. Termination uses a separate instance with a
+    /// short timeout because the process has a finite shutdown budget and no
+    /// later opportunity to restore playback.
+    private let timeoutSeconds: Int
+
+    init(timeoutSeconds: Int = appleEventTimeoutSeconds) {
+        precondition(timeoutSeconds > 0)
+        self.timeoutSeconds = timeoutSeconds
+    }
+
     func isRunning(_ player: MediaPlayer) -> Bool {
         // The load-bearing launch guard, and the reason it is here rather than
         // in AppleScript: this reads the process list and sends nothing. Every
@@ -35,7 +46,10 @@ final class AppleScriptMediaPlayerScripting: MediaPlayerScripting {
         of player: MediaPlayer
     ) -> Result<MediaPlayerState, MediaScriptingFailure> {
         run(
-            source: Self.stateSource(for: player),
+            source: Self.stateSource(
+                for: player,
+                timeoutSeconds: timeoutSeconds
+            ),
             cacheKey: "\(player.name).state"
         )
         .map { descriptor in
@@ -58,7 +72,11 @@ final class AppleScriptMediaPlayerScripting: MediaPlayerScripting {
         _ player: MediaPlayer
     ) -> Result<Void, MediaScriptingFailure> {
         run(
-            source: Self.transportSource(for: player, command: "pause"),
+            source: Self.transportSource(
+                for: player,
+                command: "pause",
+                timeoutSeconds: timeoutSeconds
+            ),
             cacheKey: "\(player.name).pause"
         )
         .map { _ in () }
@@ -72,7 +90,11 @@ final class AppleScriptMediaPlayerScripting: MediaPlayerScripting {
         // The controller only reaches here for a player it paused that is
         // still paused.
         run(
-            source: Self.transportSource(for: player, command: "play"),
+            source: Self.transportSource(
+                for: player,
+                command: "play",
+                timeoutSeconds: timeoutSeconds
+            ),
             cacheKey: "\(player.name).play"
         )
         .map { _ in () }
@@ -96,10 +118,17 @@ final class AppleScriptMediaPlayerScripting: MediaPlayerScripting {
     /// healthy player answering.
     static let appleEventTimeoutSeconds = 30
 
-    static func stateSource(for player: MediaPlayer) -> String {
+    /// Termination has its own scripting instance and queue, so it neither
+    /// waits behind an ordinary 30-second call nor inherits that call's bound.
+    static let terminationAppleEventTimeoutSeconds = 1
+
+    static func stateSource(
+        for player: MediaPlayer,
+        timeoutSeconds: Int = appleEventTimeoutSeconds
+    ) -> String {
         """
         if application "\(player.name)" is running then
-            with timeout of \(appleEventTimeoutSeconds) seconds
+            with timeout of \(timeoutSeconds) seconds
                 tell application "\(player.name)"
                     set currentState to player state
                     if currentState is playing then return "playing"
@@ -116,11 +145,12 @@ final class AppleScriptMediaPlayerScripting: MediaPlayerScripting {
     /// player. Testing `is running` does not launch it; a bare `tell` does.
     static func transportSource(
         for player: MediaPlayer,
-        command: String
+        command: String,
+        timeoutSeconds: Int = appleEventTimeoutSeconds
     ) -> String {
         """
         if application "\(player.name)" is running then
-            with timeout of \(appleEventTimeoutSeconds) seconds
+            with timeout of \(timeoutSeconds) seconds
                 tell application "\(player.name)" to \(command)
             end timeout
         end if

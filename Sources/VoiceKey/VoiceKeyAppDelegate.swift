@@ -78,7 +78,11 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private let iconAnimator = MenuBarIconAnimator()
     private let stopWatchdog = StopWatchdog()
     private let mediaPlayback = MediaPlaybackController(
-        scripting: AppleScriptMediaPlayerScripting()
+        scripting: AppleScriptMediaPlayerScripting(),
+        terminationScripting: AppleScriptMediaPlayerScripting(
+            timeoutSeconds: AppleScriptMediaPlayerScripting
+                .terminationAppleEventTimeoutSeconds
+        )
     )
     private var mediaPlaybackChannels = MediaPlaybackChannelPolicy()
     private var isAccessibilityTrusted: () -> Bool = {
