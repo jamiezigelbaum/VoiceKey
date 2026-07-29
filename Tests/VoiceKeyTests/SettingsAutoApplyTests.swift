@@ -1730,7 +1730,14 @@ final class SettingsAutoApplyTests: XCTestCase {
             )
             for view in descendantViews(in: picker).dropFirst()
             where view.superview !== picker {
-                let inPicker = view.convert(view.bounds, to: picker)
+                // Alignment rect, not frame: a button's bezel draws a point
+                // outside the rect AppKit lays it out by, so asserting on raw
+                // frames demands a guarantee AppKit does not make and fails by
+                // exactly 1pt wherever the bezel is drawn that way. The labels
+                // — the views that would actually clip text — are unaffected.
+                let alignmentFrame = view.alignmentRect(forFrame: view.frame)
+                let inPicker = view.superview?
+                    .convert(alignmentFrame, to: picker) ?? .zero
                 XCTAssertGreaterThanOrEqual(
                     inPicker.minY,
                     -0.5,
