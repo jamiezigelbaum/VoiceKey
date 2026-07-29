@@ -26,6 +26,8 @@
     <key>NSAllowsLocalNetworking</key>
     <true/>
   </dict>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>VoiceKey pauses your music while a voice channel is listening, and resumes it when the channel closes.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>VoiceKey needs microphone access to stream your speech to your selected realtime voice provider.</string>
 </dict>

@@ -114,7 +114,7 @@ final class MediaPlaybackController {
     /// Serial, so a pause and the resume that follows it cannot overlap or
     /// arrive out of order. `NSAppleScript` compiles and executes on a
     /// background serial queue — verified 2026-07-29,
-    /// `scripts/dev/probe-applescript-thread.swift`.
+    /// `scripts/dev/probe-media-scripting.swift`.
     static func makeDefaultExecutor() -> WorkExecutor {
         let queue = DispatchQueue(
             label: "com.zigelbaum.VoiceKey.media-playback"
