@@ -6,7 +6,6 @@ import XCTest
 final class SettingsAutoApplyTests: XCTestCase {
     func testEveryProfileFieldAutoAppliesAndRoundTripsAfterClose() throws {
         let defaults = try makeDefaults()
-        defer { removeDefaults(defaults) }
         var profile = VoiceProfile.defaultOpenAI()
         profile.hotKey = nil
         let controller = makeController(
@@ -46,7 +45,6 @@ final class SettingsAutoApplyTests: XCTestCase {
 
     func testProviderPopupChangeAutoAppliesAndRoundTrips() throws {
         let defaults = try makeDefaults()
-        defer { removeDefaults(defaults) }
         let profile = VoiceProfile.defaultOpenAI()
         let controller = makeController(
             profiles: [profile],
@@ -73,7 +71,6 @@ final class SettingsAutoApplyTests: XCTestCase {
 
     func testAppKitControlEventsAutoApplyBeforeWindowClose() throws {
         let defaults = try makeDefaults()
-        defer { removeDefaults(defaults) }
         var openAI = VoiceProfile.defaultOpenAI(name: "OpenAI")
         openAI.hotKey = .defaultVoiceToggle
         var providerTarget = VoiceProfile.defaultOpenAI(
@@ -471,7 +468,6 @@ final class SettingsAutoApplyTests: XCTestCase {
 
     func testFocusedTextFieldCommitsLatestFieldEditorValueOnClose() throws {
         let defaults = try makeDefaults()
-        defer { removeDefaults(defaults) }
         let profile = VoiceProfile.defaultOpenAI()
         let controller = makeController(
             profiles: [profile],
@@ -501,7 +497,6 @@ final class SettingsAutoApplyTests: XCTestCase {
     func testInvalidEndpointStaysInlineAndDoesNotOverwriteCommittedValue()
         throws {
         let defaults = try makeDefaults()
-        defer { removeDefaults(defaults) }
         var profile = VoiceProfile.defaultOpenAI()
         profile.providerID = .custom
         profile.endpointURL = "wss://working.example.com/realtime"
@@ -530,7 +525,6 @@ final class SettingsAutoApplyTests: XCTestCase {
 
     func testAddDuplicateDeleteEachAutoApply() throws {
         let defaults = try makeDefaults()
-        defer { removeDefaults(defaults) }
         let original = VoiceProfile.defaultOpenAI(name: "Original")
         let controller = makeController(
             profiles: [original],
@@ -604,7 +598,6 @@ final class SettingsAutoApplyTests: XCTestCase {
 
     func testMCPAddEditRemoveEachAutoApplyAndRoundTrip() throws {
         let defaults = try makeDefaults()
-        defer { removeDefaults(defaults) }
         let credentials = InMemoryCredentialStore()
         let profile = VoiceProfile.defaultOpenAI()
         let controller = makeController(
@@ -792,7 +785,6 @@ final class SettingsAutoApplyTests: XCTestCase {
 
     func testOpenClawLoadAndApplyUseSameCommittedEndpoint() throws {
         let defaults = try makeDefaults()
-        defer { removeDefaults(defaults) }
         var profile = VoiceProfile(
             name: "OpenClaw",
             providerID: .openClaw,
@@ -2092,14 +2084,7 @@ final class SettingsAutoApplyTests: XCTestCase {
     }
 
     private func makeDefaults() throws -> UserDefaults {
-        let name = "VoiceKeyTests.\(UUID().uuidString)"
-        return try XCTUnwrap(UserDefaults(suiteName: name))
-    }
-
-    private func removeDefaults(_ defaults: UserDefaults) {
-        for key in defaults.dictionaryRepresentation().keys {
-            defaults.removeObject(forKey: key)
-        }
+        makeTestDefaults()
     }
 
     private func findTextField(

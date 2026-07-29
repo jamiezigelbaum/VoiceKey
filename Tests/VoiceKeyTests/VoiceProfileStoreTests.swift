@@ -5,11 +5,7 @@ import XCTest
 
 final class VoiceProfileStoreTests: XCTestCase {
     func testSaveAndLoadRoundTrip() throws {
-        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let defaults = makeTestDefaults()
 
         let profiles = [
             VoiceProfile(
@@ -53,11 +49,7 @@ final class VoiceProfileStoreTests: XCTestCase {
     }
 
     func testLegacySavedProfileWithoutMCPServersDecodesWithEmptyList() throws {
-        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let defaults = makeTestDefaults()
 
         let profileID = UUID()
         let legacyProfile: [[String: Any]] = [[
@@ -83,11 +75,7 @@ final class VoiceProfileStoreTests: XCTestCase {
     }
 
     func testFreshInstallSeedsDefaultOpenAIProfile() throws {
-        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let defaults = makeTestDefaults()
 
         XCTAssertTrue(VoiceProfileStore.isFreshInstall(defaults: defaults))
 
@@ -111,11 +99,7 @@ final class VoiceProfileStoreTests: XCTestCase {
     }
 
     func testLegacySettingsMigrateIntoFirstProfile() throws {
-        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let defaults = makeTestDefaults()
 
         let hotKey = HotKeyConfiguration(
             keyCode: UInt32(kVK_ANSI_V),
@@ -151,11 +135,7 @@ final class VoiceProfileStoreTests: XCTestCase {
     }
 
     func testLegacyMigrationFallsBackToOpenAIForUnknownProvider() throws {
-        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let defaults = makeTestDefaults()
 
         defaults.set("not-a-real-provider", forKey: "VoiceProvider.providerID")
 
@@ -175,11 +155,7 @@ final class VoiceProfileStoreTests: XCTestCase {
     }
 
     func testSavedProfilesWinOverLegacySettings() throws {
-        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let defaults = makeTestDefaults()
 
         HotKeyConfiguration.defaultVoiceToggle.saveAsVoiceToggle(defaults: defaults)
         defaults.set(VoiceProviderID.geminiLive.rawValue, forKey: "VoiceProvider.providerID")
@@ -208,16 +184,7 @@ final class VoiceProfileStoreTests: XCTestCase {
 
     func testOpenAISaveKeepsLegacyWebSearchFlagTrueForDowngrade()
         throws {
-        let suiteName =
-            "VoiceKeyTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(
-            UserDefaults(suiteName: suiteName)
-        )
-        defer {
-            defaults.removePersistentDomain(
-                forName: suiteName
-            )
-        }
+        let defaults = makeTestDefaults()
         var profile = VoiceProfile.defaultOpenAI()
         profile.webSearchEnabled = false
 
@@ -236,11 +203,7 @@ final class VoiceProfileStoreTests: XCTestCase {
     }
 
     func testPreWorkOrderFixtureRoundTripsWithoutRenamingStorage() throws {
-        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let defaults = makeTestDefaults()
         let fixture = Data(
             """
             [{

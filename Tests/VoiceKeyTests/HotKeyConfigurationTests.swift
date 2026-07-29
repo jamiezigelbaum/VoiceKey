@@ -72,11 +72,7 @@ final class HotKeyConfigurationTests: XCTestCase {
     }
 
     func testSavedVoiceToggleCanBeLoaded() throws {
-        let suiteName = "VoiceKeyTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let defaults = makeTestDefaults()
 
         let hotKey = HotKeyConfiguration(
             keyCode: UInt32(kVK_ANSI_V),
