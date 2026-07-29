@@ -83,8 +83,12 @@ struct OpenClawRuntimePanelSnapshot: Equatable {
 }
 
 struct SettingsWindowSizingSnapshot: Equatable {
+    /// What the window actually got. A small screen clamps this — CI runners
+    /// have one — so it is not the thing to assert the design against.
     var contentHeight: CGFloat
     var formHeight: CGFloat
+    /// The height the window asks for, independent of the screen it lands on.
+    var defaultContentHeight: CGFloat
 }
 
 struct CredentialFieldSnapshot: Equatable {
@@ -451,12 +455,19 @@ final class SettingsWindowController: NSWindowController {
         )
     }
 
+    /// 980, not 900: a channel missing its key with a fallback shortcut and a
+    /// denied microphone fits three rows and three reason lines, measured at
+    /// 966pt. The reason lines are the part that answers "what does this
+    /// channel still need", so the window grows instead of trimming them.
+    static let defaultContentHeight: CGFloat = 980
+
     var windowSizingSnapshot: SettingsWindowSizingSnapshot {
         window?.contentView?.layoutSubtreeIfNeeded()
         formStackView.layoutSubtreeIfNeeded()
         return SettingsWindowSizingSnapshot(
             contentHeight: window?.contentLayoutRect.height ?? 0,
-            formHeight: formStackView.fittingSize.height
+            formHeight: formStackView.fittingSize.height,
+            defaultContentHeight: Self.defaultContentHeight
         )
     }
 
@@ -778,11 +789,12 @@ final class SettingsWindowController: NSWindowController {
         )
 
         let window = NSWindow(
-            // 980, not 900: a channel missing its key with a fallback shortcut
-            // and a denied microphone fits three rows and three reason lines,
-            // measured at 966pt. The reason lines are the part that answers
-            // "what does this channel still need", so the window grows instead.
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 980),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: 620,
+                height: Self.defaultContentHeight
+            ),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -3288,7 +3300,10 @@ final class VoiceChannelProviderPickerView: NSView {
             layoutSubtreeIfNeeded()
             tallest = max(tallest, stack.fittingSize.height)
         }
-        return tallest
+        // Layout rounds a fractional height up, so reserving 94.5 leaves a
+        // 95pt subview half a point outside the accessory. Font metrics differ
+        // by machine, so this bit only ever showed up on CI.
+        return ceil(tallest)
     }
 
     @available(*, unavailable)
