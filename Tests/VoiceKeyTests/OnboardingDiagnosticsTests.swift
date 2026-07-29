@@ -566,12 +566,7 @@ final class OnboardingWizardDiagnosticsTests: XCTestCase {
             @escaping (Result<Void, Error>) -> Void
         ) -> Void = { _ in }
     ) -> OnboardingWizardController {
-        let suiteName = "OnboardingWizardDiagnosticsTests-\(UUID())"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
-        addTeardownBlock {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let defaults = makeTestDefaults()
         OnboardingServicePreferences.saveSelectedServices(
             services,
             defaults: defaults
