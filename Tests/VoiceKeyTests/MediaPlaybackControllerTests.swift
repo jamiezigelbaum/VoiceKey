@@ -109,13 +109,20 @@ final class MediaPlaybackControllerTests: XCTestCase {
 
     /// The decision tests run the work inline, so every assertion is about what
     /// the controller decided rather than when a queue got round to it.
+    /// Test clock. Advanced by hand so the failure backoff can be exercised
+    /// without a test that waits ten real minutes.
+    private var clock = Date(timeIntervalSince1970: 1_000_000)
+
     private func makeController(
         players: [MediaPlayer] = [.music, .spotify]
     ) -> MediaPlaybackController {
         let controller = MediaPlaybackController(
             scripting: scripting,
             players: players,
-            execute: { $0() }
+            execute: { $0() },
+            now: { [weak self] in
+                self?.clock ?? Date(timeIntervalSince1970: 1_000_000)
+            }
         )
         controller.onDiagnostic = { [weak self] message in
             self?.log.append(message)
@@ -392,17 +399,32 @@ final class MediaPlaybackControllerTests: XCTestCase {
         XCTAssertEqual(log.first?.contains("not allowed to control"), true)
     }
 
-    func testDeniedPermissionLeavesTheControllerUsable() {
+    func testAPlayerThatFailedIsLeftAloneUntilItsRestIsOver() {
         scripting.running = ["Music"]
         scripting.states["Music"] = .failure(.permissionDenied)
         let controller = makeController(players: [.music])
-        let denied = UUID()
 
+        let denied = UUID()
         controller.channelDidActivate(denied)
         controller.channelDidDeactivate(denied)
+        let attemptsAfterFailure = scripting.calls.filter { $0 == .state("Music") }.count
 
-        // The owner grants it, and the very next channel works.
+        // Permission is granted, but the rest has not elapsed: a standing
+        // refusal must not make every channel start pay the timeout again.
         scripting.states["Music"] = .success(.playing)
+        let duringRest = UUID()
+        controller.channelDidActivate(duringRest)
+        controller.channelDidDeactivate(duringRest)
+        XCTAssertEqual(
+            scripting.calls.filter { $0 == .state("Music") }.count,
+            attemptsAfterFailure,
+            "a resting player must not be contacted again"
+        )
+
+        // Once the rest is over it recovers on its own, without a relaunch.
+        clock = clock.addingTimeInterval(
+            MediaPlaybackController.failureBackoff + 1
+        )
         let granted = UUID()
         controller.channelDidActivate(granted)
         scripting.states["Music"] = .success(.paused)

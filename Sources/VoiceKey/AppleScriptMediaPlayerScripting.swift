@@ -84,14 +84,17 @@ final class AppleScriptMediaPlayerScripting: MediaPlayerScripting {
     /// players (`scripts/dev/probe-media-scripting.swift`). Deliberately does
     /// not coerce `player state` to text: it compares against the enumerators
     /// instead, which both players define identically as `ePlS`.
-    /// Apple Events default to a 60-second timeout, and a real one was observed
-    /// on 2026-07-29: with the Mac locked, the automation-consent prompt could
-    /// not be shown, so the event sat for a full minute before returning -1712.
-    /// It did not block the voice session — that work is on its own queue — but
-    /// it did occupy the queue the resume has to come back through. Two seconds
-    /// is longer than a healthy player needs and short enough that a wedged one
-    /// cannot hold the music hostage.
-    static let appleEventTimeoutSeconds = 2
+    /// Apple Events default to a 60-second timeout. A bound is worth having —
+    /// the work has its own queue, but a wedged player would occupy the queue
+    /// the resume comes back through — and it must not be tight.
+    ///
+    /// Measured on real hardware, 2026-07-29, and this cost two runs to find:
+    /// at two seconds the very first event returned -1712 *before macOS had
+    /// presented the automation-consent dialog at all*, so no prompt was ever
+    /// shown, no permission could be granted, and the feature could never work
+    /// on any Mac. The bound has to outlast a person deciding, not just a
+    /// healthy player answering.
+    static let appleEventTimeoutSeconds = 30
 
     static func stateSource(for player: MediaPlayer) -> String {
         """

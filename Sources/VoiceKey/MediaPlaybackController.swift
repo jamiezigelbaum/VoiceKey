@@ -186,11 +186,41 @@ final class MediaPlaybackController {
         scripting: MediaPlayerScripting,
         players: [MediaPlayer] = MediaPlayer.all,
         execute: @escaping WorkExecutor =
-            MediaPlaybackController.makeDefaultExecutor()
+            MediaPlaybackController.makeDefaultExecutor(),
+        now: @escaping () -> Date = Date.init
     ) {
         self.scripting = scripting
         self.players = players
         self.execute = execute
+        self.now = now
+    }
+
+    /// How long a player is left alone after it fails to answer.
+    ///
+    /// Measured on real hardware 2026-07-29: with automation for Music turned
+    /// off in System Settings, the event does not come back "denied" — it sits
+    /// until it times out. Without a rest period every single channel start
+    /// pays that stall again, on the queue the resume has to come back through,
+    /// for as long as the app runs. Ten minutes is long enough that a standing
+    /// refusal costs almost nothing and short enough that turning the toggle
+    /// back on takes effect without relaunching.
+    static let failureBackoff: TimeInterval = 600
+
+    private let now: () -> Date
+    private var restingUntil: [MediaPlayer: Date] = [:]
+
+    /// A player that just failed is not asked again until it has had its rest.
+    private func isResting(_ player: MediaPlayer) -> Bool {
+        guard let until = restingUntil[player] else { return false }
+        guard now() < until else {
+            restingUntil[player] = nil
+            return false
+        }
+        return true
+    }
+
+    private func rest(_ player: MediaPlayer) {
+        restingUntil[player] = now().addingTimeInterval(Self.failureBackoff)
     }
 
     /// A pause is a synchronous Apple Event round trip, and the caller is the
@@ -282,6 +312,7 @@ final class MediaPlaybackController {
         for player in players {
             // The launch guard. `tell application "Music"` *launches* Music in
             // order to ask it anything; the process list does not.
+            guard isResting(player) == false else { continue }
             guard scripting.isRunning(player) else { continue }
 
             switch scripting.state(of: player) {
@@ -291,6 +322,7 @@ final class MediaPlaybackController {
                     pausedPlayers.append(player)
                     paused.append(player)
                 case let .failure(failure):
+                    rest(player)
                     report(failure, couldNot: "pause", player: player)
                 }
             case .success(.paused), .success(.stopped):
@@ -298,6 +330,7 @@ final class MediaPlaybackController {
                 // resumed when the channel closes.
                 continue
             case let .failure(failure):
+                rest(player)
                 report(
                     failure,
                     couldNot: "read the state of",
@@ -326,6 +359,7 @@ final class MediaPlaybackController {
         var resumed: [MediaPlayer] = []
         for player in candidates {
             // Quit while we were talking. Asking would relaunch it.
+            guard isResting(player) == false else { continue }
             guard scripting.isRunning(player) else { continue }
 
             switch scripting.state(of: player) {
@@ -334,6 +368,7 @@ final class MediaPlaybackController {
                 case .success:
                     resumed.append(player)
                 case let .failure(failure):
+                    rest(player)
                     report(failure, couldNot: "resume", player: player)
                 }
             case .success(.playing), .success(.stopped):
@@ -341,6 +376,7 @@ final class MediaPlaybackController {
                 // Either way the state it is in now is the one they chose.
                 continue
             case let .failure(failure):
+                rest(player)
                 report(
                     failure,
                     couldNot: "read the state of",
