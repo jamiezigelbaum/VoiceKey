@@ -867,13 +867,7 @@ final class OnboardingWizardControllerServiceTests:
     }
 
     private func makeDefaults() -> UserDefaults {
-        let suiteName =
-            "OnboardingWizardControllerServiceTests-\(UUID())"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
-        addTeardownBlock {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let defaults = makeTestDefaults()
         return defaults
     }
 }
@@ -1031,12 +1025,7 @@ final class OnboardingWizardWindowTests: XCTestCase {
     }
 
     private func makeDefaults() -> UserDefaults {
-        let suiteName = "OnboardingWizardWindowTests-\(UUID())"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
-        addTeardownBlock {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let defaults = makeTestDefaults()
         return defaults
     }
 }
@@ -1153,19 +1142,14 @@ private final class ActivationPolicyRecorder {
 
 final class OnboardingServicePreferencesTests: XCTestCase {
     private var defaults: UserDefaults!
-    private var suiteName: String!
 
     override func setUp() {
         super.setUp()
-        suiteName = "OnboardingServicePreferencesTests-\(UUID())"
-        defaults = UserDefaults(suiteName: suiteName)
-        defaults.removePersistentDomain(forName: suiteName)
+        defaults = makeTestDefaults()
     }
 
     override func tearDown() {
-        defaults.removePersistentDomain(forName: suiteName)
         defaults = nil
-        suiteName = nil
         super.tearDown()
     }
 
