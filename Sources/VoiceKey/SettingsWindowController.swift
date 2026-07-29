@@ -3270,7 +3270,13 @@ final class VoiceChannelProviderPickerView: NSView {
             // never binds; it stays as the loud failure if that ever stops
             // being true, instead of silent clipping.
             stack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
-            popup.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            popup.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            // Pin the wrapping labels to the same width they were measured at.
+            // Left to the stack's leading alignment they can lay out at a
+            // different width than `preferredMaxLayoutWidth`, wrap differently,
+            // and overflow the height reserved for them.
+            descriptionLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            requirementsLabel.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
 
         // NSAlert lays its accessory view out exactly once, before `runModal()`
@@ -3298,11 +3304,19 @@ final class VoiceChannelProviderPickerView: NSView {
             requirementsLabel.stringValue =
                 ChannelSetupPolicy.requirementSummary(for: provider)
             layoutSubtreeIfNeeded()
-            tallest = max(tallest, stack.fittingSize.height)
+            // The stack's own `fittingSize` under-reported a wrapping stack by
+            // a point on CI, and the content then overflowed the height
+            // reserved from it. Adding the arranged subviews up cannot
+            // under-report, so take whichever is larger.
+            let spacing = stack.spacing
+                * CGFloat(max(stack.arrangedSubviews.count - 1, 0))
+            let stacked = stack.arrangedSubviews.reduce(spacing) {
+                $0 + $1.fittingSize.height
+            }
+            tallest = max(tallest, stack.fittingSize.height, stacked)
         }
-        // Layout rounds a fractional height up, so reserving 94.5 leaves a
-        // 95pt subview half a point outside the accessory. Font metrics differ
-        // by machine, so this bit only ever showed up on CI.
+        // Fractional heights round up in layout, so 94.5 reserved leaves a 95pt
+        // subview half a point outside the accessory.
         return ceil(tallest)
     }
 
