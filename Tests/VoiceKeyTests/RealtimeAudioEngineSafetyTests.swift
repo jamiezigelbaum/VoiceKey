@@ -94,3 +94,40 @@ extension RealtimeAudioEngineSafetyTests {
         XCTAssertEqual(operations.last, "disable voice processing")
     }
 }
+
+extension RealtimeAudioEngineSafetyTests {
+    /// Teardown turns voice processing off so other apps stop being ducked.
+    /// Nothing else turns it back on, so a start that skips this leaves echo
+    /// cancellation dead for every session after the first.
+    func testStartArmsVoiceProcessingBeforeCapturing() throws {
+        var operations: [String] = []
+
+        try RealtimeAudioEngine.performStart(
+            armVoiceProcessing: { operations.append("arm voice processing") },
+            startCapture: { operations.append("start capture") }
+        )
+
+        XCTAssertEqual(
+            operations,
+            ["arm voice processing", "start capture"],
+            """
+            voice processing must be armed before capture begins: the setting \
+            cannot be changed on a running engine, and teardown left it off.
+            """
+        )
+    }
+
+    /// A session must still start when arming fails — degraded echo
+    /// cancellation is better than no voice at all, and the speaker-mode policy
+    /// already forces mic gating when AEC is inactive.
+    func testCaptureStillStartsWhenArmingVoiceProcessingFails() throws {
+        var captured = false
+
+        try RealtimeAudioEngine.performStart(
+            armVoiceProcessing: { /* swallowed failure, as in production */ },
+            startCapture: { captured = true }
+        )
+
+        XCTAssertTrue(captured)
+    }
+}
