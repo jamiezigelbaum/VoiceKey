@@ -5,9 +5,16 @@ It is the current state of play — what's built, what's released, what's open,
 and what the next step is. Read it before doing anything substantive.
 
 VoiceKey is a native macOS (Swift/AppKit) menu-bar app that maps global
-hotkeys to realtime voice providers. It is the neutral mapping layer: it
-never runs a backend and never executes tools itself — tools live in the
-channel.
+hotkeys to realtime voice providers. It runs no backend of its own and holds
+no VoiceKey-owned credentials: work is done by the provider the owner chose,
+with the owner's own key.
+
+It MAY execute a tool locally when that is the best way to give the owner
+working functionality — web search is done exactly that way, by calling the
+OpenAI Responses API with the user's own key. The older rule that VoiceKey
+"never executes tools itself — tools live in the channel" was retired on
+2026-07-30: it had begun vetoing features the owner wanted, and he did not
+recognise it as his.
 
 ## Project rules (each one paid for by a shipped defect)
 
