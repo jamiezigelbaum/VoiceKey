@@ -1,6 +1,6 @@
 # VoiceKey — agent instructions
 
-**Start here: [`docs/SESSION_HANDOFF_2026-07-27.md`](docs/SESSION_HANDOFF_2026-07-27.md).**
+**Start here: [`docs/SESSION_HANDOFF_2026-07-30.md`](docs/SESSION_HANDOFF_2026-07-30.md).**
 It is the current state of play — what's built, what's released, what's open,
 and what the next step is. Read it before doing anything substantive.
 
