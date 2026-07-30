@@ -101,14 +101,33 @@ final class OpenAIRealtimeEventMapperTests: XCTestCase {
         )
     }
 
-    func testResponseDoneMapsBackToListening() {
-        XCTAssertEqual(
-            OpenAIRealtimeEventMapper.actions(from: #"{"type":"response.done"}"#),
-            [
-                .providerEvent(.status(.listening)),
-                .responseEnded
-            ]
+    /// `response.done` means the server finished sending, not that the speaker
+    /// went quiet — the buffer usually has seconds left. Mapping it straight to
+    /// listening stopped the menu-bar animation while she was still audibly
+    /// talking, so the mapper now reports only that the audio is complete and
+    /// the provider decides when listening resumes.
+    func testResponseDoneReportsAudioCompleteRatherThanListening() throws {
+        let actions = OpenAIRealtimeEventMapper.actions(
+            from: #"{"type":"response.done"}"#
         )
+
+        XCTAssertEqual(actions, [.assistantAudioComplete, .responseEnded])
+        XCTAssertFalse(
+            actions.contains(.providerEvent(.status(.listening))),
+            "reporting listening here is what desynced the speaking animation"
+        )
+    }
+
+    func testAudioDoneReportsAudioCompleteRatherThanListening() {
+        for type in ["response.output_audio.done", "response.audio.done"] {
+            XCTAssertEqual(
+                OpenAIRealtimeEventMapper.actions(
+                    from: #"{"type":"\#(type)"}"#
+                ),
+                [.assistantAudioComplete],
+                "\(type) must not claim the assistant stopped speaking"
+            )
+        }
     }
 
     func testFunctionCallArgumentsMapCallIDAndOpaqueArguments() {
