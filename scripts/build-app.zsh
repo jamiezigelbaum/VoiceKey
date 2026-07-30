@@ -34,4 +34,14 @@ if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID 
     || codesign --force --deep --entitlements "$ROOT/VoiceKey.entitlements" \
     --sign "Developer ID Application: JAMIE B ZIGELBAUM (5L9687WCZQ)" "$APP"
   echo "signed: $(codesign -dv "$APP" 2>&1 | grep '^Authority' | head -1)"
+else
+  # No Developer ID here (CI, or a fresh clone). Ad-hoc sign anyway, WITH the
+  # entitlements: an unsigned bundle carries none, so there would be nothing
+  # for verify-app-entitlements.zsh to inspect and the release gate would only
+  # ever run on the one machine that already works.
+  codesign --force --options runtime --entitlements "$ROOT/VoiceKey.entitlements" \
+    --sign - "$APP"
+  echo "signed: ad-hoc (no Developer ID identity available)"
 fi
+
+"$ROOT/scripts/verify-app-entitlements.zsh" "$APP"

@@ -16,3 +16,5 @@ jobs:
         run: swift test
       - name: Build app bundle
         run: ./scripts/build-app.zsh
+      - name: Verify the built artifact carries its entitlements
+        run: ./scripts/verify-app-entitlements.zsh .build/VoiceKey.app

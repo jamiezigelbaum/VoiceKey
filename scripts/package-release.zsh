@@ -38,6 +38,9 @@ if [[ -n "$SIGN_IDENTITY" ]]; then
     --entitlements "$ROOT/VoiceKey.entitlements" \
     --sign "$SIGN_IDENTITY" "$STAGE_DIR/$APP_NAME.app"
   codesign --verify --strict --verbose=2 "$STAGE_DIR/$APP_NAME.app"
+  # The release artifact is the one that matters: this is the check that would
+  # have caught the v0.2.0/v0.2.1 dead microphone.
+  "$ROOT/scripts/verify-app-entitlements.zsh" "$STAGE_DIR/$APP_NAME.app"
 else
   echo "Skipping code signing. Set VOICEKEY_SIGN_IDENTITY to sign a public build."
 fi
