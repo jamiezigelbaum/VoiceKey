@@ -28,7 +28,7 @@ enum VoiceProviderID: String, CaseIterable, Codable, Equatable {
     var settingsDescription: String {
         switch self {
         case .openAIRealtime:
-            return "OpenAI Realtime API — your OpenAI API key; pick model & voice; web search via MCP"
+            return "OpenAI Realtime API — your OpenAI API key; pick model & voice; built-in web search"
         case .chatGPTWeb:
             return "ChatGPT (web) — your ChatGPT subscription in a window; GPT-Live voice when available; OpenAI controls model & voice"
         case .geminiLive:
@@ -379,7 +379,7 @@ struct VoiceSessionConfiguration: Equatable {
     var instructions: String
     var endpointURL: String = ""
     var mcpServers: [MCPServerConfiguration] = []
-    var webSearchEnabled: Bool = false
+    var webSearchEnabled: Bool = true
     var speakerModePreference: OpenAISpeakerModePreference = .automatic
 
     // Empty by design (owner ruling 2026-07-24): VoiceKey is the app, not

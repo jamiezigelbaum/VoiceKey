@@ -64,6 +64,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         return engine
     }()
     private let webSocketTaskFactory: ((URLRequest) -> OpenAIRealtimeWebSocketTaskProtocol)?
+    private let webSearcher: OpenAIWebSearching
+    private let webSearchTimeout: TimeInterval
     private let now: () -> Date
     private let gateNow: () -> Date
     private let stateQueue = DispatchQueue(label: "VoiceKey.OpenAIRealtimeProvider")
@@ -89,6 +91,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     private var currentAssistantMessageItemID: String?
     private var lastSessionSpeakerMode: Bool?
     private var hasReportedAECFallback = false
+    private var pendingWebSearches: [String: Int] = [:]
 
     private static let fatalAudioFailureMessage =
         "Microphone audio stopped after repeated audio device failures. Start the voice session again."
@@ -99,6 +102,9 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         apiKeyProvider: @escaping () -> String?,
         audioEngine: RealtimeAudioEngineProtocol? = nil,
         webSocketTaskFactory: ((URLRequest) -> OpenAIRealtimeWebSocketTaskProtocol)? = nil,
+        webSearcher: OpenAIWebSearching =
+            OpenAIResponsesWebSearchClient(),
+        webSearchTimeout: TimeInterval = 20,
         now: @escaping () -> Date = Date.init,
         gateNow: @escaping () -> Date = Date.init
     ) {
@@ -110,6 +116,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             self.audioEngineProvider = { RealtimeAudioEngine() }
         }
         self.webSocketTaskFactory = webSocketTaskFactory
+        self.webSearcher = webSearcher
+        self.webSearchTimeout = webSearchTimeout
         self.now = now
         self.gateNow = gateNow
         super.init()
@@ -190,6 +198,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         hasReportedMicrophoneAudio = false
         hasReportedMicrophoneSignal = false
         resetMCPContinuationState()
+        pendingWebSearches.removeAll()
         resetSpeakerModeState()
         emit(.status(.ready))
     }
@@ -233,6 +242,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
               isStopping == false else { return }
 
         resetMCPContinuationState()
+        pendingWebSearches.removeAll()
         resetSpeakerModeState()
         guard let request = OpenAIRealtimeRequestBuilder.webSocketRequest(
             baseURL: OpenAIRealtimeRequestBuilder.normalizedBaseURL(for: configuration.endpointURL),
@@ -286,6 +296,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             isConnected = false
             isAudioStreaming = false
             resetMCPContinuationState()
+            pendingWebSearches.removeAll()
             resetSpeakerModeState()
             emit(.status(.needsAttention(error.localizedDescription)))
         }
@@ -367,6 +378,7 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
                     self.isConnected = false
                     self.isAudioStreaming = false
                     self.resetMCPContinuationState()
+                    self.pendingWebSearches.removeAll()
                     self.resetSpeakerModeState()
                     self.audioEngine.stop()
                     self.emit(.status(.needsAttention(error.localizedDescription)))
@@ -415,6 +427,11 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
                 currentAssistantMessageItemID = itemID
                 speakerGate.beginAssistantTurn()
                 audioEngine.beginAssistantAudioTurn()
+            case let .webSearchFunctionCall(callID, arguments):
+                handleWebSearchFunctionCall(
+                    callID: callID,
+                    arguments: arguments
+                )
             case .mcpCallTerminated:
                 handleMCPCallTermination()
             case .stopPlayback:
@@ -441,6 +458,132 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             return
         }
         sendMCPContinuation()
+    }
+
+    private func handleWebSearchFunctionCall(
+        callID: String,
+        arguments: String
+    ) {
+        guard pendingWebSearches[callID] == nil else { return }
+        guard configuration.providerID == .openAIRealtime,
+              configuration.webSearchEnabled else {
+            finishWebSearch(
+                callID: callID,
+                output:
+                    "Web search is turned off for this voice channel.",
+                outcome: "disabled"
+            )
+            return
+        }
+        guard let query = Self.webSearchQuery(
+            from: arguments
+        ) else {
+            finishWebSearch(
+                callID: callID,
+                output:
+                    "Web search could not run because no valid query was provided.",
+                outcome: "invalid_arguments"
+            )
+            return
+        }
+        let apiKey = apiKeyProvider() ?? ""
+        guard apiKey.isEmpty == false else {
+            finishWebSearch(
+                callID: callID,
+                result: .failure(.missingAPIKey)
+            )
+            return
+        }
+
+        let generation = startGeneration
+        pendingWebSearches[callID] = generation
+        emit(.diagnostic(
+            "Built-in web search started (query length: \(query.count))."
+        ))
+        stateQueue.asyncAfter(
+            deadline: .now() + webSearchTimeout
+        ) { [weak self] in
+            guard let self,
+                  self.pendingWebSearches[callID] == generation
+            else {
+                return
+            }
+            self.finishWebSearch(
+                callID: callID,
+                result: .failure(.timedOut)
+            )
+        }
+        webSearcher.search(
+            query: query,
+            apiKey: apiKey
+        ) { [weak self] result in
+            self?.asyncOnStateQueue { [weak self] in
+                guard let self,
+                      self.pendingWebSearches[callID] == generation
+                else {
+                    return
+                }
+                self.finishWebSearch(
+                    callID: callID,
+                    result: result
+                )
+            }
+        }
+    }
+
+    private static func webSearchQuery(
+        from arguments: String
+    ) -> String? {
+        guard let data = arguments.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(
+                with: data
+              ) as? [String: Any],
+              let query = object["query"] as? String
+        else {
+            return nil
+        }
+        let trimmed = query.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func finishWebSearch(
+        callID: String,
+        result: OpenAIWebSearchResult
+    ) {
+        switch result {
+        case let .success(output):
+            finishWebSearch(
+                callID: callID,
+                output: output,
+                outcome: "success"
+            )
+        case let .failure(failure):
+            finishWebSearch(
+                callID: callID,
+                output: failure.functionOutput,
+                outcome: failure.diagnosticCategory
+            )
+        }
+    }
+
+    private func finishWebSearch(
+        callID: String,
+        output: String,
+        outcome: String
+    ) {
+        pendingWebSearches.removeValue(forKey: callID)
+        emit(.diagnostic(
+            "Built-in web search finished (outcome: \(outcome))."
+        ))
+        sendJSON(
+            OpenAIRealtimeRequestBuilder.functionCallOutputEvent(
+                callID: callID,
+                output: output
+            )
+        )
+        sendJSON(["type": "response.create"])
     }
 
     private func sendPendingMCPContinuationIfNeeded() {
@@ -653,6 +796,7 @@ extension OpenAIRealtimeProvider: URLSessionWebSocketDelegate {
             isAudioStreaming = false
             isStarting = false
             resetMCPContinuationState()
+            pendingWebSearches.removeAll()
             resetSpeakerModeState()
             audioEngine.stop()
             emit(.status(OpenAIRealtimeConnectionDiagnostics.closeStatus(code: closeCode, reason: reason)))
