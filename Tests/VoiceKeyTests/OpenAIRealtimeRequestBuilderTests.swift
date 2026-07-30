@@ -35,10 +35,8 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
             session["tools"] as? [[String: Any]]
         )
         XCTAssertEqual(tools.count, 1)
-        XCTAssertEqual(
-            tools.first?["server_label"] as? String,
-            "exa"
-        )
+        XCTAssertEqual(tools.first?["type"] as? String, "function")
+        XCTAssertEqual(tools.first?["name"] as? String, "search_web")
 
         let audio = try dictionary(session["audio"])
         let input = try dictionary(audio["input"])
@@ -128,10 +126,8 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         let session = try dictionary(event["session"])
         let tools = try XCTUnwrap(session["tools"] as? [[String: Any]])
         XCTAssertEqual(tools.count, 3)
-        XCTAssertEqual(
-            tools[0]["server_label"] as? String,
-            "exa"
-        )
+        XCTAssertEqual(tools[0]["type"] as? String, "function")
+        XCTAssertEqual(tools[0]["name"] as? String, "search_web")
         XCTAssertEqual(tools[1]["type"] as? String, "mcp")
         XCTAssertEqual(tools[1]["server_label"] as? String, "calendar")
         XCTAssertEqual(
@@ -207,6 +203,29 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         XCTAssertEqual(event["audio_end_ms"] as? Int, 0)
     }
 
+    func testFunctionCallOutputUsesOriginalCallID() throws {
+        let event =
+            OpenAIRealtimeRequestBuilder.functionCallOutputEvent(
+                callID: "call-search-42",
+                output: "Current answer"
+            )
+
+        XCTAssertEqual(
+            event["type"] as? String,
+            "conversation.item.create"
+        )
+        let item = try dictionary(event["item"])
+        XCTAssertEqual(
+            item["type"] as? String,
+            "function_call_output"
+        )
+        XCTAssertEqual(
+            item["call_id"] as? String,
+            "call-search-42"
+        )
+        XCTAssertEqual(item["output"] as? String, "Current answer")
+    }
+
     private var testConfiguration: VoiceSessionConfiguration {
         VoiceSessionConfiguration(
             providerID: .openAIRealtime,
@@ -220,16 +239,14 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         try XCTUnwrap(value as? [String: Any], file: file, line: line)
     }
 
-    func testOpenAIAlwaysInjectsExaMCPServerAndNoInvalidHostedType() throws {
-        // Web search is delivered as the Exa remote MCP server (Realtime
-        // executes it server-side); it must never be an invalid hosted type.
+    func testEnabledOpenAISearchDeclaresFunctionBeforeCustomMCPServers() throws {
         var configuration = VoiceSessionConfiguration(
             providerID: .openAIRealtime,
             model: "gpt-realtime-2-test",
             voice: "marin",
             instructions: "Keep it concise."
         )
-        configuration.webSearchEnabled = false
+        configuration.webSearchEnabled = true
         configuration.mcpServers = [
             MCPServerConfiguration(label: "deepwiki", urlString: "https://mcp.deepwiki.com/mcp")
         ]
@@ -242,15 +259,20 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         let tools = try XCTUnwrap(session["tools"] as? [[String: Any]])
         let types = tools.compactMap { $0["type"] as? String }
         XCTAssertTrue(types.allSatisfy { $0 == "function" || $0 == "mcp" })
-        let exa = tools.first { ($0["server_label"] as? String) == "exa" }
-        XCTAssertEqual(exa?["type"] as? String, "mcp")
-        XCTAssertEqual(exa?["server_url"] as? String, OpenAIRealtimeRequestBuilder.exaWebSearchServerURL)
-        XCTAssertEqual(exa?["require_approval"] as? String, "never")
-        // Exa is listed before the user's own MCP servers.
-        XCTAssertEqual(tools.first?["server_label"] as? String, "exa")
+        XCTAssertEqual(tools.count, 2)
+        XCTAssertEqual(tools[0]["type"] as? String, "function")
+        XCTAssertEqual(tools[0]["name"] as? String, "search_web")
+        XCTAssertEqual(tools[1]["type"] as? String, "mcp")
+        XCTAssertEqual(tools[1]["server_label"] as? String, "deepwiki")
+        let parameters = try XCTUnwrap(tools[0]["parameters"] as? [String: Any])
+        XCTAssertEqual(parameters["type"] as? String, "object")
+        XCTAssertEqual(parameters["required"] as? [String], ["query"])
+        let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+        let query = try XCTUnwrap(properties["query"] as? [String: Any])
+        XCTAssertEqual(query["type"] as? String, "string")
     }
 
-    func testStoredWebSearchFlagFalseStillInjectsExa() throws {
+    func testDisabledOpenAISearchDoesNotDeclareSearchFunction() throws {
         var configuration = VoiceSessionConfiguration(
             providerID: .openAIRealtime,
             model: "gpt-realtime-2-test",
@@ -263,14 +285,7 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
             authorizationProvider: { _ in nil }
         )
         let session = try XCTUnwrap(event["session"] as? [String: Any])
-        let tools = try XCTUnwrap(
-            session["tools"] as? [[String: Any]]
-        )
-        XCTAssertEqual(tools.count, 1)
-        XCTAssertEqual(
-            tools.first?["server_label"] as? String,
-            "exa"
-        )
+        XCTAssertNil(session["tools"])
     }
 
     func testCustomProtocolDoesNotReceiveOpenAIWebSearch() throws {

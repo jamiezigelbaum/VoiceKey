@@ -111,6 +111,24 @@ final class OpenAIRealtimeEventMapperTests: XCTestCase {
         )
     }
 
+    func testFunctionCallArgumentsMapCallIDAndOpaqueArguments() {
+        XCTAssertEqual(
+            OpenAIRealtimeEventMapper.actions(
+                from:
+                    #"{"type":"response.function_call_arguments.done","call_id":"call-42","arguments":"{\"query\":\"today's news\"}"}"#
+            ),
+            [
+                .providerEvent(.diagnostic(
+                    "response.function_call_arguments.done"
+                )),
+                .webSearchFunctionCall(
+                    callID: "call-42",
+                    arguments: #"{"query":"today's news"}"#
+                )
+            ]
+        )
+    }
+
     func testErrorMapsToNeedsAttention() {
         XCTAssertEqual(
             OpenAIRealtimeEventMapper.actions(from: #"{"type":"error","error":{"message":"Bad key"}}"#),
@@ -119,13 +137,13 @@ final class OpenAIRealtimeEventMapperTests: XCTestCase {
     }
 
     func testMCPListToolsCompletedMapsToServerAndToolDiagnostic() {
-        let event = #"{"type":"mcp_list_tools.completed","server_label":"calendar","tools":[{"name":"search_events"}],"authorization":"must-not-log"}"#
+        let event = #"{"type":"mcp_list_tools.completed","server_label":"calendar","tools":[{"name":"search_events"},{"name":"create_event"}],"authorization":"must-not-log"}"#
 
         XCTAssertEqual(
             OpenAIRealtimeEventMapper.actions(from: event),
             [
                 .providerEvent(.diagnostic(
-                    "MCP mcp_list_tools.completed — server: calendar; tool: search_events."
+                    "MCP mcp_list_tools.completed — server: calendar; tool count: 2; tool: search_events."
                 ))
             ]
         )

@@ -283,6 +283,232 @@ final class OpenAIRealtimeSessionStopTests: XCTestCase {
         XCTAssertEqual(task.cancelCount, 1)
     }
 
+    func testWebSearchFunctionCallReturnsOutputThenContinuesResponse()
+        throws {
+        let task = FakeRealtimeWebSocketTask()
+        let searcher = FakeOpenAIWebSearcher(
+            result: .success("Search answer with sources")
+        )
+        let provider = OpenAIRealtimeProvider(
+            configuration: testConfiguration,
+            apiKeyProvider: { "channel-openai-key" },
+            audioEngine: FakeRealtimeAudioEngine(
+                grantsMicrophoneAccess: true
+            ),
+            webSocketTaskFactory: { _ in task },
+            webSearcher: searcher
+        )
+        provider.toggleVoice()
+        provider.webSocketDidOpen(task)
+
+        receive(
+            #"{"type":"response.function_call_arguments.done","call_id":"call-42","arguments":"{\"query\":\"current headlines\"}"}"#,
+            from: task,
+            provider: provider
+        )
+
+        XCTAssertEqual(searcher.queries, ["current headlines"])
+        XCTAssertEqual(searcher.apiKeys, ["channel-openai-key"])
+        XCTAssertEqual(task.sendCount, 3)
+        let outputEvent = try eventDictionary(
+            from: task.sentText(at: 1)
+        )
+        XCTAssertEqual(
+            outputEvent["type"] as? String,
+            "conversation.item.create"
+        )
+        let item = try XCTUnwrap(
+            outputEvent["item"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            item["type"] as? String,
+            "function_call_output"
+        )
+        XCTAssertEqual(item["call_id"] as? String, "call-42")
+        XCTAssertEqual(
+            item["output"] as? String,
+            "Search answer with sources"
+        )
+        XCTAssertEqual(
+            try eventType(from: task.sentText(at: 2)),
+            "response.create"
+        )
+    }
+
+    func testWebSearchFailureStillReturnsSpeakableFunctionOutput()
+        throws {
+        let task = FakeRealtimeWebSocketTask()
+        let searcher = FakeOpenAIWebSearcher(
+            result: .failure(.rateLimited)
+        )
+        let provider = OpenAIRealtimeProvider(
+            configuration: testConfiguration,
+            apiKeyProvider: { "channel-openai-key" },
+            audioEngine: FakeRealtimeAudioEngine(
+                grantsMicrophoneAccess: true
+            ),
+            webSocketTaskFactory: { _ in task },
+            webSearcher: searcher
+        )
+        provider.toggleVoice()
+        provider.webSocketDidOpen(task)
+
+        receive(
+            #"{"type":"response.function_call_arguments.done","call_id":"failed-call","arguments":"{\"query\":\"current headlines\"}"}"#,
+            from: task,
+            provider: provider
+        )
+
+        XCTAssertEqual(task.sendCount, 3)
+        let outputEvent = try eventDictionary(
+            from: task.sentText(at: 1)
+        )
+        let item = try XCTUnwrap(
+            outputEvent["item"] as? [String: Any]
+        )
+        let output = try XCTUnwrap(item["output"] as? String)
+        XCTAssertTrue(output.contains("rate limit"))
+        XCTAssertEqual(
+            try eventType(from: task.sentText(at: 2)),
+            "response.create"
+        )
+    }
+
+    func testWebSearchWithKeyRemovedStillReturnsFailureOutput()
+        throws {
+        let task = FakeRealtimeWebSocketTask()
+        var apiKey: String? = "channel-openai-key"
+        let searcher = FakeOpenAIWebSearcher(
+            result: .success("must not be used")
+        )
+        let provider = OpenAIRealtimeProvider(
+            configuration: testConfiguration,
+            apiKeyProvider: { apiKey },
+            audioEngine: FakeRealtimeAudioEngine(
+                grantsMicrophoneAccess: true
+            ),
+            webSocketTaskFactory: { _ in task },
+            webSearcher: searcher
+        )
+        provider.toggleVoice()
+        provider.webSocketDidOpen(task)
+        apiKey = nil
+
+        receive(
+            #"{"type":"response.function_call_arguments.done","call_id":"missing-key-call","arguments":"{\"query\":\"current headlines\"}"}"#,
+            from: task,
+            provider: provider
+        )
+
+        XCTAssertEqual(searcher.queries, [])
+        XCTAssertEqual(task.sendCount, 3)
+        let outputEvent = try eventDictionary(
+            from: task.sentText(at: 1)
+        )
+        let item = try XCTUnwrap(
+            outputEvent["item"] as? [String: Any]
+        )
+        XCTAssertTrue(
+            try XCTUnwrap(item["output"] as? String)
+                .contains("no OpenAI API key")
+        )
+        XCTAssertEqual(
+            try eventType(from: task.sentText(at: 2)),
+            "response.create"
+        )
+    }
+
+    func testHangingWebSearchTimesOutAndContinuesResponse() throws {
+        let task = FakeRealtimeWebSocketTask()
+        let searcher = FakeOpenAIWebSearcher(result: nil)
+        let provider = OpenAIRealtimeProvider(
+            configuration: testConfiguration,
+            apiKeyProvider: { "channel-openai-key" },
+            audioEngine: FakeRealtimeAudioEngine(
+                grantsMicrophoneAccess: true
+            ),
+            webSocketTaskFactory: { _ in task },
+            webSearcher: searcher,
+            webSearchTimeout: 0
+        )
+        provider.toggleVoice()
+        provider.webSocketDidOpen(task)
+
+        receive(
+            #"{"type":"response.function_call_arguments.done","call_id":"hung-call","arguments":"{\"query\":\"current headlines\"}"}"#,
+            from: task,
+            provider: provider
+        )
+
+        waitUntil(
+            { task.sendCount == 3 },
+            "timed-out search did not produce a continuation"
+        )
+        let outputEvent = try eventDictionary(
+            from: task.sentText(at: 1)
+        )
+        let item = try XCTUnwrap(
+            outputEvent["item"] as? [String: Any]
+        )
+        XCTAssertTrue(
+            try XCTUnwrap(item["output"] as? String)
+                .contains("timed out")
+        )
+        XCTAssertEqual(
+            try eventType(from: task.sentText(at: 2)),
+            "response.create"
+        )
+    }
+
+    func testWebSearchDiagnosticsNeverContainKeyQueryOrResult()
+        throws {
+        let task = FakeRealtimeWebSocketTask()
+        let apiKey = "sentinel-api-key-must-not-log"
+        let query = "sentinel query must not log"
+        let resultText = "sentinel result must not log"
+        let searcher = FakeOpenAIWebSearcher(
+            result: .success(resultText)
+        )
+        let provider = OpenAIRealtimeProvider(
+            configuration: testConfiguration,
+            apiKeyProvider: { apiKey },
+            audioEngine: FakeRealtimeAudioEngine(
+                grantsMicrophoneAccess: true
+            ),
+            webSocketTaskFactory: { _ in task },
+            webSearcher: searcher
+        )
+        var diagnostics: [String] = []
+        provider.onEvent = {
+            guard case let .diagnostic(message) = $0 else {
+                return
+            }
+            diagnostics.append(message)
+        }
+        provider.toggleVoice()
+        provider.webSocketDidOpen(task)
+
+        receive(
+            #"{"type":"response.function_call_arguments.done","call_id":"private-call","arguments":"{\"query\":\"sentinel query must not log\"}"}"#,
+            from: task,
+            provider: provider
+        )
+
+        waitUntil(
+            {
+                diagnostics.contains(where: {
+                    $0.contains("outcome: success")
+                })
+            },
+            "search outcome diagnostic did not arrive"
+        )
+        let logText = diagnostics.joined(separator: "\n")
+        XCTAssertFalse(logText.contains(apiKey))
+        XCTAssertFalse(logText.contains(query))
+        XCTAssertFalse(logText.contains(resultText))
+        XCTAssertTrue(logText.contains("query length: \(query.count)"))
+    }
+
     func testMCPCallTerminationSendsContinuationWhenResponseIsIdle() throws {
         let task = FakeRealtimeWebSocketTask()
         let provider = makeConnectedProvider(task: task)
@@ -499,9 +725,19 @@ final class OpenAIRealtimeSessionStopTests: XCTestCase {
     }
 
     private func eventType(from text: String?) throws -> String {
+        try XCTUnwrap(
+            eventDictionary(from: text)["type"] as? String
+        )
+    }
+
+    private func eventDictionary(
+        from text: String?
+    ) throws -> [String: Any] {
         let data = try XCTUnwrap(text?.data(using: .utf8))
-        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-        return try XCTUnwrap(object["type"] as? String)
+        return try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: data)
+                as? [String: Any]
+        )
     }
 
     private func receive(
@@ -512,6 +748,28 @@ final class OpenAIRealtimeSessionStopTests: XCTestCase {
     ) {
         task.completeReceive(.success(.string(text)), at: index)
         provider.prepare()
+    }
+}
+
+private final class FakeOpenAIWebSearcher: OpenAIWebSearching {
+    private let result: OpenAIWebSearchResult?
+    private(set) var queries: [String] = []
+    private(set) var apiKeys: [String] = []
+
+    init(result: OpenAIWebSearchResult?) {
+        self.result = result
+    }
+
+    func search(
+        query: String,
+        apiKey: String,
+        completion: @escaping (OpenAIWebSearchResult) -> Void
+    ) {
+        queries.append(query)
+        apiKeys.append(apiKey)
+        if let result {
+            completion(result)
+        }
     }
 }
 

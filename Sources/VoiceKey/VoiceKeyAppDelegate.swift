@@ -194,7 +194,8 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
                 ? profile.mcpServers
                 : [],
             webSearchEnabled:
-                profile.providerID == .openAIRealtime,
+                profile.providerID == .openAIRealtime
+                && profile.webSearchEnabled,
             speakerModePreference: profile.speakerModePreference
         )
     }

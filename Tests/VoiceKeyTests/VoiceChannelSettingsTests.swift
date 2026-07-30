@@ -104,7 +104,7 @@ final class VoiceProviderDescriptionTests: XCTestCase {
     func testOpenAIAndChatGPTDescriptionsExplainTheirDifferentProducts() {
         XCTAssertEqual(
             VoiceProviderID.openAIRealtime.settingsDescription,
-            "OpenAI Realtime API — your OpenAI API key; pick model & voice; web search via MCP"
+            "OpenAI Realtime API — your OpenAI API key; pick model & voice; built-in web search"
         )
         XCTAssertEqual(VoiceProviderID.chatGPTWeb.displayName, "ChatGPT (web)")
         XCTAssertEqual(

@@ -20,7 +20,7 @@ final class SettingsAutoApplyTests: XCTestCase {
         XCTAssertTrue(controller.apply(
             .endpointURL("wss://api.example.com/realtime")
         ))
-        XCTAssertTrue(controller.apply(.webSearchEnabled(true)))
+        XCTAssertTrue(controller.apply(.webSearchEnabled(false)))
         XCTAssertTrue(controller.apply(
             .speakerModePreference(.alwaysOn)
         ))
@@ -39,8 +39,73 @@ final class SettingsAutoApplyTests: XCTestCase {
             reopened.endpointURL,
             "wss://api.example.com/realtime"
         )
-        XCTAssertTrue(reopened.webSearchEnabled)
+        XCTAssertFalse(reopened.webSearchEnabled)
         XCTAssertEqual(reopened.speakerModePreference, .alwaysOn)
+    }
+
+    func testBuiltInWebSearchControlIsVisibleAndOnForOpenAI() {
+        let profile = VoiceProfile.defaultOpenAI()
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+
+        XCTAssertEqual(
+            controller.webSearchControlSnapshot,
+            WebSearchControlSnapshot(
+                isVisible: true,
+                isEnabled: true,
+                isOn: true
+            )
+        )
+        XCTAssertFalse(
+            controller.advancedDisclosureSnapshot.isExpanded
+        )
+    }
+
+    func testBuiltInWebSearchControlActionPersistsOptOut() throws {
+        let defaults = try makeDefaults()
+        let controller = makeController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            defaults: defaults
+        )
+        let control = try XCTUnwrap(
+            descendantButtons(
+                in: controller.window?.contentView
+            ).first(where: {
+                $0.title == "Use built-in web search"
+            })
+        )
+
+        control.state = .off
+        sendAction(for: control)
+
+        XCTAssertFalse(
+            try XCTUnwrap(
+                VoiceProfileStore.load(
+                    defaults: defaults
+                ).first
+            ).webSearchEnabled
+        )
+    }
+
+    func testBuiltInWebSearchControlIsHiddenForCustomEndpoint() {
+        let profile = VoiceProfile(
+            name: "Custom",
+            providerID: .custom,
+            model: "custom",
+            voice: "custom"
+        )
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+
+        XCTAssertFalse(
+            controller.webSearchControlSnapshot.isVisible
+        )
     }
 
     func testProviderPopupChangeAutoAppliesAndRoundTrips() throws {
@@ -92,6 +157,7 @@ final class SettingsAutoApplyTests: XCTestCase {
         )
         XCTAssertEqual(switched.providerID, .openAIRealtime)
         XCTAssertEqual(switched.endpointURL, "")
+        XCTAssertTrue(switched.webSearchEnabled)
 
         let configuration = VoiceSessionConfiguration(
             profileID: switched.id,
@@ -115,6 +181,28 @@ final class SettingsAutoApplyTests: XCTestCase {
         XCTAssertNotNil(
             request.value(forHTTPHeaderField: "Authorization")
         )
+    }
+
+    func testSwitchingAwayAndBackPreservesOpenAISearchOptOut()
+        throws {
+        let defaults = try makeDefaults()
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.webSearchEnabled = false
+        let controller = makeController(
+            profiles: [profile],
+            defaults: defaults
+        )
+
+        XCTAssertTrue(controller.apply(.provider(.custom)))
+        XCTAssertTrue(
+            controller.apply(.provider(.openAIRealtime))
+        )
+
+        let switched = try XCTUnwrap(
+            VoiceProfileStore.load(defaults: defaults).first
+        )
+        XCTAssertEqual(switched.providerID, .openAIRealtime)
+        XCTAssertFalse(switched.webSearchEnabled)
     }
 
     func testSwitchingBackRestoresTheProvidersOwnEndpoint() throws {

@@ -121,16 +121,10 @@ enum OpenAIRealtimeRequestBuilder {
         if includeModel {
             session["model"] = configuration.model
         }
-        // The Realtime API tools array accepts only "function" and "mcp"
-        // (verified live: it rejects "web_search" as an invalid value — that
-        // is a Responses API hosted tool, not a Realtime one). Web search is
-        // therefore delivered as a remote MCP server that the Realtime API
-        // executes server-side. OpenAI Realtime always injects the Exa MCP
-        // endpoint (validated live: anonymous, exposes web_search_exa /
-        // web_fetch_exa), keeping the "tools live in the channel" invariant.
         var tools: [[String: Any]] = []
-        if configuration.providerID == .openAIRealtime {
-            tools.append(Self.exaWebSearchTool)
+        if configuration.providerID == .openAIRealtime,
+           configuration.webSearchEnabled {
+            tools.append(Self.webSearchFunctionTool)
         }
         tools += configuration.mcpServers.map { server in
             var tool: [String: Any] = [
@@ -185,6 +179,20 @@ enum OpenAIRealtimeRequestBuilder {
         ]
     }
 
+    static func functionCallOutputEvent(
+        callID: String,
+        output: String
+    ) -> [String: Any] {
+        [
+            "type": "conversation.item.create",
+            "item": [
+                "type": "function_call_output",
+                "call_id": callID,
+                "output": output
+            ]
+        ]
+    }
+
     private static var pcm24kFormat: [String: Any] {
         [
             "type": "audio/pcm",
@@ -192,16 +200,23 @@ enum OpenAIRealtimeRequestBuilder {
         ]
     }
 
-    /// Exa's hosted web-search MCP server, executed server-side by the
-    /// Realtime API. Anonymous access is sufficient for basic search.
-    static let exaWebSearchServerURL = "https://mcp.exa.ai/mcp"
-    private static var exaWebSearchTool: [String: Any] {
+    private static var webSearchFunctionTool: [String: Any] {
         [
-            "type": "mcp",
-            "server_label": "exa",
-            "server_url": exaWebSearchServerURL,
-            "require_approval": "never",
-            "allowed_tools": ["web_search_exa", "web_fetch_exa"]
+            "type": "function",
+            "name": "search_web",
+            "description":
+                "Search the current web when up-to-date or externally sourced information is needed.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "query": [
+                        "type": "string",
+                        "description": "The web search query."
+                    ]
+                ],
+                "required": ["query"],
+                "additionalProperties": false
+            ]
         ]
     }
 }

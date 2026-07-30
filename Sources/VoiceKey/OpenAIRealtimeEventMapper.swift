@@ -6,6 +6,7 @@ enum OpenAIRealtimeEventAction: Equatable {
     case responseStarted
     case responseEnded
     case assistantMessageStarted(itemID: String)
+    case webSearchFunctionCall(callID: String, arguments: String)
     case mcpCallTerminated
     case stopPlayback
     case audio(Data)
@@ -69,6 +70,18 @@ enum OpenAIRealtimeEventMapper {
                 .assistantMessageStarted(itemID: itemID),
                 .providerEvent(.diagnostic(type))
             ]
+        case "response.function_call_arguments.done":
+            guard let callID = object["call_id"] as? String,
+                  let arguments = object["arguments"] as? String else {
+                return [.providerEvent(.diagnostic(type))]
+            }
+            return [
+                .providerEvent(.diagnostic(type)),
+                .webSearchFunctionCall(
+                    callID: callID,
+                    arguments: arguments
+                )
+            ]
         case "response.output_audio.delta", "response.audio.delta":
             guard let delta = object["delta"] as? String,
                   let audio = Data(base64Encoded: delta) else {
@@ -106,13 +119,19 @@ enum OpenAIRealtimeEventMapper {
             keys: ["server_label", "serverLabel"],
             objects: objects
         )
+        let toolNames = toolNames(in: objects)
         let toolName = firstString(
             keys: ["name", "tool_name", "toolName"],
             objects: objects
-        ) ?? toolNames(in: objects).first
+        ) ?? toolNames.first
 
         var details: [String] = []
         if let serverLabel { details.append("server: \(serverLabel)") }
+        if type == "mcp_list_tools.completed" {
+            details.append(
+                "tool count: \(toolCount(in: objects) ?? 0)"
+            )
+        }
         if let toolName { details.append("tool: \(toolName)") }
         guard details.isEmpty == false else { return "MCP \(type)." }
         return "MCP \(type) — \(details.joined(separator: "; "))."
@@ -141,5 +160,16 @@ enum OpenAIRealtimeEventMapper {
             }
         }
         return []
+    }
+
+    private static func toolCount(
+        in objects: [[String: Any]]
+    ) -> Int? {
+        for object in objects {
+            if let tools = object["tools"] as? [[String: Any]] {
+                return tools.count
+            }
+        }
+        return nil
     }
 }
