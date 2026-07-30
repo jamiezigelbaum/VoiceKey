@@ -87,6 +87,13 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
     private var isMCPContinuationPending = false
     private var consecutiveMCPContinuationCount = 0
     private var audioEngineState: RealtimeAudioEngineState?
+    /// True between the server finishing its audio and the speaker going quiet.
+    private var isAwaitingPlaybackDrain = false
+    /// Scopes the drain watchdog to the turn that armed it. A session-level
+    /// guard is not enough: a watchdog left over from an interrupted turn would
+    /// fire during a later one and report listening while she is speaking.
+    private var playbackDrainToken = UUID()
+    private static let playbackDrainTimeout: TimeInterval = 30
     private var speakerGate = OpenAIRealtimeSpeakerGate()
     private var currentAssistantMessageItemID: String?
     private var lastSessionSpeakerMode: Bool?
@@ -427,6 +434,8 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
                 currentAssistantMessageItemID = itemID
                 speakerGate.beginAssistantTurn()
                 audioEngine.beginAssistantAudioTurn()
+            case .assistantAudioComplete:
+                handleAssistantAudioComplete()
             case let .webSearchFunctionCall(callID, arguments):
                 handleWebSearchFunctionCall(
                     callID: callID,
@@ -435,6 +444,9 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
             case .mcpCallTerminated:
                 handleMCPCallTermination()
             case .stopPlayback:
+                // The owner cut her off: the mapper already reports listening,
+                // so cancel the hold without emitting a second one.
+                endPlaybackDrain(emitListening: false)
                 refreshAudioEngineState(resendSessionOnModeChange: true)
                 if speakerGate.isSpeakerMode,
                    audioEngineState?.isPlaybackActive == true {
@@ -613,6 +625,47 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         )
     }
 
+    /// The server finishing its audio is not the assistant finishing speaking:
+    /// the buffer usually has seconds left to play. Reporting `listening` at
+    /// that moment made the menu-bar animation stop while she was still audibly
+    /// talking (owner report, 2026-07-30). Hold the speaking state until local
+    /// playback actually drains.
+    private func handleAssistantAudioComplete() {
+        guard audioEngineState?.isPlaybackActive == true else {
+            endPlaybackDrain(emitListening: true)
+            return
+        }
+        isAwaitingPlaybackDrain = true
+        playbackDrainToken = UUID()
+        armPlaybackDrainWatchdog(token: playbackDrainToken)
+    }
+
+    /// One way out of the waiting state, so no path can leave it stuck on.
+    private func endPlaybackDrain(emitListening: Bool) {
+        isAwaitingPlaybackDrain = false
+        playbackDrainToken = UUID()
+        if emitListening {
+            emit(.status(.listening))
+        }
+    }
+
+    /// Playback state arrives from the audio engine, and a wedged or silently
+    /// failed engine would otherwise leave the app claiming she is still
+    /// speaking forever.
+    private func armPlaybackDrainWatchdog(token: UUID) {
+        stateQueue.asyncAfter(
+            deadline: .now() + Self.playbackDrainTimeout
+        ) { [weak self] in
+            guard let self,
+                  self.isAwaitingPlaybackDrain,
+                  self.playbackDrainToken == token
+            else {
+                return
+            }
+            self.endPlaybackDrain(emitListening: true)
+        }
+    }
+
     private func adoptAudioEngineState(
         _ state: RealtimeAudioEngineState,
         resendSessionOnModeChange: Bool
@@ -621,6 +674,10 @@ final class OpenAIRealtimeProvider: NSObject, RealtimeVoiceProvider {
         let speakerMode = effectiveSpeakerMode()
         speakerGate.setSpeakerMode(speakerMode)
         speakerGate.updatePlayback(isActive: state.isPlaybackActive, at: gateNow())
+
+        if isAwaitingPlaybackDrain, state.isPlaybackActive == false {
+            endPlaybackDrain(emitListening: true)
+        }
 
         if state.isEchoCancellationActive {
             hasReportedAECFallback = false

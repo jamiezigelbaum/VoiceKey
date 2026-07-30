@@ -7,6 +7,9 @@ enum OpenAIRealtimeEventAction: Equatable {
     case responseEnded
     case assistantMessageStarted(itemID: String)
     case webSearchFunctionCall(callID: String, arguments: String)
+    /// The server finished sending audio. Playback usually continues for
+    /// seconds afterwards, so this is deliberately NOT "back to listening".
+    case assistantAudioComplete
     case mcpCallTerminated
     case stopPlayback
     case audio(Data)
@@ -95,10 +98,10 @@ enum OpenAIRealtimeEventMapper {
             guard let delta = object["delta"] as? String else { return [] }
             return [.providerEvent(.transcript(delta))]
         case "response.output_audio.done", "response.audio.done":
-            return [.providerEvent(.status(.listening))]
+            return [.assistantAudioComplete]
         case "response.done":
             return [
-                .providerEvent(.status(.listening)),
+                .assistantAudioComplete,
                 .responseEnded
             ]
         case "error":

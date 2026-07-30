@@ -167,7 +167,10 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
             self.storedInputHandler = inputHandler
             self.storedActivityHandler = activityHandler
             do {
-                try self.startCapture()
+                try Self.performStart(
+                    armVoiceProcessing: { try? self.configureVoiceProcessing() },
+                    startCapture: { try self.startCapture() }
+                )
                 self.isInputStreaming = true
             } catch {
                 self.storedInputHandler = nil
@@ -397,9 +400,17 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
                 self.engine.stop()
             },
             disableVoiceProcessing: {
+                // Turn the unit off so the system output leaves the
+                // communications path and stops ducking other apps — but do NOT
+                // clear isEchoCancellationActive here. The provider reads that
+                // flag to choose speaker mode BEFORE it starts the engine, so
+                // clearing it made every session after the first begin in forced
+                // mic-gating as though echo cancellation were unavailable. It is
+                // re-established truthfully by configureVoiceProcessing() on the
+                // next start (2026-07-30, reported as unusable echo on a Studio
+                // Display).
                 try self.engine.inputNode.setVoiceProcessingEnabled(false)
                 try self.engine.outputNode.setVoiceProcessingEnabled(false)
-                self.isEchoCancellationActive = false
             },
             shield: shielded
         )
@@ -416,6 +427,24 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
     /// after the voice channel closed (reported on real hardware 2026-07-29).
     /// It must come after the engine is stopped: the setting cannot be changed
     /// on a running engine.
+    /// Voice processing is released on teardown so the system output leaves the
+    /// communications path and stops ducking every other app. It therefore has
+    /// to be re-armed here, before capture: `buildEngine()` runs only at init
+    /// and on a route-change rebuild, so without this echo cancellation was live
+    /// for the first session after launch and dead for every session after it.
+    /// On an open speaker like a Studio Display that is unusable, and no test
+    /// caught it because nothing exercised a second start (2026-07-30).
+    ///
+    /// Arming must precede capture: the setting cannot be changed once the
+    /// engine is running.
+    static func performStart(
+        armVoiceProcessing: () -> Void,
+        startCapture: () throws -> Void
+    ) throws {
+        armVoiceProcessing()
+        try startCapture()
+    }
+
     static func performTeardown(
         removeTap: @escaping () throws -> Void,
         stopPlayback: @escaping () throws -> Void,
