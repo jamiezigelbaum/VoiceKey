@@ -396,16 +396,31 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
             stopEngine: {
                 self.engine.stop()
             },
+            disableVoiceProcessing: {
+                try self.engine.inputNode.setVoiceProcessingEnabled(false)
+                try self.engine.outputNode.setVoiceProcessingEnabled(false)
+                self.isEchoCancellationActive = false
+            },
             shield: shielded
         )
         inputConverter = nil
         inputConverterSourceFormat = nil
     }
 
+    /// `disableVoiceProcessing` runs last and it is not optional politeness:
+    /// enabling voice processing puts the whole system output into the
+    /// communications path, which ducks every other app to about half volume.
+    /// Stopping the engine does not undo that — the nodes keep the setting and
+    /// this engine instance outlives the session — so without this step the
+    /// owner's music stayed quiet for as long as VoiceKey was running, long
+    /// after the voice channel closed (reported on real hardware 2026-07-29).
+    /// It must come after the engine is stopped: the setting cannot be changed
+    /// on a running engine.
     static func performTeardown(
         removeTap: @escaping () throws -> Void,
         stopPlayback: @escaping () throws -> Void,
         stopEngine: @escaping () throws -> Void,
+        disableVoiceProcessing: @escaping () throws -> Void,
         shield: (String, () throws -> Void) throws -> Void
     ) {
         try? shield("remove microphone tap") {
@@ -416,6 +431,9 @@ final class RealtimeAudioEngine: RealtimeAudioEngineProtocol {
         }
         try? shield("stop audio engine") {
             try stopEngine()
+        }
+        try? shield("disable voice processing") {
+            try disableVoiceProcessing()
         }
     }
 
