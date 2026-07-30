@@ -63,6 +63,15 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     private var carbonRegisteredProfileIDs: Set<UUID> = []
     private var lastTrigger: [UUID: TimeInterval] = [:]
     private var activeProfileID: UUID?
+
+    /// What the indicator last told the owner, so a repeated status for the
+    /// same channel does not re-announce it.
+    private var lastAnnouncedChannel: UUID?
+    private lazy var channelIndicator = ChannelIndicatorController(
+        statusItemFrame: { [weak self] in
+            self?.statusItem.button?.window?.frame
+        }
+    )
     private var currentStatus: ProviderStatus = .loading
     private var appOwnedAttention: AppOwnedAttentionState?
     private var onboardingWizardController:
@@ -499,12 +508,28 @@ final class VoiceKeyAppDelegate: NSObject, NSApplicationDelegate {
     /// block or fail the session, because the controller returns before its
     /// scripting layer answers.
     private func syncMediaPlayback() {
-        mediaPlayback.setActiveChannel(
-            mediaPlaybackChannels.activeChannel(
-                activeProfileID: activeProfileID,
-                status: currentStatus
-            )
+        let active = mediaPlaybackChannels.activeChannel(
+            activeProfileID: activeProfileID,
+            status: currentStatus
         )
+        mediaPlayback.setActiveChannel(active)
+        announceChannelChange(to: active)
+    }
+
+    /// With the menu bar hidden there is no status item to look at, so a hotkey
+    /// press produced no feedback at all. The indicator is driven by the same
+    /// active-channel value the media hold uses — one notion of "a channel is
+    /// open", not two that can disagree.
+    private func announceChannelChange(to active: UUID?) {
+        defer { lastAnnouncedChannel = active }
+        guard let event = ChannelIndicatorPolicy.event(
+            from: lastAnnouncedChannel,
+            to: active,
+            channelName: { [weak self] id in
+                self?.profiles.first(where: { $0.id == id })?.name
+            }
+        ) else { return }
+        channelIndicator.show(event)
     }
 
     /// The hold on other media is the app's intent, and an intent can go
