@@ -510,6 +510,109 @@ final class SettingsAutoApplyTests: XCTestCase {
         )
     }
 
+    // MARK: - Instructions live under Advanced
+
+    func testInstructionsEditorIsCollapsedBehindTheAdvancedDisclosure() throws {
+        let controller = SettingsWindowController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+        let views = descendantViews(in: controller.window?.contentView)
+        let editor = try XCTUnwrap(instructionsEditor(in: views))
+
+        // Instructions are power-user configuration now: nothing on the
+        // everyday form, and no bold "Instructions" section header.
+        XCTAssertTrue(editor.isHiddenOrHasHiddenAncestor)
+        XCTAssertFalse(sectionHeaderTitles(in: views).contains("Instructions"))
+
+        let advanced = try XCTUnwrap(
+            views.compactMap { $0 as? NSButton }
+                .first(where: { $0.title == "Advanced" })
+        )
+        advanced.state = .on
+        sendAction(for: advanced)
+        XCTAssertFalse(editor.isHiddenOrHasHiddenAncestor)
+
+        advanced.state = .off
+        sendAction(for: advanced)
+        XCTAssertTrue(editor.isHiddenOrHasHiddenAncestor)
+    }
+
+    func testAdvancedDisclosureStaysReachableForProvidersWithoutMCP() throws {
+        // The disclosure used to be MCP-only. Instructions apply to more
+        // channels than MCP does, so hiding it would strand the editor.
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.providerID = .openClaw
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+
+        XCTAssertEqual(
+            controller.advancedDisclosureSnapshot,
+            AdvancedDisclosureSnapshot(isVisible: true, isExpanded: false)
+        )
+
+        let views = descendantViews(in: controller.window?.contentView)
+        let advanced = try XCTUnwrap(
+            views.compactMap { $0 as? NSButton }
+                .first(where: { $0.title == "Advanced" })
+        )
+        advanced.state = .on
+        sendAction(for: advanced)
+        let editor = try XCTUnwrap(instructionsEditor(in: views))
+        XCTAssertFalse(editor.isHiddenOrHasHiddenAncestor)
+    }
+
+    func testInstructionsFieldNeverShowsOrStoresTheHiddenPreamble() throws {
+        let defaults = makeTestDefaults()
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.webSearchEnabled = true
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { VoiceProfileStore.save($0, defaults: defaults) }
+        )
+        let views = descendantViews(in: controller.window?.contentView)
+        let editor = try XCTUnwrap(instructionsEditor(in: views))
+
+        XCTAssertEqual(editor.string, "")
+        // The preamble is app-owned: it must not leak into any visible string.
+        let visible =
+            views.compactMap { ($0 as? NSTextField)?.stringValue }
+            + views.compactMap { ($0 as? NSTextView)?.string }
+            + views.compactMap { ($0 as? NSButton)?.title }
+        XCTAssertFalse(visible.contains(where: { $0.contains("search_web") }))
+
+        editor.string = "Always answer in French."
+        controller.textDidEndEditing(
+            Notification(name: NSText.didEndEditingNotification, object: editor)
+        )
+        controller.windowWillClose(
+            Notification(name: NSWindow.willCloseNotification)
+        )
+
+        // Only what the owner typed is stored — the preamble is composed on
+        // the wire, so rewording it never needs another data migration.
+        XCTAssertEqual(
+            VoiceProfileStore.load(defaults: defaults).first?.instructions,
+            "Always answer in French."
+        )
+    }
+
+    private func instructionsEditor(in views: [NSView]) -> NSTextView? {
+        views.compactMap { $0 as? NSTextView }
+            .first(where: { $0.isRichText == false })
+    }
+
+    private func sectionHeaderTitles(in views: [NSView]) -> [String] {
+        views.compactMap { $0 as? NSTextField }
+            .filter { $0.font == NSFont.systemFont(ofSize: 13, weight: .bold) }
+            .map(\.stringValue)
+    }
+
     func testPermissionsSnapshotIsDerivedLive() {
         var microphone =
             MicrophoneAuthorizationState.notDetermined

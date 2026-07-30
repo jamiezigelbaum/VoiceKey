@@ -4,6 +4,14 @@
 
 Setting VoiceKey up is now a guided walkthrough instead of a settings hunt.
 
+- **No instructions unless you write them.** VoiceKey ships with an empty
+  Instructions field and no assistant persona of its own. Profiles saved by
+  v0.2.0 or earlier still carried the old "You are VoiceKey…" text; it is
+  cleared once, on first launch, and only when it matches that wording
+  exactly — anything you wrote or added to is left alone.
+- **Instructions moved under "Advanced".** They are per-channel power-user
+  configuration, so they no longer take up room on the everyday form.
+
 - **First-run setup assistant.** A new Mac is taken through the whole
   path — what to connect, credentials, microphone access, and a hotkey —
   instead of opening an empty Settings window. It reopens from the menu

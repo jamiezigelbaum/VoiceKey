@@ -58,8 +58,9 @@ This is an early native Swift/AppKit app with:
 - multiple voice profiles, each with its own global hotkey, provider, model,
   voice, instructions, and optional endpoint URL
 - a rebuilt settings window that edits all profiles side by side: per-profile
-  configuration is kept when you switch providers, instructions are a
-  multi-line field, and conflicting hotkey recordings are detected
+  configuration is kept when you switch providers, per-channel instructions
+  live under "Advanced" and are empty unless you write some, and conflicting
+  hotkey recordings are detected
 - a decluttered menu with a Troubleshooting submenu
 - a Custom Realtime Endpoint provider for OpenAI-Realtime-compatible servers
 - an OpenClaw Talk provider that turns VoiceKey into an interactive voice
@@ -125,8 +126,10 @@ Each profile is a complete voice preset:
 - a global hotkey (recorded in Settings; profile 1 defaults to `F16`)
 - a provider (OpenAI Realtime API, OpenClaw Talk, ChatGPT Web, or a Custom
   Realtime Endpoint)
-- model, voice, and instructions for that provider
+- model and voice for that provider
 - an optional endpoint URL
+- optional instructions, under "Advanced" — empty by default; VoiceKey adds no
+  personality of its own
 
 Multiple profiles mean multiple hotkeys: press one key for your fast general
 assistant, another for a slow, careful one, a third for a self-hosted model.

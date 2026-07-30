@@ -467,10 +467,13 @@ final class SettingsWindowController: NSWindowController {
 
     /// A channel missing its key with a fallback shortcut and a denied
     /// microphone fits three rows, three reason lines, and the everyday web
-    /// search control at 990pt. The reason lines are the part that answers
-    /// "what does this channel still need", so the window grows instead of
-    /// trimming them.
-    static let defaultContentHeight: CGFloat = 1_010
+    /// search control. The reason lines are the part that answers "what does
+    /// this channel still need", so the window grows instead of trimming them.
+    /// Dropped from 1_010 when instructions moved behind the Advanced
+    /// disclosure (2026-07-30) — that removed ~130pt from the everyday form,
+    /// and the sizing tests are one-directional so the dead space at the
+    /// bottom would otherwise have shipped unnoticed.
+    static let defaultContentHeight: CGFloat = 880
 
     var windowSizingSnapshot: SettingsWindowSizingSnapshot {
         window?.contentView?.layoutSubtreeIfNeeded()
@@ -532,7 +535,7 @@ final class SettingsWindowController: NSWindowController {
             isVisible:
                 advancedDisclosureButton.isHidden == false,
             isExpanded:
-                advancedMCPContainer.isHidden == false
+                advancedContainer.isHidden == false
         )
     }
 
@@ -651,13 +654,20 @@ final class SettingsWindowController: NSWindowController {
         target: nil,
         action: nil
     )
-    private let advancedMCPContainer = NSStackView()
-    private var isAdvancedMCPExpanded = false
+    /// `.disclosure` draws a bare triangle and never renders the button's own
+    /// title, so the word has to be a sibling label — otherwise the only way
+    /// to reach the instructions editor is an unlabelled arrow.
+    private let advancedDisclosureLabel =
+        NSTextField(labelWithString: "Advanced")
+    private var advancedDisclosureRow: NSStackView?
+    private let advancedContainer = NSStackView()
+    private var isAdvancedExpanded = false
     private let mcpServerPopup = NSPopUpButton()
     private let addMCPServerButton = NSButton(title: "Add", target: nil, action: nil)
     private let editMCPServerButton = NSButton(title: "Edit", target: nil, action: nil)
     private let removeMCPServerButton = NSButton(title: "Remove", target: nil, action: nil)
-    private var mcpSectionViews: [NSView] = []
+    private var mcpRow: NSStackView?
+    private var advancedSectionViews: [NSView] = []
     private let setupActivationTitleLabel =
         NSTextField(labelWithString: "")
     private let setupActivationStatusLabel =
@@ -965,7 +975,7 @@ final class SettingsWindowController: NSWindowController {
         configureOpenClawRuntimeControls()
         configureInstructionsEditor()
         configureStaticControls()
-        configureMCPServerControls()
+        configureAdvancedControls()
         configureSetupControls()
 
         // Voice channel: picker with add/delete/duplicate, plus the display name.
@@ -1038,9 +1048,17 @@ final class SettingsWindowController: NSWindowController {
         endpointRow.addArrangedSubview(endpointRequiredLabel)
         addArranged(endpointRow)
 
-        // Provider-specific MCP servers stay out of the basic path. The
-        // everyday built-in search switch remains above this disclosure.
-        let mcpRow = makeControlRow(
+        // Everything a normal user never needs lives behind one disclosure:
+        // per-channel instructions and provider-specific MCP servers. The
+        // everyday built-in search switch stays above it.
+        let instructionsRow = makeRow(
+            label: "Instructions",
+            views: [instructionsScrollView],
+            stretching: instructionsScrollView
+        )
+        instructionsRow.alignment = .top
+        let mcpServerRow = makeRow(
+            label: "MCP servers",
             views: [
                 mcpServerPopup,
                 addMCPServerButton,
@@ -1049,27 +1067,46 @@ final class SettingsWindowController: NSWindowController {
             ],
             stretching: mcpServerPopup
         )
-        advancedMCPContainer.orientation = .vertical
-        advancedMCPContainer.alignment = .leading
-        advancedMCPContainer.spacing = 8
-        advancedMCPContainer.edgeInsets = NSEdgeInsets(
+        mcpRow = mcpServerRow
+        advancedContainer.orientation = .vertical
+        advancedContainer.alignment = .leading
+        advancedContainer.spacing = 8
+        advancedContainer.edgeInsets = NSEdgeInsets(
             top: 2,
-            left: Self.labelColumnWidth + 12,
+            left: 0,
             bottom: 0,
             right: 0
         )
-        advancedMCPContainer.addArrangedSubview(mcpRow)
-        mcpRow.widthAnchor.constraint(
-            equalTo: advancedMCPContainer.widthAnchor,
-            constant: -(Self.labelColumnWidth + 12)
-        ).isActive = true
-        mcpSectionViews = [
+        // Add first, then constrain. A cross-view constraint activated before
+        // both views share an ancestor makes AppKit raise mid-render and
+        // silently truncate the rest of the form.
+        for row in [instructionsRow, mcpServerRow] {
+            advancedContainer.addArrangedSubview(row)
+            row.widthAnchor.constraint(
+                equalTo: advancedContainer.widthAnchor
+            ).isActive = true
+        }
+
+        let disclosureRow = NSStackView(
+            views: [advancedDisclosureButton, advancedDisclosureLabel]
+        )
+        disclosureRow.orientation = .horizontal
+        disclosureRow.alignment = .centerY
+        disclosureRow.spacing = 4
+        disclosureRow.translatesAutoresizingMaskIntoConstraints = false
+        advancedDisclosureRow = disclosureRow
+        advancedSectionViews = [
+            disclosureRow,
             advancedDisclosureButton,
-            advancedMCPContainer
+            advancedContainer
         ]
-        addArranged(advancedDisclosureButton)
-        addArranged(advancedMCPContainer)
-        endSection(after: advancedMCPContainer)
+        addArranged(disclosureRow)
+        addArranged(advancedContainer)
+        // The container is hidden by default, so the section's 20pt rhythm has
+        // to be set after the disclosure row as well or the collapsed form
+        // falls back to the 8pt default before the next header.
+        endSection(after: disclosureRow)
+        endSection(after: advancedContainer)
 
         // OpenClaw owns these values at the gateway. Scope determines whether the
         // paired device may edit them; the section never requests broader scopes.
@@ -1230,10 +1267,8 @@ final class SettingsWindowController: NSWindowController {
         addArranged(connectionTestRow)
         endSection(after: connectionTestRow)
 
-        // Instructions: system prompt for the selected voice channel.
-        addSection("Instructions")
-        addArranged(instructionsScrollView)
-        endSection(after: instructionsScrollView)
+        // Instructions are not a section of the everyday form any more: they
+        // live inside the Advanced disclosure above (owner ruling 2026-07-30).
 
         // Footer: auto-apply status and the speaker-feedback tip.
         let footerSeparator = makeSeparator()
@@ -1394,7 +1429,7 @@ final class SettingsWindowController: NSWindowController {
         applyOpenClawRuntimeButton.action = #selector(applyOpenClawRuntimeSettings)
     }
 
-    private func configureMCPServerControls() {
+    private func configureAdvancedControls() {
         advancedDisclosureButton.setButtonType(
             .pushOnPushOff
         )
@@ -1402,7 +1437,10 @@ final class SettingsWindowController: NSWindowController {
         advancedDisclosureButton.state = .off
         advancedDisclosureButton.target = self
         advancedDisclosureButton.action =
-            #selector(toggleAdvancedMCP)
+            #selector(toggleAdvanced)
+        advancedDisclosureLabel.font = NSFont.systemFont(ofSize: 13)
+        advancedDisclosureLabel.textColor = .secondaryLabelColor
+        advancedDisclosureLabel.translatesAutoresizingMaskIntoConstraints = false
 
         mcpServerPopup.translatesAutoresizingMaskIntoConstraints = false
         mcpServerPopup.setContentHuggingPriority(
@@ -1870,7 +1908,7 @@ final class SettingsWindowController: NSWindowController {
         apiCredentialLabel.stringValue = provider.credentialLabel
         syncCredentialStatus(for: profile)
         syncOpenClawConnectionTest(for: profile)
-        syncMCPServerControls(for: profile)
+        syncAdvancedControls(for: profile)
         syncOpenClawRuntimePanel(for: profile)
         syncChannelSetup()
 
@@ -1903,8 +1941,8 @@ final class SettingsWindowController: NSWindowController {
         instructionsTextView.string = ""
         webSearchRow?.isHidden = true
         webSearchCheckbox.state = .off
-        isAdvancedMCPExpanded = false
-        for view in mcpSectionViews + openClawRuntimeSectionViews {
+        isAdvancedExpanded = false
+        for view in advancedSectionViews + openClawRuntimeSectionViews {
             view.isHidden = true
         }
         syncChannelSetup()
@@ -1998,15 +2036,18 @@ final class SettingsWindowController: NSWindowController {
         openClawRuntimeStatusLabel.isHidden = true
     }
 
-    private func syncMCPServerControls(for profile: VoiceProfile) {
-        let supportsMCP = [.openAIRealtime, .custom].contains(profile.providerID)
-        advancedDisclosureButton.isHidden =
-            supportsMCP == false
-        advancedMCPContainer.isHidden =
-            supportsMCP == false
-            || isAdvancedMCPExpanded == false
+    private func syncAdvancedControls(for profile: VoiceProfile) {
+        // The disclosure is no longer MCP-only — it owns the instructions
+        // editor too, which applies to more providers than MCP does — so it
+        // stays reachable for every channel. Only the MCP row is gated.
+        advancedDisclosureRow?.isHidden = false
+        advancedDisclosureButton.isHidden = false
+        advancedContainer.isHidden = isAdvancedExpanded == false
         advancedDisclosureButton.state =
-            isAdvancedMCPExpanded ? .on : .off
+            isAdvancedExpanded ? .on : .off
+
+        let supportsMCP = [.openAIRealtime, .custom].contains(profile.providerID)
+        mcpRow?.isHidden = supportsMCP == false
         guard supportsMCP else { return }
 
         let selectedID = mcpServerPopup.selectedItem?.representedObject as? String
@@ -2128,7 +2169,7 @@ final class SettingsWindowController: NSWindowController {
     private func selectProfile(id: UUID) {
         guard workingProfiles.contains(where: { $0.id == id }) else { return }
         selectedProfileID = id
-        isAdvancedMCPExpanded = false
+        isAdvancedExpanded = false
         rebuildProfilePopup()
         syncFormFromSelectedProfile()
     }
@@ -2317,7 +2358,7 @@ final class SettingsWindowController: NSWindowController {
             return
         }
         guard let committedIndex = selectedProfileIndex else { return }
-        syncMCPServerControls(for: workingProfiles[committedIndex])
+        syncAdvancedControls(for: workingProfiles[committedIndex])
         mcpServerPopup.selectItem(
             at: workingProfiles[committedIndex].mcpServers.count - 1
         )
@@ -2387,7 +2428,7 @@ final class SettingsWindowController: NSWindowController {
             return
         }
         guard let committedIndex = selectedProfileIndex else { return }
-        syncMCPServerControls(for: workingProfiles[committedIndex])
+        syncAdvancedControls(for: workingProfiles[committedIndex])
         mcpServerPopup.selectItem(at: serverIndex)
         updateMCPServerButtons()
     }
@@ -2416,7 +2457,7 @@ final class SettingsWindowController: NSWindowController {
             return
         }
         guard let committedIndex = selectedProfileIndex else { return }
-        syncMCPServerControls(for: workingProfiles[committedIndex])
+        syncAdvancedControls(for: workingProfiles[committedIndex])
     }
 
     @discardableResult
@@ -2565,14 +2606,18 @@ final class SettingsWindowController: NSWindowController {
         )
     }
 
-    @objc private func toggleAdvancedMCP() {
-        isAdvancedMCPExpanded =
+    @objc private func toggleAdvanced() {
+        // Collapsing hides the instructions text view, and hiding a first
+        // responder is not a guaranteed `textDidEndEditing` — commit first or
+        // the collapse silently discards what was just typed.
+        commitFocusedControl()
+        isAdvancedExpanded =
             advancedDisclosureButton.state == .on
         guard let index = selectedProfileIndex else {
-            advancedMCPContainer.isHidden = true
+            advancedContainer.isHidden = true
             return
         }
-        syncMCPServerControls(
+        syncAdvancedControls(
             for: workingProfiles[index]
         )
     }
