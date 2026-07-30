@@ -28,8 +28,13 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         XCTAssertEqual(session["type"] as? String, "realtime")
         XCTAssertEqual(session["model"] as? String, "gpt-realtime-2-test")
         let instructions = try XCTUnwrap(session["instructions"] as? String)
-        XCTAssertTrue(instructions.hasPrefix("Keep it concise."))
-        XCTAssertTrue(instructions.contains("Session started"))
+        // The channel's own text sits between the hidden preamble and the
+        // clock stamp, so order is asserted by component rather than prefix.
+        let parts = instructions.components(separatedBy: "\n\n")
+        XCTAssertEqual(parts.count, 3)
+        XCTAssertTrue(parts[0].contains("search_web"))
+        XCTAssertEqual(parts[1], "Keep it concise.")
+        XCTAssertTrue(parts[2].hasPrefix("Session started"))
         XCTAssertEqual(session["output_modalities"] as? [String], ["audio"])
         let tools = try XCTUnwrap(
             session["tools"] as? [[String: Any]]
@@ -94,8 +99,13 @@ final class OpenAIRealtimeRequestBuilderTests: XCTestCase {
         let session = try dictionary(event["session"])
         XCTAssertNil(session["model"])
         let instructions = try XCTUnwrap(session["instructions"] as? String)
-        XCTAssertTrue(instructions.hasPrefix("Keep it concise."))
-        XCTAssertTrue(instructions.contains("Session started"))
+        // The channel's own text sits between the hidden preamble and the
+        // clock stamp, so order is asserted by component rather than prefix.
+        let parts = instructions.components(separatedBy: "\n\n")
+        XCTAssertEqual(parts.count, 3)
+        XCTAssertTrue(parts[0].contains("search_web"))
+        XCTAssertEqual(parts[1], "Keep it concise.")
+        XCTAssertTrue(parts[2].hasPrefix("Session started"))
     }
 
     func testSessionUpdateDeclaresMCPServersWithOptionalFields() throws {

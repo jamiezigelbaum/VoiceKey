@@ -198,7 +198,10 @@ final class OpenAIRealtimeSessionStopTests: XCTestCase {
         let liveOutput = try XCTUnwrap(liveAudio["output"] as? [String: Any])
         XCTAssertEqual(liveOutput["voice"] as? String, "next-voice")
         let liveInstructions = try XCTUnwrap(liveSession["instructions"] as? String)
-        XCTAssertTrue(liveInstructions.hasPrefix("Updated instructions."))
+        XCTAssertTrue(
+            liveInstructions.components(separatedBy: "\n\n")
+                .contains("Updated instructions.")
+        )
 
         provider.stopVoice()
         provider.toggleVoice()

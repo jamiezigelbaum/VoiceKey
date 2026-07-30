@@ -47,11 +47,37 @@ enum OpenAIRealtimeRequestBuilder {
         return request
     }
 
+    /// Whether this session will actually be handed the `search_web` tool.
+    /// The tool declaration and the preamble's nudge both read this, so they
+    /// can never drift into telling a model about a tool it does not have.
+    static func declaresWebSearchTool(
+        _ configuration: VoiceSessionConfiguration
+    ) -> Bool {
+        configuration.providerID == .openAIRealtime
+            && configuration.webSearchEnabled
+    }
+
+    static let webSearchNudge =
+        "A search_web tool is available; use it whenever the answer depends on current information."
+
+    /// The whole of VoiceKey's own instruction text — capability facts the
+    /// model cannot otherwise know, and nothing else. It is composed here on
+    /// the wire rather than stored in a profile, so it is never visible or
+    /// editable in Settings and rewording it never needs a data migration.
+    /// VoiceKey is a tool, not a personality: resist adding to this.
+    static func operationalPreamble(
+        for configuration: VoiceSessionConfiguration
+    ) -> String {
+        guard declaresWebSearchTool(configuration) else { return "" }
+        return webSearchNudge
+    }
+
     // The realtime model has no clock; stamping the session start into the
     // instructions lets it answer "what time is it" without any tools.
     static func instructionsWithSessionContext(
         _ instructions: String,
-        sessionStart: Date
+        sessionStart: Date,
+        preamble: String = ""
     ) -> String {
         let formatter = DateFormatter()
         // Pin locale/calendar so non-Gregorian regions do not report a
@@ -61,8 +87,12 @@ enum OpenAIRealtimeRequestBuilder {
         formatter.dateStyle = .full
         formatter.timeStyle = .short
         let stamp = "Session started \(formatter.string(from: sessionStart)) (\(TimeZone.current.identifier))."
-        guard instructions.isEmpty == false else { return stamp }
-        return "\(instructions)\n\n\(stamp)"
+        // App-owned text first, the user's own instructions after it so they
+        // win, and the stamp last — a live session update is compared against
+        // the original by its trailing component.
+        return [preamble, instructions, stamp]
+            .filter { $0.isEmpty == false }
+            .joined(separator: "\n\n")
     }
 
     static func sessionUpdateEvent(
@@ -115,15 +145,15 @@ enum OpenAIRealtimeRequestBuilder {
             ],
             "instructions": instructionsWithSessionContext(
                 configuration.instructions,
-                sessionStart: sessionStart
+                sessionStart: sessionStart,
+                preamble: operationalPreamble(for: configuration)
             )
         ]
         if includeModel {
             session["model"] = configuration.model
         }
         var tools: [[String: Any]] = []
-        if configuration.providerID == .openAIRealtime,
-           configuration.webSearchEnabled {
+        if declaresWebSearchTool(configuration) {
             tools.append(Self.webSearchFunctionTool)
         }
         tools += configuration.mcpServers.map { server in
