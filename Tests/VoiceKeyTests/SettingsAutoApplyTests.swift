@@ -2694,3 +2694,41 @@ private final class SettingsOpenClawTestCancellation:
     OpenClawConnectionTestCancellation {
     func cancel() {}
 }
+
+/// The disclosure is now the ONLY route to the instructions editor, and
+/// `.disclosure` renders a bare ~13pt triangle without the button's title. If
+/// the word "Advanced" beside it is inert, the owner clicks it, nothing
+/// happens, and the field he was told was "moved to Advanced" looks deleted.
+final class AdvancedDisclosureHitTargetTests: XCTestCase {
+    func testTheWholeDisclosureRowTogglesNotJustTheTriangle() throws {
+        let controller = SettingsWindowController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+        defer { controller.close() }
+
+        func walk(_ view: NSView?) -> [NSView] {
+            guard let view else { return [] }
+            return view.subviews + view.subviews.flatMap { walk($0) }
+        }
+        let rows: [NSStackView] = walk(controller.window?.contentView)
+        .compactMap { $0 as? NSStackView }
+        .filter { stack in
+            stack.views.contains { view in
+                (view as? NSTextField)?.stringValue == "Advanced"
+            }
+        }
+        let row = try XCTUnwrap(rows.first, "no row carrying the Advanced label")
+
+        let recognizers = row.gestureRecognizers
+        XCTAssertFalse(
+            recognizers.isEmpty,
+            "the Advanced row has no click target beyond the bare triangle"
+        )
+        XCTAssertTrue(
+            recognizers.contains { $0 is NSClickGestureRecognizer },
+            "clicking the word Advanced must toggle the disclosure"
+        )
+    }
+}

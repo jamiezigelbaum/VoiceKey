@@ -1094,6 +1094,14 @@ final class SettingsWindowController: NSWindowController {
         disclosureRow.alignment = .centerY
         disclosureRow.spacing = 4
         disclosureRow.translatesAutoresizingMaskIntoConstraints = false
+        // The triangle alone is a ~13pt target, and it is now the only route to
+        // the instructions editor. Clicking the word "Advanced" must work too,
+        // or the field looks like it simply vanished.
+        let disclosureClick = NSClickGestureRecognizer(
+            target: self,
+            action: #selector(toggleAdvanced)
+        )
+        disclosureRow.addGestureRecognizer(disclosureClick)
         advancedDisclosureRow = disclosureRow
         advancedSectionViews = [
             disclosureRow,

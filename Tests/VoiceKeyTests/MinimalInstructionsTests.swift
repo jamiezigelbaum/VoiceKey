@@ -257,12 +257,32 @@ final class HiddenOperationalPreambleTests: XCTestCase {
 
         let session = try session(for: configuration)
         let instructions = try XCTUnwrap(session["instructions"] as? String)
+        let parts = instructions.components(separatedBy: "\n\n")
 
-        // Just the clock stamp — no blank leading paragraph, no identity.
-        XCTAssertTrue(instructions.hasPrefix("Session started"))
-        XCTAssertFalse(instructions.contains("\n\n"))
+        // Brevity, then the clock stamp. Brevity is about the medium — a spoken
+        // paragraph cannot be skimmed — so it applies with or without a search
+        // tool. Still no identity and no persona.
+        XCTAssertEqual(parts.count, 2)
+        XCTAssertTrue(parts[0].contains("one or two short sentences"))
+        XCTAssertFalse(parts[0].contains("search_web"), "no tool is declared")
+        XCTAssertTrue(parts[1].hasPrefix("Session started"))
         XCTAssertFalse(instructions.lowercased().contains("voicekey"))
         XCTAssertFalse(instructions.lowercased().contains("assistant"))
+    }
+
+    /// Brevity is not conditional on the search tool: a channel with search off
+    /// is still a voice channel.
+    func testBrevityAppliesWhetherOrNotSearchIsAvailable() throws {
+        for searchEnabled in [true, false] {
+            var configuration = makeConfiguration(instructions: "")
+            configuration.webSearchEnabled = searchEnabled
+            let session = try session(for: configuration)
+            let instructions = try XCTUnwrap(session["instructions"] as? String)
+            XCTAssertTrue(
+                instructions.contains("one or two short sentences"),
+                "brevity missing with webSearchEnabled=\(searchEnabled)"
+            )
+        }
     }
 
     func testPreambleIsNeverPersistedIntoAProfile() {
@@ -293,5 +313,35 @@ final class HiddenOperationalPreambleTests: XCTestCase {
             authorizationProvider: { _ in nil }
         )
         return try XCTUnwrap(event["session"] as? [String: Any])
+    }
+}
+
+/// The migration runs once per install and never gets a second chance. Its call
+/// site used to be top-level code in main.swift, which no test can execute — so
+/// a later refactor of the entry point could drop it with every test still
+/// green, and every upgraded user would keep the retired instructions forever.
+final class VoiceKeyBootstrapTests: XCTestCase {
+    func testBootstrapClearsTheRetiredDefaultInstructions() throws {
+        let defaults = makeTestDefaults()
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.instructions = VoiceProfileStore.retiredDefaultInstructions
+        VoiceProfileStore.save([profile], defaults: defaults)
+
+        VoiceKeyBootstrap.run(defaults: defaults)
+
+        let loaded = try XCTUnwrap(VoiceProfileStore.load(defaults: defaults).first)
+        XCTAssertEqual(loaded.instructions, "")
+    }
+
+    func testBootstrapLeavesInstructionsTheOwnerWroteAlone() throws {
+        let defaults = makeTestDefaults()
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.instructions = "Always answer in French."
+        VoiceProfileStore.save([profile], defaults: defaults)
+
+        VoiceKeyBootstrap.run(defaults: defaults)
+
+        let loaded = try XCTUnwrap(VoiceProfileStore.load(defaults: defaults).first)
+        XCTAssertEqual(loaded.instructions, "Always answer in French.")
     }
 }

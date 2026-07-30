@@ -60,6 +60,14 @@ enum OpenAIRealtimeRequestBuilder {
     static let webSearchNudge =
         "A search_web tool is available; use it whenever the answer depends on current information."
 
+    /// Brevity is functional here, not a personality: this is a voice tool, and
+    /// a spoken paragraph cannot be skimmed the way a written one can. Asked for
+    /// by the owner, 2026-07-30 — "the speech to be much more concise. She's far
+    /// too verbose."
+    static let brevityDirective =
+        "Answer in one or two short sentences. Do not restate the question, "
+        + "narrate what you are about to do, or offer follow-ups unless asked."
+
     /// The whole of VoiceKey's own instruction text — capability facts the
     /// model cannot otherwise know, and nothing else. It is composed here on
     /// the wire rather than stored in a profile, so it is never visible or
@@ -68,8 +76,14 @@ enum OpenAIRealtimeRequestBuilder {
     static func operationalPreamble(
         for configuration: VoiceSessionConfiguration
     ) -> String {
-        guard declaresWebSearchTool(configuration) else { return "" }
-        return webSearchNudge
+        // Brevity always applies — it is about the medium, not about a tool.
+        // The search line is conditional, because promising a tool the session
+        // does not declare would be lying to the model.
+        var parts = [brevityDirective]
+        if declaresWebSearchTool(configuration) {
+            parts.append(webSearchNudge)
+        }
+        return parts.joined(separator: " ")
     }
 
     // The realtime model has no clock; stamping the session start into the
