@@ -39,11 +39,9 @@ final class VoiceProfileStoreTests: XCTestCase {
 
         VoiceProfileStore.save(profiles, defaults: defaults)
 
-        var expected = profiles
-        expected[0].webSearchEnabled = true
         XCTAssertEqual(
             VoiceProfileStore.load(defaults: defaults),
-            expected
+            profiles
         )
         XCTAssertFalse(VoiceProfileStore.isFreshInstall(defaults: defaults))
     }
@@ -71,6 +69,7 @@ final class VoiceProfileStoreTests: XCTestCase {
         XCTAssertEqual(profiles.count, 1)
         XCTAssertEqual(profiles[0].id, profileID)
         XCTAssertEqual(profiles[0].mcpServers, [])
+        XCTAssertTrue(profiles[0].webSearchEnabled)
         XCTAssertEqual(profiles[0].speakerModePreference, .automatic)
     }
 
@@ -92,6 +91,7 @@ final class VoiceProfileStoreTests: XCTestCase {
         XCTAssertEqual(profile.voice, VoiceProviderID.openAIRealtime.defaultVoice)
         XCTAssertEqual(profile.instructions, VoiceSessionConfiguration.defaultInstructions)
         XCTAssertEqual(profile.endpointURL, "")
+        XCTAssertTrue(profile.webSearchEnabled)
         XCTAssertEqual(profile.speakerModePreference, .automatic)
 
         // Loading must not persist anything; the install stays fresh until a save.
@@ -173,16 +173,14 @@ final class VoiceProfileStoreTests: XCTestCase {
         ]
         VoiceProfileStore.save(saved, defaults: defaults)
 
-        var expected = saved
-        expected[0].webSearchEnabled = true
         XCTAssertEqual(
             VoiceProfileStore.load(defaults: defaults),
-            expected
+            saved
         )
         XCTAssertFalse(VoiceProfileStore.isFreshInstall(defaults: defaults))
     }
 
-    func testOpenAISaveKeepsLegacyWebSearchFlagTrueForDowngrade()
+    func testOpenAISavePreservesExplicitWebSearchOptOut()
         throws {
         let defaults = makeTestDefaults()
         var profile = VoiceProfile.defaultOpenAI()
@@ -193,7 +191,7 @@ final class VoiceProfileStoreTests: XCTestCase {
             defaults: defaults
         )
 
-        XCTAssertTrue(
+        XCTAssertFalse(
             try XCTUnwrap(
                 VoiceProfileStore.load(
                     defaults: defaults

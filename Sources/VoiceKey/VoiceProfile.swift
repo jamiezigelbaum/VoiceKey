@@ -42,7 +42,7 @@ struct VoiceProfile: Codable, Equatable, Identifiable {
         instructions: String = "",
         endpointURL: String = "",
         mcpServers: [MCPServerConfiguration] = [],
-        webSearchEnabled: Bool = false,
+        webSearchEnabled: Bool? = nil,
         speakerModePreference: OpenAISpeakerModePreference = .automatic
     ) {
         self.id = id
@@ -54,7 +54,8 @@ struct VoiceProfile: Codable, Equatable, Identifiable {
         self.instructions = instructions
         self.endpointURL = endpointURL
         self.mcpServers = mcpServers
-        self.webSearchEnabled = webSearchEnabled
+        self.webSearchEnabled =
+            webSearchEnabled ?? (providerID == .openAIRealtime)
         self.speakerModePreference = speakerModePreference
     }
 
@@ -89,7 +90,7 @@ struct VoiceProfile: Codable, Equatable, Identifiable {
         webSearchEnabled = try container.decodeIfPresent(
             Bool.self,
             forKey: .webSearchEnabled
-        ) ?? false
+        ) ?? (providerID == .openAIRealtime)
         speakerModePreference = try container.decodeIfPresent(
             OpenAISpeakerModePreference.self,
             forKey: .speakerModePreference
@@ -150,15 +151,7 @@ enum VoiceProfileStore {
     static func normalizedForPersistence(
         _ profiles: [VoiceProfile]
     ) -> [VoiceProfile] {
-        profiles.map { profile in
-            var normalized = profile
-            if normalized.providerID == .openAIRealtime {
-                // Compatibility field retained for older VoiceKey builds.
-                // Current builds always expose web search for OpenAI.
-                normalized.webSearchEnabled = true
-            }
-            return normalized
-        }
+        profiles
     }
 
     /// Canonical channel order everywhere (menu, channel picker): by hotkey

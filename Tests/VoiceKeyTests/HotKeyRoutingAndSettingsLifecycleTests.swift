@@ -61,7 +61,8 @@ final class VoiceProfileProviderSettingsCacheTests: XCTestCase {
             VoiceProfileProviderSettings(
                 model: "custom-model",
                 voice: "custom-voice",
-                endpointURL: "wss://openai.example/realtime"
+                endpointURL: "wss://openai.example/realtime",
+                webSearchEnabled: true
             )
         )
         XCTAssertEqual(
@@ -69,7 +70,8 @@ final class VoiceProfileProviderSettingsCacheTests: XCTestCase {
             VoiceProfileProviderSettings(
                 model: "openclaw-model",
                 voice: "openclaw-voice",
-                endpointURL: "wss://openclaw.example/realtime"
+                endpointURL: "wss://openclaw.example/realtime",
+                webSearchEnabled: true
             )
         )
     }

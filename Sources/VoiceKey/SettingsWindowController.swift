@@ -91,6 +91,12 @@ struct SettingsWindowSizingSnapshot: Equatable {
     var defaultContentHeight: CGFloat
 }
 
+struct WebSearchControlSnapshot: Equatable {
+    var isVisible: Bool
+    var isEnabled: Bool
+    var isOn: Bool
+}
+
 struct CredentialFieldSnapshot: Equatable {
     var placeholder: String?
     var caption: String
@@ -271,6 +277,7 @@ struct VoiceProfileProviderSettings: Equatable {
     var model: String
     var voice: String
     var endpointURL: String
+    var webSearchEnabled: Bool
 }
 
 struct VoiceProfileProviderSettingsCache {
@@ -286,7 +293,8 @@ struct VoiceProfileProviderSettingsCache {
         settingsByProfile[profile.id, default: [:]][profile.providerID.rawValue] = VoiceProfileProviderSettings(
             model: profile.model,
             voice: profile.voice,
-            endpointURL: profile.endpointURL
+            endpointURL: profile.endpointURL,
+            webSearchEnabled: profile.webSearchEnabled
         )
     }
 
@@ -457,11 +465,12 @@ final class SettingsWindowController: NSWindowController {
         )
     }
 
-    /// 980, not 900: a channel missing its key with a fallback shortcut and a
-    /// denied microphone fits three rows and three reason lines, measured at
-    /// 966pt. The reason lines are the part that answers "what does this
-    /// channel still need", so the window grows instead of trimming them.
-    static let defaultContentHeight: CGFloat = 980
+    /// A channel missing its key with a fallback shortcut and a denied
+    /// microphone fits three rows, three reason lines, and the everyday web
+    /// search control at 990pt. The reason lines are the part that answers
+    /// "what does this channel still need", so the window grows instead of
+    /// trimming them.
+    static let defaultContentHeight: CGFloat = 1_010
 
     var windowSizingSnapshot: SettingsWindowSizingSnapshot {
         window?.contentView?.layoutSubtreeIfNeeded()
@@ -475,6 +484,14 @@ final class SettingsWindowController: NSWindowController {
 
     var selectedProfileIDSnapshot: UUID? {
         selectedProfileID
+    }
+
+    var webSearchControlSnapshot: WebSearchControlSnapshot {
+        WebSearchControlSnapshot(
+            isVisible: webSearchRow?.isHidden == false,
+            isEnabled: webSearchCheckbox.isEnabled,
+            isOn: webSearchCheckbox.state == .on
+        )
     }
 
     var credentialFieldSnapshot: CredentialFieldSnapshot {
@@ -591,6 +608,12 @@ final class SettingsWindowController: NSWindowController {
     private let endpointRow = NSStackView()
     private let speakerModePopup = NSPopUpButton()
     private var speakerModeRow: NSStackView?
+    private let webSearchCheckbox = NSButton(
+        checkboxWithTitle: "Use built-in web search",
+        target: nil,
+        action: nil
+    )
+    private var webSearchRow: NSStackView?
     private let apiCredentialLabel = NSTextField(labelWithString: "")
     private let apiKeyField = NSSecureTextField()
     private let changeAPIKeyButton = NSButton(
@@ -992,6 +1015,13 @@ final class SettingsWindowController: NSWindowController {
         )
         self.speakerModeRow = speakerModeRow
         addArranged(speakerModeRow)
+        let webSearchRow = makeRow(
+            label: "Web search",
+            views: [webSearchCheckbox],
+            stretching: webSearchCheckbox
+        )
+        self.webSearchRow = webSearchRow
+        addArranged(webSearchRow)
 
         endpointRow.orientation = .horizontal
         endpointRow.alignment = .centerY
@@ -1008,8 +1038,8 @@ final class SettingsWindowController: NSWindowController {
         endpointRow.addArrangedSubview(endpointRequiredLabel)
         addArranged(endpointRow)
 
-        // Provider-specific MCP servers stay out of the basic path.
-        // OpenAI web search is always available and has no setting.
+        // Provider-specific MCP servers stay out of the basic path. The
+        // everyday built-in search switch remains above this disclosure.
         let mcpRow = makeControlRow(
             views: [
                 mcpServerPopup,
@@ -1471,6 +1501,11 @@ final class SettingsWindowController: NSWindowController {
 
         endpointField.placeholderString = "wss://localhost:8080"
 
+        webSearchCheckbox.target = self
+        webSearchCheckbox.action = #selector(webSearchChanged)
+        webSearchCheckbox.toolTip =
+            "Uses this channel's OpenAI API key to search the current web."
+
         credentialStatusLabel.font = NSFont.systemFont(ofSize: 11)
         credentialStatusLabel.textColor = .secondaryLabelColor
         credentialSharingLabel.font = NSFont.systemFont(ofSize: 11)
@@ -1678,6 +1713,9 @@ final class SettingsWindowController: NSWindowController {
             profile.model = cached?.model ?? provider.defaultModel
             profile.voice = cached?.voice ?? provider.defaultVoice
             profile.endpointURL = cached?.endpointURL ?? ""
+            profile.webSearchEnabled =
+                cached?.webSearchEnabled
+                ?? (provider == .openAIRealtime)
             if provider == .custom {
                 do {
                     try credentialStore.initializeCredentialScope(
@@ -1719,11 +1757,8 @@ final class SettingsWindowController: NSWindowController {
             }
             profile.endpointURL = trimmed
             resetEndpointStatus(for: profile.providerID)
-        case .webSearchEnabled:
-            // Compatibility field only: OpenAI Realtime web search is
-            // always on from WO-N onward.
-            profile.webSearchEnabled =
-                profile.providerID == .openAIRealtime
+        case let .webSearchEnabled(enabled):
+            profile.webSearchEnabled = enabled
         case let .speakerModePreference(preference):
             profile.speakerModePreference = preference
         }
@@ -1825,6 +1860,9 @@ final class SettingsWindowController: NSWindowController {
         }) {
             speakerModePopup.selectItem(at: index)
         }
+        webSearchRow?.isHidden = provider != .openAIRealtime
+        webSearchCheckbox.state =
+            profile.webSearchEnabled ? .on : .off
 
         instructionsTextView.string = profile.instructions
         instructionsTextView.isEditable = provider != .chatGPTWeb
@@ -1863,6 +1901,8 @@ final class SettingsWindowController: NSWindowController {
         openClawConnectionTestStatusLabel.stringValue = ""
         useDiscoveredOpenClawTokenButton.isHidden = true
         instructionsTextView.string = ""
+        webSearchRow?.isHidden = true
+        webSearchCheckbox.state = .off
         isAdvancedMCPExpanded = false
         for view in mcpSectionViews + openClawRuntimeSectionViews {
             view.isHidden = true
@@ -1879,6 +1919,7 @@ final class SettingsWindowController: NSWindowController {
             voiceComboBox,
             endpointField,
             speakerModePopup,
+            webSearchCheckbox,
             apiKeyField,
             removeAPIKeyButton,
             mcpServerPopup,
@@ -2516,6 +2557,12 @@ final class SettingsWindowController: NSWindowController {
             return
         }
         _ = apply(.speakerModePreference(preference))
+    }
+
+    @objc private func webSearchChanged() {
+        _ = apply(
+            .webSearchEnabled(webSearchCheckbox.state == .on)
+        )
     }
 
     @objc private func toggleAdvancedMCP() {

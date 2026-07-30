@@ -140,13 +140,21 @@ the profile's endpoint field; an API key is optional and, when set, is stored
 in the Keychain like any other provider key. This is the intended path for
 self-hosted assistants.
 
-### Tools via MCP
+### Built-in web search
+
+OpenAI Realtime API channels include web search by default. VoiceKey declares
+a `search_web` function to the realtime model, then uses that channel's own
+OpenAI API key to run the search through the OpenAI Responses API. There is no
+second account, service, or credential to configure. Search can be turned off
+per channel in Settings.
+
+### Advanced tools via MCP
 
 OpenAI Realtime API and Custom Realtime Endpoint profiles can declare remote
-MCP servers in Settings. The realtime channel owns and executes those tools;
-VoiceKey only sends the server declarations and reports their lifecycle in the
-session log. VoiceKey never executes a tool locally. Optional MCP authorization
-tokens are stored in the macOS Keychain, not in the saved profile.
+MCP servers under Advanced in Settings. OpenAI executes those servers as part
+of the realtime channel; VoiceKey sends the server declarations and reports
+their lifecycle in the session log. Optional MCP authorization tokens are
+stored in the macOS Keychain, not in the saved profile.
 
 For example, an “Assistant” profile could declare a server labeled `calendar`
 at `https://mcp.example.com` and limit it to `search_events, create_event`.
