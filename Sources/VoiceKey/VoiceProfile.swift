@@ -127,6 +127,66 @@ enum VoiceProfileStore {
     private static let legacyVoiceKey = "VoiceProvider.voice"
     private static let legacyInstructionsKey = "VoiceProvider.instructions"
 
+    /// A tombstone, not a default. This exact text shipped as
+    /// `VoiceSessionConfiguration.defaultInstructions` from the first realtime
+    /// build through v0.2.0 and was emptied in commit 10b80cb (v0.2.1). It
+    /// exists nowhere else in the tree, so the one-shot clear below has to
+    /// re-declare it to recognise the residue those builds left in profiles.
+    static let retiredDefaultInstructions = "You are VoiceKey, a concise and helpful voice assistant. Speak naturally and keep answers brief unless the user asks for detail."
+
+    private static let retiredDefaultInstructionsClearedKey =
+        "VoiceProfiles.retiredDefaultInstructionsCleared.v1"
+
+    /// Clears the retired default out of stored profiles, once per install.
+    ///
+    /// Call this before anything reads profiles. It is deliberately a one-shot
+    /// gated on its own marker key: a stored value is indistinguishable from a
+    /// user who typed that exact text, so the only safe contract is "clear on
+    /// the first launch of the build that carries this, never again". Matching
+    /// is full-string equality on the trimmed value — someone who kept the old
+    /// wording and appended their own lines has proven intent and is left
+    /// alone.
+    static func clearRetiredDefaultInstructions(
+        defaults: UserDefaults = .standard
+    ) {
+        guard defaults.bool(forKey: retiredDefaultInstructionsClearedKey) == false
+        else { return }
+
+        // No blob means a fresh install. Writing one here would flip
+        // `isFreshInstall` and swallow the first-run setup assistant.
+        if let data = defaults.data(forKey: profilesKey) {
+            guard var profiles = try? JSONDecoder().decode(
+                [VoiceProfile].self,
+                from: data
+            ) else {
+                // Undecodable today may be decodable after an upgrade; leave
+                // the marker unset so a later launch retries.
+                return
+            }
+
+            var changed = false
+            for index in profiles.indices
+            where profiles[index].instructions
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                == retiredDefaultInstructions {
+                profiles[index].instructions = ""
+                changed = true
+            }
+
+            if changed {
+                // `instructions` is a required decode key, so a half-written
+                // blob would reset every channel, hotkey and MCP server.
+                // Encode first; write only once that succeeded.
+                guard let encoded = try? JSONEncoder().encode(profiles) else {
+                    return
+                }
+                defaults.set(encoded, forKey: profilesKey)
+            }
+        }
+
+        defaults.set(true, forKey: retiredDefaultInstructionsClearedKey)
+    }
+
     static func load(defaults: UserDefaults = .standard) -> [VoiceProfile] {
         if let data = defaults.data(forKey: profilesKey),
            let profiles = try? JSONDecoder().decode([VoiceProfile].self, from: data) {
@@ -188,8 +248,15 @@ enum VoiceProfileStore {
             .flatMap { $0.isEmpty ? nil : $0 } ?? provider.defaultModel
         let voice = defaults.string(forKey: legacyVoiceKey)
             .flatMap { $0.isEmpty ? nil : $0 } ?? provider.defaultVoice
-        let instructions = defaults.string(forKey: legacyInstructionsKey)
-            .flatMap { $0.isEmpty ? nil : $0 } ?? VoiceSessionConfiguration.defaultInstructions
+        // Pre-0.2.0 wrote the whole configuration to these keys, the then-
+        // default instructions included, so a legacy value equal to the
+        // retired text is the app's own residue rather than user intent.
+        let legacyInstructions = defaults.string(forKey: legacyInstructionsKey) ?? ""
+        let instructions =
+            legacyInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+                == retiredDefaultInstructions
+            ? VoiceSessionConfiguration.defaultInstructions
+            : legacyInstructions
 
         return VoiceProfile(
             name: provider.displayName,

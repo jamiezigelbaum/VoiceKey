@@ -500,7 +500,7 @@ final class SettingsAutoApplyTests: XCTestCase {
 
         let advanced = try XCTUnwrap(
             views.compactMap { $0 as? NSButton }
-                .first(where: { $0.title == "Advanced" })
+                .first(where: { $0.title == "Advanced" && $0.bezelStyle == .disclosure })
         )
         advanced.state = .on
         sendAction(for: advanced)
@@ -508,6 +508,156 @@ final class SettingsAutoApplyTests: XCTestCase {
             controller.advancedDisclosureSnapshot
                 .isExpanded
         )
+    }
+
+    // MARK: - Instructions live under Advanced
+
+    func testInstructionsEditorIsCollapsedBehindTheAdvancedDisclosure() throws {
+        let controller = SettingsWindowController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+        let views = descendantViews(in: controller.window?.contentView)
+        let editor = try XCTUnwrap(instructionsEditor(in: views))
+
+        // Instructions are power-user configuration now: nothing on the
+        // everyday form, and no bold "Instructions" section header.
+        XCTAssertTrue(editor.isHiddenOrHasHiddenAncestor)
+        XCTAssertFalse(sectionHeaderTitles(in: views).contains("Instructions"))
+
+        let advanced = try XCTUnwrap(
+            views.compactMap { $0 as? NSButton }
+                .first(where: { $0.title == "Advanced" && $0.bezelStyle == .disclosure })
+        )
+        advanced.state = .on
+        sendAction(for: advanced)
+        XCTAssertFalse(editor.isHiddenOrHasHiddenAncestor)
+
+        advanced.state = .off
+        sendAction(for: advanced)
+        XCTAssertTrue(editor.isHiddenOrHasHiddenAncestor)
+    }
+
+    func testClickingTheWordAdvancedTogglesTheDisclosure() throws {
+        // The word next to the triangle must be a real button. The first
+        // version was a label with a click recognizer on the row, and real
+        // clicks on the word never reached it — every test simulated only
+        // the triangle path, so the suite stayed green. Found by driving
+        // the real window, 2026-07-31.
+        let controller = SettingsWindowController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+        let views = descendantViews(in: controller.window?.contentView)
+        let editor = try XCTUnwrap(instructionsEditor(in: views))
+        let word = try XCTUnwrap(
+            views.compactMap { $0 as? NSButton }
+                .first(where: {
+                    $0.title == "Advanced"
+                        && $0.bezelStyle != .disclosure
+                })
+        )
+
+        sendAction(for: word)
+        XCTAssertTrue(
+            controller.advancedDisclosureSnapshot.isExpanded
+        )
+        XCTAssertFalse(editor.isHiddenOrHasHiddenAncestor)
+
+        sendAction(for: word)
+        XCTAssertFalse(
+            controller.advancedDisclosureSnapshot.isExpanded
+        )
+        XCTAssertTrue(editor.isHiddenOrHasHiddenAncestor)
+
+        // The two click targets share one state: after a toggle via the
+        // word, the triangle's own click must still land on the state it
+        // expects.
+        let triangle = try XCTUnwrap(
+            views.compactMap { $0 as? NSButton }
+                .first(where: { $0.title == "Advanced" && $0.bezelStyle == .disclosure })
+        )
+        triangle.state = .on
+        sendAction(for: triangle)
+        XCTAssertTrue(
+            controller.advancedDisclosureSnapshot.isExpanded
+        )
+    }
+
+    func testAdvancedDisclosureStaysReachableForProvidersWithoutMCP() throws {
+        // The disclosure used to be MCP-only. Instructions apply to more
+        // channels than MCP does, so hiding it would strand the editor.
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.providerID = .openClaw
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+
+        XCTAssertEqual(
+            controller.advancedDisclosureSnapshot,
+            AdvancedDisclosureSnapshot(isVisible: true, isExpanded: false)
+        )
+
+        let views = descendantViews(in: controller.window?.contentView)
+        let advanced = try XCTUnwrap(
+            views.compactMap { $0 as? NSButton }
+                .first(where: { $0.title == "Advanced" && $0.bezelStyle == .disclosure })
+        )
+        advanced.state = .on
+        sendAction(for: advanced)
+        let editor = try XCTUnwrap(instructionsEditor(in: views))
+        XCTAssertFalse(editor.isHiddenOrHasHiddenAncestor)
+    }
+
+    func testInstructionsFieldNeverShowsOrStoresTheHiddenPreamble() throws {
+        let defaults = makeTestDefaults()
+        var profile = VoiceProfile.defaultOpenAI()
+        profile.webSearchEnabled = true
+        let controller = SettingsWindowController(
+            profiles: [profile],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { VoiceProfileStore.save($0, defaults: defaults) }
+        )
+        let views = descendantViews(in: controller.window?.contentView)
+        let editor = try XCTUnwrap(instructionsEditor(in: views))
+
+        XCTAssertEqual(editor.string, "")
+        // The preamble is app-owned: it must not leak into any visible string.
+        let visible =
+            views.compactMap { ($0 as? NSTextField)?.stringValue }
+            + views.compactMap { ($0 as? NSTextView)?.string }
+            + views.compactMap { ($0 as? NSButton)?.title }
+        XCTAssertFalse(visible.contains(where: { $0.contains("search_web") }))
+
+        editor.string = "Always answer in French."
+        controller.textDidEndEditing(
+            Notification(name: NSText.didEndEditingNotification, object: editor)
+        )
+        controller.windowWillClose(
+            Notification(name: NSWindow.willCloseNotification)
+        )
+
+        // Only what the owner typed is stored — the preamble is composed on
+        // the wire, so rewording it never needs another data migration.
+        XCTAssertEqual(
+            VoiceProfileStore.load(defaults: defaults).first?.instructions,
+            "Always answer in French."
+        )
+    }
+
+    private func instructionsEditor(in views: [NSView]) -> NSTextView? {
+        views.compactMap { $0 as? NSTextView }
+            .first(where: { $0.isRichText == false })
+    }
+
+    private func sectionHeaderTitles(in views: [NSView]) -> [String] {
+        views.compactMap { $0 as? NSTextField }
+            .filter { $0.font == NSFont.systemFont(ofSize: 13, weight: .bold) }
+            .map(\.stringValue)
     }
 
     func testPermissionsSnapshotIsDerivedLive() {
@@ -2590,4 +2740,55 @@ private final class SettingsOpenClawConnectionTester:
 private final class SettingsOpenClawTestCancellation:
     OpenClawConnectionTestCancellation {
     func cancel() {}
+}
+
+/// The disclosure is now the ONLY route to the instructions editor, and
+/// `.disclosure` renders a bare ~13pt triangle without the button's title. If
+/// the word "Advanced" beside it is inert, the owner clicks it, nothing
+/// happens, and the field he was told was "moved to Advanced" looks deleted.
+///
+/// The first shipped version was a label plus a click recognizer on the row,
+/// and this test only asserted the recognizer existed — it did, and real
+/// clicks still never reached it. The word is a real button now, and the
+/// behavior itself is covered by
+/// `testClickingTheWordAdvancedTogglesTheDisclosure`.
+final class AdvancedDisclosureHitTargetTests: XCTestCase {
+    func testTheWordBesideTheTriangleIsAWiredButton() throws {
+        let controller = SettingsWindowController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+        defer { controller.close() }
+
+        func walk(_ view: NSView?) -> [NSView] {
+            guard let view else { return [] }
+            return view.subviews + view.subviews.flatMap { walk($0) }
+        }
+        let rows: [NSStackView] = walk(controller.window?.contentView)
+        .compactMap { $0 as? NSStackView }
+        .filter { stack in
+            stack.views.contains { view in
+                (view as? NSButton)?.bezelStyle == .disclosure
+            }
+        }
+        let row = try XCTUnwrap(rows.first, "no row carrying the disclosure triangle")
+
+        let word = try XCTUnwrap(
+            row.views.compactMap { $0 as? NSButton }
+                .first(where: {
+                    $0.bezelStyle != .disclosure
+                        && $0.title == "Advanced"
+                }),
+            "the word beside the triangle must be a button, not a label"
+        )
+        XCTAssertNotNil(
+            word.action,
+            "clicking the word Advanced must toggle the disclosure"
+        )
+        XCTAssertNotNil(
+            word.target,
+            "clicking the word Advanced must toggle the disclosure"
+        )
+    }
 }
