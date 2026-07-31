@@ -500,7 +500,7 @@ final class SettingsAutoApplyTests: XCTestCase {
 
         let advanced = try XCTUnwrap(
             views.compactMap { $0 as? NSButton }
-                .first(where: { $0.title == "Advanced" })
+                .first(where: { $0.title == "Advanced" && $0.bezelStyle == .disclosure })
         )
         advanced.state = .on
         sendAction(for: advanced)
@@ -528,7 +528,7 @@ final class SettingsAutoApplyTests: XCTestCase {
 
         let advanced = try XCTUnwrap(
             views.compactMap { $0 as? NSButton }
-                .first(where: { $0.title == "Advanced" })
+                .first(where: { $0.title == "Advanced" && $0.bezelStyle == .disclosure })
         )
         advanced.state = .on
         sendAction(for: advanced)
@@ -537,6 +537,53 @@ final class SettingsAutoApplyTests: XCTestCase {
         advanced.state = .off
         sendAction(for: advanced)
         XCTAssertTrue(editor.isHiddenOrHasHiddenAncestor)
+    }
+
+    func testClickingTheWordAdvancedTogglesTheDisclosure() throws {
+        // The word next to the triangle must be a real button. The first
+        // version was a label with a click recognizer on the row, and real
+        // clicks on the word never reached it — every test simulated only
+        // the triangle path, so the suite stayed green. Found by driving
+        // the real window, 2026-07-31.
+        let controller = SettingsWindowController(
+            profiles: [VoiceProfile.defaultOpenAI()],
+            credentialStore: InMemoryCredentialStore(),
+            saveProfiles: { _ in }
+        )
+        let views = descendantViews(in: controller.window?.contentView)
+        let editor = try XCTUnwrap(instructionsEditor(in: views))
+        let word = try XCTUnwrap(
+            views.compactMap { $0 as? NSButton }
+                .first(where: {
+                    $0.title == "Advanced"
+                        && $0.bezelStyle != .disclosure
+                })
+        )
+
+        sendAction(for: word)
+        XCTAssertTrue(
+            controller.advancedDisclosureSnapshot.isExpanded
+        )
+        XCTAssertFalse(editor.isHiddenOrHasHiddenAncestor)
+
+        sendAction(for: word)
+        XCTAssertFalse(
+            controller.advancedDisclosureSnapshot.isExpanded
+        )
+        XCTAssertTrue(editor.isHiddenOrHasHiddenAncestor)
+
+        // The two click targets share one state: after a toggle via the
+        // word, the triangle's own click must still land on the state it
+        // expects.
+        let triangle = try XCTUnwrap(
+            views.compactMap { $0 as? NSButton }
+                .first(where: { $0.title == "Advanced" && $0.bezelStyle == .disclosure })
+        )
+        triangle.state = .on
+        sendAction(for: triangle)
+        XCTAssertTrue(
+            controller.advancedDisclosureSnapshot.isExpanded
+        )
     }
 
     func testAdvancedDisclosureStaysReachableForProvidersWithoutMCP() throws {
@@ -558,7 +605,7 @@ final class SettingsAutoApplyTests: XCTestCase {
         let views = descendantViews(in: controller.window?.contentView)
         let advanced = try XCTUnwrap(
             views.compactMap { $0 as? NSButton }
-                .first(where: { $0.title == "Advanced" })
+                .first(where: { $0.title == "Advanced" && $0.bezelStyle == .disclosure })
         )
         advanced.state = .on
         sendAction(for: advanced)
@@ -2699,8 +2746,14 @@ private final class SettingsOpenClawTestCancellation:
 /// `.disclosure` renders a bare ~13pt triangle without the button's title. If
 /// the word "Advanced" beside it is inert, the owner clicks it, nothing
 /// happens, and the field he was told was "moved to Advanced" looks deleted.
+///
+/// The first shipped version was a label plus a click recognizer on the row,
+/// and this test only asserted the recognizer existed — it did, and real
+/// clicks still never reached it. The word is a real button now, and the
+/// behavior itself is covered by
+/// `testClickingTheWordAdvancedTogglesTheDisclosure`.
 final class AdvancedDisclosureHitTargetTests: XCTestCase {
-    func testTheWholeDisclosureRowTogglesNotJustTheTriangle() throws {
+    func testTheWordBesideTheTriangleIsAWiredButton() throws {
         let controller = SettingsWindowController(
             profiles: [VoiceProfile.defaultOpenAI()],
             credentialStore: InMemoryCredentialStore(),
@@ -2716,18 +2769,25 @@ final class AdvancedDisclosureHitTargetTests: XCTestCase {
         .compactMap { $0 as? NSStackView }
         .filter { stack in
             stack.views.contains { view in
-                (view as? NSTextField)?.stringValue == "Advanced"
+                (view as? NSButton)?.bezelStyle == .disclosure
             }
         }
-        let row = try XCTUnwrap(rows.first, "no row carrying the Advanced label")
+        let row = try XCTUnwrap(rows.first, "no row carrying the disclosure triangle")
 
-        let recognizers = row.gestureRecognizers
-        XCTAssertFalse(
-            recognizers.isEmpty,
-            "the Advanced row has no click target beyond the bare triangle"
+        let word = try XCTUnwrap(
+            row.views.compactMap { $0 as? NSButton }
+                .first(where: {
+                    $0.bezelStyle != .disclosure
+                        && $0.title == "Advanced"
+                }),
+            "the word beside the triangle must be a button, not a label"
         )
-        XCTAssertTrue(
-            recognizers.contains { $0 is NSClickGestureRecognizer },
+        XCTAssertNotNil(
+            word.action,
+            "clicking the word Advanced must toggle the disclosure"
+        )
+        XCTAssertNotNil(
+            word.target,
             "clicking the word Advanced must toggle the disclosure"
         )
     }

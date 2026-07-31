@@ -655,10 +655,16 @@ final class SettingsWindowController: NSWindowController {
         action: nil
     )
     /// `.disclosure` draws a bare triangle and never renders the button's own
-    /// title, so the word has to be a sibling label — otherwise the only way
-    /// to reach the instructions editor is an unlabelled arrow.
-    private let advancedDisclosureLabel =
-        NSTextField(labelWithString: "Advanced")
+    /// title, so the word has to be a clickable sibling — otherwise the only
+    /// way to reach the instructions editor is an unlabelled ~13pt arrow. A
+    /// real borderless button, not a label with a click recognizer: that
+    /// version shipped broken, because real clicks on the word never reached
+    /// a recognizer attached to the row.
+    private let advancedDisclosureTitleButton = NSButton(
+        title: "Advanced",
+        target: nil,
+        action: nil
+    )
     private var advancedDisclosureRow: NSStackView?
     private let advancedContainer = NSStackView()
     private var isAdvancedExpanded = false
@@ -1088,20 +1094,12 @@ final class SettingsWindowController: NSWindowController {
         }
 
         let disclosureRow = NSStackView(
-            views: [advancedDisclosureButton, advancedDisclosureLabel]
+            views: [advancedDisclosureButton, advancedDisclosureTitleButton]
         )
         disclosureRow.orientation = .horizontal
         disclosureRow.alignment = .centerY
         disclosureRow.spacing = 4
         disclosureRow.translatesAutoresizingMaskIntoConstraints = false
-        // The triangle alone is a ~13pt target, and it is now the only route to
-        // the instructions editor. Clicking the word "Advanced" must work too,
-        // or the field looks like it simply vanished.
-        let disclosureClick = NSClickGestureRecognizer(
-            target: self,
-            action: #selector(toggleAdvanced)
-        )
-        disclosureRow.addGestureRecognizer(disclosureClick)
         advancedDisclosureRow = disclosureRow
         advancedSectionViews = [
             disclosureRow,
@@ -1446,9 +1444,20 @@ final class SettingsWindowController: NSWindowController {
         advancedDisclosureButton.target = self
         advancedDisclosureButton.action =
             #selector(toggleAdvanced)
-        advancedDisclosureLabel.font = NSFont.systemFont(ofSize: 13)
-        advancedDisclosureLabel.textColor = .secondaryLabelColor
-        advancedDisclosureLabel.translatesAutoresizingMaskIntoConstraints = false
+        advancedDisclosureTitleButton.isBordered = false
+        // Styled to read as the disclosure's caption, same as the label it
+        // replaces.
+        advancedDisclosureTitleButton.attributedTitle = NSAttributedString(
+            string: "Advanced",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 13),
+                .foregroundColor: NSColor.secondaryLabelColor
+            ]
+        )
+        advancedDisclosureTitleButton.target = self
+        advancedDisclosureTitleButton.action =
+            #selector(toggleAdvancedFromTitle)
+        advancedDisclosureTitleButton.translatesAutoresizingMaskIntoConstraints = false
 
         mcpServerPopup.translatesAutoresizingMaskIntoConstraints = false
         mcpServerPopup.setContentHuggingPriority(
@@ -2628,6 +2637,15 @@ final class SettingsWindowController: NSWindowController {
         syncAdvancedControls(
             for: workingProfiles[index]
         )
+    }
+
+    /// The title button has to move the triangle's state itself:
+    /// `toggleAdvanced` derives the new expansion from
+    /// `advancedDisclosureButton.state`, which only a click on the triangle
+    /// changes.
+    @objc private func toggleAdvancedFromTitle() {
+        advancedDisclosureButton.setNextState()
+        toggleAdvanced()
     }
 
     func handleRecordedHotKey(
