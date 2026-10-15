@@ -45,3 +45,23 @@ Diagnose with `probe-openclaw-connect.js` before running it.
 Fresh-install testing is not optional for release candidates: the v0.2.2
 microphone-entitlement bug shipped precisely because nothing had ever been
 launched from a clean slate.
+
+## Cleaning up after a GUI run
+
+A stray second VoiceKey is not just litter: both instances register the same
+global hotkeys, one wins the Carbon registration and the other silently falls
+back to an event monitor, so which app answers a keypress becomes a coin flip.
+A leftover debug build (injected turns, altered timeouts) also makes the owner's
+observations meaningless. This happened twice in one day after worktree builds
+were killed by a path pattern that missed, then the worktree was removed.
+
+- Launch the build as a process you own and keep its PID
+  (`.build/VoiceKey.app/Contents/MacOS/VoiceKey & vk_pid=$!`), then end it with
+  `kill "$vk_pid"`. For an `open`-launched build, read the PID from
+  `pgrep -lf VoiceKey.app/Contents/MacOS/VoiceKey` and kill only the entry whose
+  path is yours.
+- Do not `pkill` by binary name: it also kills the owner's installed copy.
+- Before finishing, the same `pgrep -lf` must list nothing, or exactly one
+  entry whose path is `/Applications/VoiceKey.app`. Relaunch that installed app
+  so the owner is left on the build they use.
+
