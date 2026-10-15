@@ -35,8 +35,9 @@ Planned work lives in GitHub issues and [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 - A direct owner request authorizes its scoped implementation and routine
   delivery; planning and review remain read-only.
-- `swift build && swift test` green locally before any push. Never push red.
-  After pushing, check CI; never leave `main` red.
+- Run focused checks locally; the full suite (`swift build && swift test`)
+  and required CI must be green before merge. After merging, check CI; never
+  leave `main` red.
 - Run and inspect user-visible changes in the real application.
 - Keep secrets out of Git, on every branch. No AI co-author trailers.
 - Every incident becomes a gate (a check, a test, a subtraction), not a prose
