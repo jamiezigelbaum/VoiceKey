@@ -40,8 +40,6 @@ Planned work lives in GitHub issues and [`docs/ROADMAP.md`](docs/ROADMAP.md).
   leave `main` red.
 - Run and inspect user-visible changes in the real application.
 - Keep secrets out of Git, on every branch. No AI co-author trailers.
-- Every incident becomes a gate (a check, a test, a subtraction), not a prose
-  warning.
 
 ## Worktree discipline
 
