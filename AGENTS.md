@@ -33,22 +33,21 @@ Planned work lives in GitHub issues and [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Working standards
 
-- A direct owner request authorizes its scoped implementation and routine
-  delivery; planning and review remain read-only.
-- Run focused checks locally; the full suite (`swift build && swift test`)
-  and required CI must be green before merge. After merging, check CI; never
-  leave `main` red.
-- Run and inspect user-visible changes in the real application.
-- Keep secrets out of Git, on every branch. No AI co-author trailers.
+Jamie's shared defaults (agent-config `codex-home/AGENTS.md`) apply in every
+harness. This file adds only what is specific to this repository.
+
+- After merging, check CI; never leave `main` red.
 
 ## Worktree discipline
 
-- One session owns each working checkout. Keep the base clone parked on
-  `main` and do branch work in a session-owned worktree:
-  `git worktree add ~/Code/VoiceKey-wt/<topic> -b <branch> main`. Remove it
-  when the branch merges.
-- If the base clone is dirty or on another branch, another session owns that
-  state. Preserve it and take your own worktree.
+- One session owns each working checkout. Keep the base clone on `main` and
+  perform branch work in a dedicated session-owned worktree.
+- Inspect existing worktrees before overlapping work. Follow the repository's
+  branch convention and start from the appropriate current base revision.
+- If the base clone is dirty or on another branch, preserve it and use an
+  isolated worktree. Do not reset, stash, or switch someone else's working copy.
+- Clean up owned worktrees after integration when their work is preserved and
+  removal is authorized; never remove unrelated work.
 
 ## Commands
 
